@@ -22,15 +22,18 @@ add_executable(tests
     core/page_heap.cpp
     core/read_traps.cpp
     core/nx2_readback_cache.cpp
+    core/nx2_cpu_profile.cpp
     core/nx2_core_readback_capacity.cpp
     core/nso.cpp
     core/nrr.cpp
     core/ncz_decompressor.cpp
+    core/aes_xts_storage.cpp
     core/internal_network/network.cpp
     video_core/memory_tracker.cpp
     video_core/memory_budget.cpp
     video_core/astc_recompression_override.cpp
     video_core/nx2_video_configuration.cpp
+    video_core/nx2_video_av1.cpp
     video_core/nx2_decoder_image.cpp
     video_core/nx2_present.cpp
     video_core/nx2_gpu_mappings.cpp
@@ -43,6 +46,17 @@ add_executable(tests
     video_core/ampere_f2i.cpp
     video_core/compute_storage_buffers.cpp
     video_core/ampere_kirby.cpp
+    video_core/ampere_hmma.cpp
+    video_core/ampere_hmma_cache.cpp
+    video_core/ampere_hmma_classification.cpp
+    video_core/ampere_descriptor_compare.cpp
+    video_core/ampere_txq_provenance.cpp
+    video_core/ampere_fe_ports.cpp
+    video_core/ampere_fe39_compute.cpp
+    video_core/ampere_fe39_surface.cpp
+    video_core/native_shader_capture.cpp
+    video_core/ampere_hmma_frontend.cpp
+    video_core/ampere_hmma_fixture.h
     video_core/ampere_geometry.cpp
     video_core/ampere_geometry_lowering.cpp
     video_core/ampere_geometry_exit.cpp

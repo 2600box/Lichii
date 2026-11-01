@@ -277,6 +277,7 @@ struct Info {
     bool uses_local_memory{};
 
     bool uses_fp16{};
+    bool uses_hmma{};
     bool uses_fp64{};
     bool uses_fp16_denorms_flush{};
     bool uses_fp16_denorms_preserve{};

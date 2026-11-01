@@ -75,6 +75,7 @@ bool Inst::MayHaveSideEffects() const noexcept {
     case Opcode::Join:
     case Opcode::DemoteToHelperInvocation:
     case Opcode::Barrier:
+    case Opcode::Hmma16816F16:
     case Opcode::WorkgroupMemoryBarrier:
     case Opcode::DeviceMemoryBarrier:
     case Opcode::EmitVertex:

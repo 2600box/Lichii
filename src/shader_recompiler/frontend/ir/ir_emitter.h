@@ -40,6 +40,7 @@ public:
     void PhiMove(IR::Inst& phi, const Value& value);
 
     void Prologue();
+    [[nodiscard]] Value Hmma16816F16(const Value& a, const Value& b, const Value& c);
     void Epilogue();
     void DemoteToHelperInvocation();
     void EmitVertex(const U32& stream);

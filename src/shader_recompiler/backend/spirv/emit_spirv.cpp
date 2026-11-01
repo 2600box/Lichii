@@ -564,7 +564,15 @@ std::vector<u32> EmitSPIRV(const Profile& profile, const RuntimeInfo& runtime_in
     PatchPhiNodes(program, ctx);
     std::vector<u32> code{ctx.Assemble()};
     RewriteOpcodes(code, ctx.opcode_rewrites);
+    ctx.PatchHmma(code);
     return code;
+}
+
+Id EmitHmma16816F16(EmitContext& ctx, Id a, Id b, Id c) {
+    if (!Sirit::ValidId(ctx.hmma_function)) {
+        throw HmmaRejected("HMMA helper was not admitted");
+    }
+    return ctx.OpFunctionCall(ctx.U32[2], ctx.hmma_function, a, b, c);
 }
 
 Id EmitPhi(EmitContext& ctx, IR::Inst* inst) {

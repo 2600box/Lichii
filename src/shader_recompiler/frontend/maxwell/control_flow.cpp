@@ -279,7 +279,11 @@ bool CFG::InspectVisitedBlocks(FunctionId function_id, const Label& label) {
 }
 
 CFG::AnalysisState CFG::AnalyzeInst(Block* block, FunctionId function_id, Location pc) {
-    const Instruction inst{env.ReadInstruction(pc.Offset())};
+    const auto fetched = env.FetchInstruction(pc.Offset());
+    if (std::holds_alternative<Ampere::Hmma16816F16>(fetched)) {
+        return AnalysisState::Continue;
+    }
+    const Instruction inst{std::get<MaxwellInstructionWord>(fetched).value};
     const Opcode opcode{Decode(inst.raw)};
     switch (opcode) {
     case Opcode::BRA:

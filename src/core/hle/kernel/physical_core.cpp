@@ -16,6 +16,7 @@
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/physical_core.h"
 #include "core/hle/kernel/svc.h"
+#include "core/nx2_cpu_profile.h"
 
 namespace Kernel {
 
@@ -102,6 +103,7 @@ void PhysicalCore::RunThread(KernelCore& kernel, Kernel::KThread* thread) {
                     thread->SetStepState(StepState::StepPerformed);
                 }
             } else {
+                const Core::Nx2CpuProfile::Scope profile{Core::Nx2CpuProfile::State::Guest};
                 hr = interface->RunThread(thread);
             }
 
@@ -225,6 +227,7 @@ void PhysicalCore::LogBacktrace(KernelCore& kernel) {
 }
 
 void PhysicalCore::Idle() {
+    const Core::Nx2CpuProfile::Scope profile{Core::Nx2CpuProfile::State::Idle};
     // Guest job systems hand work between cores many times per frame; blocking at once adds the
     // host's thread wake-up latency to every handoff. EDEN_NX2_IDLE_SPIN_US=<n>: poll for that
     // many microseconds before blocking.

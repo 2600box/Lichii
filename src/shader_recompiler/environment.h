@@ -7,6 +7,7 @@
 #pragma once
 
 #include <array>
+#include <variant>
 #include "common/container/unordered_map.h"
 
 #include "common/common_types.h"
@@ -14,12 +15,19 @@
 #include "shader_recompiler/shader_info.h"
 #include "shader_recompiler/stage.h"
 #include "shader_recompiler/frontend/ir/value.h"
+#include "shader_recompiler/frontend/ampere/hmma.h"
 
 namespace Shader::IR {
 class Inst;
 }
 
 namespace Shader {
+
+struct MaxwellInstructionWord {
+    u64 value;
+};
+
+using FetchedInstruction = std::variant<MaxwellInstructionWord, Ampere::Hmma16816F16>;
 
 struct CbufWordKey {
     u32 index;
@@ -73,6 +81,12 @@ public:
     virtual ~Environment() = default;
 
     [[nodiscard]] virtual u64 ReadInstruction(u32 address) = 0;
+
+    [[nodiscard]] virtual FetchedInstruction FetchInstruction(u32 address) {
+        return MaxwellInstructionWord{ReadInstruction(address)};
+    }
+
+    [[nodiscard]] virtual bool UsesHmma() const { return false; }
 
     [[nodiscard]] virtual u32 TranslateProgramAddress(u32 address) const { return address; }
 

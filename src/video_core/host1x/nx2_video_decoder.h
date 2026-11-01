@@ -9,7 +9,10 @@
 #include <vector>
 
 #include "common/common_types.h"
-#include "video_core/host1x/nvdec_common.h"
+
+extern "C" {
+#include <libavcodec/codec_id.h>
+}
 
 namespace FFmpeg {
 class Frame;
@@ -18,7 +21,7 @@ class Frame;
 namespace Tegra::Host1x {
 
 struct Nx2VideoConfiguration {
-    NvdecCommon::VideoCodec codec;
+    AVCodecID codec;
     std::span<const u8> extradata;
 };
 

@@ -8,6 +8,8 @@
 #include <set>
 #include <string_view>
 
+#include <fmt/ranges.h>
+
 #include "common/logging.h"
 #include "common/settings.h"
 #include "video_core/host1x/ffmpeg.h"
@@ -30,15 +32,18 @@ namespace Tegra::Host1x {
 
 namespace {
 
-std::optional<NvdecCommon::VideoCodec> CodecFromMime(std::string_view mime) {
+std::optional<AVCodecID> CodecFromMime(std::string_view mime) {
+    if (mime == "video/av1") {
+        return AV_CODEC_ID_AV1;
+    }
     if (mime.find("vp9") != std::string_view::npos) {
-        return NvdecCommon::VideoCodec::VP9;
+        return AV_CODEC_ID_VP9;
     }
     if (mime.find("vp8") != std::string_view::npos) {
-        return NvdecCommon::VideoCodec::VP8;
+        return AV_CODEC_ID_VP8;
     }
     if (mime.find("avc") != std::string_view::npos || mime.find("264") != std::string_view::npos) {
-        return NvdecCommon::VideoCodec::H264;
+        return AV_CODEC_ID_H264;
     }
     return std::nullopt;
 }
@@ -91,7 +96,7 @@ std::optional<Nx2VideoConfiguration> ParseNx2VideoConfiguration(std::span<const 
     if (!has_sps || !has_pps) {
         return std::nullopt;
     }
-    return Nx2VideoConfiguration{NvdecCommon::VideoCodec::H264, configuration};
+    return Nx2VideoConfiguration{AV_CODEC_ID_H264, configuration};
 }
 
 struct Nx2VideoDecoder::Impl {
@@ -138,23 +143,27 @@ Nx2VideoDecoder::Nx2VideoDecoder(std::span<const u8> configuration)
     impl->configuration.assign(configuration.begin(), configuration.end());
     const auto parsed = ParseNx2VideoConfiguration(impl->configuration);
     if (!parsed) {
-        LOG_ERROR(HW_GPU, "nx2 video: unsupported {}-byte codec configuration", configuration.size());
+        const auto preview = configuration.first(std::min(configuration.size(), size_t{32}));
+        LOG_ERROR(HW_GPU,
+                  "nx2 video: unsupported {}-byte codec configuration (first {} bytes: {:02X})",
+                  configuration.size(), preview.size(), fmt::join(preview, " "));
         return;
     }
     impl->decoder.emplace(parsed->codec);
     if (impl->decoder->GetCodec() == nullptr) {
         LOG_ERROR(HW_GPU, "nx2 video: FFmpeg has no decoder for codec {}",
-                  static_cast<u64>(parsed->codec));
+                  avcodec_get_name(parsed->codec));
         return;
     }
     impl->context.emplace(*impl->decoder);
-    if (Settings::values.nvdec_emulation.GetValue() == Settings::NvdecEmulation::Gpu) {
+    if (parsed->codec != AV_CODEC_ID_AV1 &&
+        Settings::values.nvdec_emulation.GetValue() == Settings::NvdecEmulation::Gpu) {
         impl->hardware.emplace();
         impl->hardware->InitializeForDecoder(*impl->context, *impl->decoder);
     }
     impl->open = impl->context->OpenContext(*impl->decoder, parsed->extradata);
     LOG_INFO(HW_GPU, "nx2 video: decoder for codec {} ({} configuration bytes) {}",
-             static_cast<u64>(parsed->codec), parsed->extradata.size(),
+             avcodec_get_name(parsed->codec), parsed->extradata.size(),
              impl->open ? "open" : "failed to open");
 }
 

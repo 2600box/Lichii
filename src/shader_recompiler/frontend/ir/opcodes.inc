@@ -24,6 +24,7 @@ OPCODE(EndPrimitive,                                        Void,           U32,
 OPCODE(Barrier,                                             Void,                                                                                           )
 OPCODE(WorkgroupMemoryBarrier,                              Void,                                                                                           )
 OPCODE(DeviceMemoryBarrier,                                 Void,                                                                                           )
+OPCODE(Hmma16816F16,                                        U32x2,          U32x4,          U32x2,          U32x2,                                          )
 
 // Context getters/setters
 OPCODE(GetRegister,                                         U32,            Reg,                                                                            )

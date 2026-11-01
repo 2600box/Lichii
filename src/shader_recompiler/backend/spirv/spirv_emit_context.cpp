@@ -466,6 +466,19 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     : Sirit::Module(profile_.supported_spirv), profile{profile_}, runtime_info{runtime_info_},
       stage{program.stage}, texture_rescaling_index{bindings.texture_scaling_index},
       image_rescaling_index{bindings.image_scaling_index} {
+    if (program.info.uses_hmma) {
+        if (!profile.support_hmma16816_f16 || profile.supported_spirv < 0x00010300 ||
+            stage != Stage::Compute || !profile.SupportsSubgroupStage(stage) ||
+            program.workgroup_size != std::array<u32, 3>{128, 1, 1}) {
+            throw HmmaRejected(
+                "HMMA requires the qualified cooperative backend and 128x1x1 compute");
+        }
+        const u64 shared_bytes{((u64{program.shared_memory_size} + 3) & ~u64{3}) + 5120};
+        if (shared_bytes > profile.max_compute_shared_memory_size) {
+            throw HmmaRejected("HMMA needs {} shared bytes, device supports {}", shared_bytes,
+                               profile.max_compute_shared_memory_size);
+        }
+    }
     const bool is_unified{profile.unified_descriptor_binding};
     u32& uniform_binding{is_unified ? bindings.unified : bindings.uniform_buffer};
     u32& storage_binding{is_unified ? bindings.unified : bindings.storage_buffer};
@@ -478,6 +491,7 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineLocalMemory(program);
     DefineSharedMemory(program);
     DefineSharedMemoryFunctions(program);
+    DefineHmma(program);
     DefineConstantBuffers(program.info, uniform_binding);
     DefineConstantBufferIndirectFunctions(program.info);
     DefineStorageBuffers(program.info, storage_binding);
@@ -493,6 +507,149 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
 }
 
 EmitContext::~EmitContext() = default;
+
+void EmitContext::DefineHmma(const IR::Program& program) {
+    if (!program.info.uses_hmma) {
+        return;
+    }
+    AddExtension("SPV_KHR_cooperative_matrix");
+    AddExtension("SPV_KHR_vulkan_memory_model");
+    AddCapability(spv::Capability::CooperativeMatrixKHR);
+    AddCapability(spv::Capability::VulkanMemoryModel);
+    AddCapability(spv::Capability::VulkanMemoryModelDeviceScope);
+    AddCapability(spv::Capability::GroupNonUniform);
+    SetMemoryModel(spv::AddressingModel::Logical, spv::MemoryModel::Vulkan);
+
+    const Id scope{Const(static_cast<u32>(spv::Scope::Subgroup))};
+    const Id rows{Const(16u)};
+    const Id columns{Const(8u)};
+    const auto matrix_type = [&](const char* name, Id cols, spv::CooperativeMatrixUse use) {
+        const Id usage{Const(static_cast<u32>(use))};
+        const Id type{TypeOpaque(name)};
+        hmma_rewrites.emplace(type.value, std::vector<u32>{
+            (7u << 16) | static_cast<u32>(spv::Op::OpTypeCooperativeMatrixKHR),
+            type.value, F16[1].value, scope.value, rows.value, cols.value, usage.value});
+        return type;
+    };
+    const Id a_type{matrix_type("hmma_a", rows, spv::CooperativeMatrixUse::MatrixAKHR)};
+    const Id b_type{matrix_type("hmma_b", columns, spv::CooperativeMatrixUse::MatrixBKHR)};
+    const Id c_type{matrix_type("hmma_c", columns, spv::CooperativeMatrixUse::MatrixAccumulatorKHR)};
+    const Id array{TypeArray(F16[1], Const(2560u))};
+    const Id storage{AddGlobalVariable(TypePointer(spv::StorageClass::Workgroup, array),
+                                       spv::StorageClass::Workgroup)};
+    if (profile.supported_spirv >= 0x00010400) {
+        interfaces.push_back(storage);
+    }
+    const Id pointer{TypePointer(spv::StorageClass::Workgroup, F16[1])};
+    const Id lane_input{Sirit::ValidId(subgroup_local_invocation_id)
+                            ? subgroup_local_invocation_id
+                            : DefineInput(*this, U32[1], false,
+                                          spv::BuiltIn::SubgroupLocalInvocationId)};
+    const Id warp_input{DefineInput(*this, U32[1], false, spv::BuiltIn::SubgroupId)};
+    const Id function_type{TypeFunction(U32[2], U32[4], U32[2], U32[2])};
+    hmma_function = OpFunction(U32[2], spv::FunctionControlMask::DontInline, function_type);
+    const Id aa{OpFunctionParameter(U32[4])};
+    const Id bb{OpFunctionParameter(U32[2])};
+    const Id cc{OpFunctionParameter(U32[2])};
+    AddLabel();
+    const Id lane{OpLoad(U32[1], lane_input)};
+    const Id group{OpUDiv(U32[1], lane, Const(4u))};
+    const Id pair{OpIMul(U32[1], OpUMod(U32[1], lane, Const(4u)), Const(2u))};
+    const Id base{OpIMul(U32[1], OpLoad(U32[1], warp_input), Const(640u))};
+    const auto add = [&](Id x, Id y) { return OpIAdd(U32[1], x, y); };
+    const auto mul = [&](Id x, u32 y) { return OpIMul(U32[1], x, Const(y)); };
+    const auto address = [&](Id offset) { return OpAccessChain(pointer, storage, add(base, offset)); };
+    const auto store_pair = [&](Id packed, Id offset, u32 stride) {
+        const Id halves{OpUnpackHalf2x16(F32[2], packed)};
+        for (u32 h = 0; h < 2; ++h) {
+            OpStore(address(add(offset, Const(h * stride))),
+                    OpFConvert(F16[1], OpCompositeExtract(F32[1], halves, h)));
+        }
+    };
+    for (u32 j = 0; j < 2; ++j) {
+        for (u32 r = 0; r < 2; ++r) {
+            store_pair(OpCompositeExtract(U32[1], aa, 2 * j + r),
+                       add(add(mul(add(group, Const(8 * r)), 16), Const(8 * j)), pair), 1);
+        }
+        store_pair(OpCompositeExtract(U32[1], bb, j),
+                   add(add(Const(256u), mul(add(Const(8 * j), pair), 8)), group), 8);
+    }
+    for (u32 r = 0; r < 2; ++r) {
+        store_pair(OpCompositeExtract(U32[1], cc, r),
+                   add(add(Const(384u), mul(add(group, Const(8 * r)), 8)), pair), 1);
+    }
+    const auto barrier = [&] {
+        const auto shared{spv::MemorySemanticsMask::AcquireRelease |
+                          spv::MemorySemanticsMask::WorkgroupMemory};
+        OpMemoryBarrier(scope, Const(static_cast<u32>(shared)));
+        OpControlBarrier(scope, scope, Const(static_cast<u32>(
+            shared | spv::MemorySemanticsMask::UniformMemory |
+            spv::MemorySemanticsMask::AtomicCounterMemory | spv::MemorySemanticsMask::ImageMemory)));
+    };
+    barrier();
+    const Id row_major{Const(static_cast<u32>(spv::CooperativeMatrixLayout::RowMajorKHR))};
+    const Id memory_scope{Const(static_cast<u32>(spv::Scope::Workgroup))};
+    const auto load_matrix = [&](Id type, u32 offset, u32 stride) {
+        const Id ptr{address(Const(offset))};
+        const Id result{OpUndef(type)};
+        hmma_rewrites.emplace(result.value, std::vector<u32>{
+            (8u << 16) | static_cast<u32>(spv::Op::OpCooperativeMatrixLoadKHR), type.value,
+            result.value, ptr.value, row_major.value, Const(stride).value,
+            static_cast<u32>(spv::MemoryAccessMask::MakePointerVisible |
+                             spv::MemoryAccessMask::NonPrivatePointer), memory_scope.value});
+        return result;
+    };
+    const Id a{load_matrix(a_type, 0, 16)};
+    const Id b{load_matrix(b_type, 256, 8)};
+    const Id c{load_matrix(c_type, 384, 8)};
+    const Id d{OpUndef(c_type)};
+    hmma_rewrites.emplace(d.value, std::vector<u32>{
+        (6u << 16) | static_cast<u32>(spv::Op::OpCooperativeMatrixMulAddKHR), c_type.value,
+        d.value, a.value, b.value, c.value});
+    const Id output{address(Const(512u))};
+    const Id store_marker{OpUndef(U32[1])};
+    hmma_rewrites.emplace(store_marker.value, std::vector<u32>{
+        (7u << 16) | static_cast<u32>(spv::Op::OpCooperativeMatrixStoreKHR), output.value,
+        d.value, row_major.value, Const(8u).value,
+        static_cast<u32>(spv::MemoryAccessMask::MakePointerAvailable |
+                         spv::MemoryAccessMask::NonPrivatePointer), memory_scope.value});
+    barrier();
+    std::array<Id, 2> result;
+    for (u32 r = 0; r < 2; ++r) {
+        const Id offset{add(add(Const(512u), mul(add(group, Const(8 * r)), 8)), pair)};
+        const Id low{OpFConvert(F32[1], OpLoad(F16[1], address(offset)))};
+        const Id high{OpFConvert(F32[1], OpLoad(F16[1], address(add(offset, Const(1u)))))};
+        result[r] = OpPackHalf2x16(U32[1], OpCompositeConstruct(F32[2], low, high));
+    }
+    OpReturnValue(OpCompositeConstruct(U32[2], result[0], result[1]));
+    OpFunctionEnd();
+}
+
+void EmitContext::PatchHmma(std::vector<u32>& code) const {
+    if (hmma_rewrites.empty()) {
+        return;
+    }
+    std::vector<u32> patched(code.begin(), code.begin() + 5);
+    size_t replacements{};
+    for (size_t offset = 5; offset < code.size();) {
+        const u32 length{code[offset] >> 16};
+        const auto op{static_cast<spv::Op>(code[offset] & 0xffff)};
+        const u32 id{op == spv::Op::OpTypeOpaque ? code[offset + 1]
+                     : op == spv::Op::OpUndef ? code[offset + 2] : 0};
+        const auto replacement{hmma_rewrites.find(id)};
+        if (replacement != hmma_rewrites.end()) {
+            patched.insert(patched.end(), replacement->second.begin(), replacement->second.end());
+            ++replacements;
+        } else {
+            patched.insert(patched.end(), code.begin() + offset, code.begin() + offset + length);
+        }
+        offset += length;
+    }
+    if (replacements != hmma_rewrites.size()) {
+        throw HmmaRejected("Incomplete cooperative HMMA SPIR-V emission");
+    }
+    code = std::move(patched);
+}
 
 Id EmitContext::Def(const IR::Value& value) {
     if (!value.IsImmediate()) {
@@ -564,7 +721,7 @@ void EmitContext::DefineCommonTypes(const Info& info) {
         AddCapability(spv::Capability::Int64);
         U64 = Name(TypeInt(64, false), "u64");
     }
-    if (info.uses_fp16) {
+    if (info.uses_fp16 || info.uses_hmma) {
         AddCapability(spv::Capability::Float16);
         F16.Define(*this, TypeFloat(16), "f16");
     }
@@ -602,6 +759,7 @@ void EmitContext::DefineLocalMemory(const IR::Program& program) {
 
 void EmitContext::DefineSharedMemory(const IR::Program& program) {
     uses_explicit_workgroup_layout =
+        !program.info.uses_hmma &&
         profile.support_explicit_workgroup_layout &&
         (!program.info.uses_int8 || profile.support_workgroup_layout_8bit_access) &&
         (!program.info.uses_int16 || profile.support_workgroup_layout_16bit_access);
@@ -650,7 +808,9 @@ void EmitContext::DefineSharedMemory(const IR::Program& program) {
 
     shared_u32 = TypePointer(spv::StorageClass::Workgroup, U32[1]);
     shared_memory_u32 = AddGlobalVariable(shared_memory_u32_type, spv::StorageClass::Workgroup);
-    interfaces.push_back(shared_memory_u32);
+    if (!program.info.uses_hmma || profile.supported_spirv >= 0x00010400) {
+        interfaces.push_back(shared_memory_u32);
+    }
 
     const Id func_type{TypeFunction(void_id, U32[1], U32[1])};
     const auto make_function{[&](u32 mask, u32 size) {

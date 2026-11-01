@@ -154,8 +154,8 @@ Frame::~Frame() {
     av_frame_free(&m_frame);
 }
 
-Decoder::Decoder(Tegra::Host1x::NvdecCommon::VideoCodec codec) {
-    const AVCodecID av_codec = [&] {
+Decoder::Decoder(Tegra::Host1x::NvdecCommon::VideoCodec codec)
+    : Decoder{[&] {
         switch (codec) {
         case Tegra::Host1x::NvdecCommon::VideoCodec::H264:
             return AV_CODEC_ID_H264;
@@ -167,7 +167,13 @@ Decoder::Decoder(Tegra::Host1x::NvdecCommon::VideoCodec codec) {
             UNIMPLEMENTED_MSG("Unknown codec {}", codec);
             return AV_CODEC_ID_NONE;
         }
-    }();
+    }()} {}
+
+Decoder::Decoder(AVCodecID av_codec) {
+    if (av_codec == AV_CODEC_ID_AV1) {
+        m_codec = avcodec_find_decoder_by_name("libdav1d");
+        return;
+    }
 
 #if defined(__ANDROID__)
     if (Settings::values.nvdec_emulation.GetValue() == Settings::NvdecEmulation::Gpu) {

@@ -548,6 +548,9 @@ bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& 
         return false;
     try {
         rasterizer->DispatchCompute();
+    } catch (const Shader::HmmaRejected& error) {
+        LOG_ERROR(HW_GPU, "Native HMMA shader rejected: {}", error.what());
+        return false;
     } catch (const Shader::Exception& error) {
         static std::unordered_set<std::string> logged;
         if (logged.insert(error.what()).second) {

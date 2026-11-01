@@ -28,6 +28,11 @@ namespace Tegra {
 class Memorymanager;
 }
 
+namespace Shader::Ampere {
+struct HmmaProgram;
+struct Instruction;
+}
+
 namespace VideoCommon {
 
 /// A native (Switch 2) program after capture and lowering to Maxwell code. The shader cache keeps
@@ -41,6 +46,7 @@ struct LoweredNativeCode {
     /// Constant buffer holding the texture handles if the program requires one, otherwise ~0U
     /// (the engine's register value is used).
     u32 texture_bound = ~0U;
+    std::shared_ptr<const Shader::Ampere::HmmaProgram> hmma_program;
 };
 
 class GenericEnvironment : public Shader::Environment {
@@ -60,6 +66,8 @@ public:
     [[nodiscard]] std::array<u32, 3> WorkgroupSize() const final;
 
     [[nodiscard]] u64 ReadInstruction(u32 address) final;
+
+    [[nodiscard]] Shader::FetchedInstruction FetchInstruction(u32 address) final;
 
     [[nodiscard]] u32 TranslateProgramAddress(u32 address) const override;
 
@@ -93,7 +101,12 @@ public:
         return has_hle_engine_state;
     }
 
+    bool UsesHmma() const override {
+        return lowered_native && lowered_native->hmma_program;
+    }
+
 protected:
+    virtual void CaptureRejectedNative(std::span<const Shader::Ampere::Instruction>, u32) {}
     std::optional<u64> TryFindSize();
 
     /// Adopts an already lowered native program, or captures and lowers it when there is none.
@@ -167,6 +180,8 @@ public:
     [[nodiscard]] size_t SnapshotSizeBytes() const noexcept;
 
 private:
+    void CaptureRejectedNative(std::span<const Shader::Ampere::Instruction> native,
+                               u32 error_offset) override;
     /// The 3D engine state a detached environment reads instead of the engine.
     struct EngineSnapshot {
         struct ConstBuffer {
@@ -240,6 +255,8 @@ public:
 
     [[nodiscard]] u64 ReadInstruction(u32 address) override;
 
+    [[nodiscard]] Shader::FetchedInstruction FetchInstruction(u32 address) override;
+
     [[nodiscard]] u32 TranslateProgramAddress(u32 address) const override;
 
     [[nodiscard]] u32 ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) override;
@@ -267,10 +284,15 @@ public:
         return cbuf_replacements.size() != 0;
     }
 
+    bool UsesHmma() const override {
+        return static_cast<bool>(hmma_program);
+    }
+
     void Dump(u64 pipeline_hash, u64 shader_hash) override;
 
 private:
     std::vector<u64> code;
+    std::shared_ptr<const Shader::Ampere::HmmaProgram> hmma_program;
     ::Common::unordered_map<u32, Shader::TextureType> texture_types;
     ::Common::unordered_map<u32, Shader::TexturePixelFormat> texture_pixel_formats;
     ::Common::unordered_map<u64, u32> cbuf_values;

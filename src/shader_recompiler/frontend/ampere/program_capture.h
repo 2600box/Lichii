@@ -11,6 +11,9 @@ public:
     static constexpr u32 MaximumInstructions = 65536;
 
     Result Observe(const Instruction& instruction, u32 index) {
+        if (instruction.Bits(12, 4) == 15) {
+            return Result::Continue;
+        }
         const u32 opcode = instruction.Bits(0, 12);
         if (index < exit_setup.size()) {
             exit_setup[index] = instruction;

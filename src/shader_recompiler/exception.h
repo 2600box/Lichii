@@ -48,6 +48,11 @@ public:
         : Exception{fmt::format(fmt::runtime(message), std::forward<Args>(args)...)} {}
 };
 
+class HmmaRejected : public RuntimeError {
+public:
+    using RuntimeError::RuntimeError;
+};
+
 class NotImplementedException : public Exception {
 public:
     template <typename... Args>

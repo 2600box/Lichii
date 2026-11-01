@@ -14,6 +14,7 @@
 #include "core/core.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/svc.h"
+#include "core/nx2_cpu_profile.h"
 
 namespace Kernel::Svc {
 
@@ -2499,6 +2500,7 @@ static void Call64(Core::System& system, u32 imm, std::span<uint64_t, 8> args) {
     }
 }
 void Call(Core::System& system, u32 imm) {
+    const Core::Nx2CpuProfile::SvcScope profile{imm};
     auto& kernel = system.Kernel();
     auto& process = GetCurrentProcess(kernel);
     std::array<uint64_t, 8> args;

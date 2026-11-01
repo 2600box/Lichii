@@ -21,6 +21,7 @@
 #include <fmt/format.h>
 
 #include "common/assert.h"
+#include "shader_recompiler/frontend/ampere/hmma.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
 #include "common/literals.h"
@@ -466,6 +467,9 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     format_properties(GetFormatProperties(physical)) {
     // Get suitability and device properties.
     const bool is_suitable = GetSuitability(surface != VkSurfaceKHR{});
+    hmma_supported = CheckHmmaSupport();
+    RemoveExtensionFeatureIfUnsuitable(hmma_supported, features.cooperative_matrix,
+                                       VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
 
     const VkDriverId driver_id = properties.driver.driverID;
 
@@ -598,7 +602,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
         const auto arch = GetNvidiaArch();
         if (arch >= NvidiaArchitecture::Arch_AmpereOrNewer) {
             LOG_WARNING(Render_Vulkan, "Ampere and newer have broken float16 math");
-            features.shader_float16_int8.shaderFloat16 = false;
+            features.shader_float16_int8.shaderFloat16 = hmma_supported;
         }
 
         // Use hardware depth/stencil blits instead when available
@@ -1020,6 +1024,63 @@ bool Device::MustEmulateBGR565() const {
     return Settings::values.emulate_bgr565.GetValue();
 }
 
+bool Device::CheckHmmaSupport() const {
+#ifndef _WIN32
+    return false;
+#else
+    const auto& identity{properties.properties};
+    const auto& limits{identity.limits};
+    const auto& subgroup{properties.subgroup_size_control};
+    if (!Shader::Ampere::ExperimentalHmmaEnabled() || identity.vendorID != 0x10de ||
+        identity.deviceID != 0x2206 || identity.driverVersion != 2559967232u ||
+        GetDriverID() != VK_DRIVER_ID_NVIDIA_PROPRIETARY ||
+        !extensions.cooperative_matrix || !features.cooperative_matrix.cooperativeMatrix ||
+        !features.shader_float16_int8.shaderFloat16 ||
+        !features.vulkan_memory_model.vulkanMemoryModel ||
+        !features.vulkan_memory_model.vulkanMemoryModelDeviceScope ||
+        !extensions.subgroup_size_control ||
+        !features.subgroup_size_control.subgroupSizeControl ||
+        !features.subgroup_size_control.computeFullSubgroups ||
+        subgroup.minSubgroupSize > 32 || subgroup.maxSubgroupSize < 32 ||
+        subgroup.maxComputeWorkgroupSubgroups < 4 ||
+        !(subgroup.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) ||
+        !(properties.subgroup_properties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) ||
+        !(properties.subgroup_properties.supportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT) ||
+        !(properties.cooperative_matrix.cooperativeMatrixSupportedStages &
+          VK_SHADER_STAGE_COMPUTE_BIT) ||
+        limits.maxComputeWorkGroupInvocations < 128 || limits.maxComputeWorkGroupSize[0] < 128 ||
+        limits.maxComputeWorkGroupSize[1] < 1 || limits.maxComputeWorkGroupSize[2] < 1 ||
+        limits.maxComputeSharedMemorySize < 5120) {
+        return false;
+    }
+    const auto query{reinterpret_cast<PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR>(
+        dld.vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR"))};
+    if (!query) {
+        return false;
+    }
+    u32 count{};
+    if (query(physical, &count, nullptr) != VK_SUCCESS || count == 0) {
+        return false;
+    }
+    std::vector<VkCooperativeMatrixPropertiesKHR> matrices(count);
+    for (auto& matrix : matrices) {
+        matrix.sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
+    }
+    if (query(physical, &count, matrices.data()) != VK_SUCCESS) {
+        return false;
+    }
+    matrices.resize(count);
+    return std::ranges::any_of(matrices, [](const auto& matrix) {
+        return matrix.MSize == 16 && matrix.NSize == 8 && matrix.KSize == 16 &&
+               matrix.AType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
+               matrix.BType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
+               matrix.CType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
+               matrix.ResultType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
+               matrix.scope == VK_SCOPE_SUBGROUP_KHR && !matrix.saturatingAccumulation;
+    });
+#endif
+}
+
 bool Device::GetSuitability(bool requires_swapchain) {
     // Assume we will be suitable.
     bool suitable = true;
@@ -1237,6 +1298,11 @@ bool Device::GetSuitability(bool requires_swapchain) {
         properties.subgroup_size_control.sType =
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES;
         SetNext(next, properties.subgroup_size_control);
+    }
+    if (extensions.cooperative_matrix) {
+        properties.cooperative_matrix.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
+        SetNext(next, properties.cooperative_matrix);
     }
     if (extensions.transform_feedback) {
         properties.transform_feedback.sType =

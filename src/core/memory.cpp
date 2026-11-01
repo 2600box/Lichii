@@ -33,6 +33,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/memory.h"
 #include "core/memory/read_traps.h"
+#include "core/nx2_cpu_profile.h"
 #include "core/memory/readback_cache.h"
 #include "core/memory/readback_diagnostics.h"
 #include "core/memory/core_readback_shadow.h"
@@ -805,6 +806,7 @@ struct Memory::Impl {
     }
 
     void HandleRasterizerDownload(VAddr v_address, size_t size, ReadbackDiagnostics::Caller caller) {
+        const Nx2CpuProfile::Scope profile{Nx2CpuProfile::State::Readback};
         ReadbackDiagnostics::Scope diagnostics{caller, size};
         using ReadbackDiagnostics::Event;
         const auto* p = GetPointerImpl(

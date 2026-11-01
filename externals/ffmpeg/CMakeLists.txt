@@ -205,6 +205,10 @@ else()
     # Build FFmpeg from externals
     message(STATUS "Using FFmpeg from externals")
 
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(DAV1D REQUIRED IMPORTED_TARGET GLOBAL dav1d>=1.0.0)
+    list(APPEND FFmpeg_HWACCEL_LIBRARIES PkgConfig::DAV1D)
+
     if (CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64|amd64)")
         # FFmpeg has source that requires one of nasm or yasm to assemble it.
         # REQUIRED throws an error if not found here during configuration rather than during compilation.
@@ -268,6 +272,8 @@ else()
                 --enable-decoder=h264
                 --enable-decoder=vp8
                 --enable-decoder=vp9
+                --enable-libdav1d
+                --enable-decoder=libdav1d
                 --enable-filter=yadif,scale
                 --enable-pic
                 --cc=${FFmpeg_CC}

@@ -17,6 +17,10 @@
 #include "shader_recompiler/frontend/ir/ir_emitter.h"
 
 namespace Shader::Backend::GLSL {
+void EmitHmma16816F16(EmitContext&) {
+    throw HmmaRejected("HMMA is not supported by the GLSL backend");
+}
+
 namespace {
 template <class Func>
 struct FuncTraits {};
@@ -203,6 +207,9 @@ void DefineVariables(const EmitContext& ctx, std::string& header) {
 
 std::string EmitGLSL(const Profile& profile, const RuntimeInfo& runtime_info, IR::Program& program,
                      Bindings& bindings) {
+    if (program.info.uses_hmma) {
+        throw HmmaRejected("HMMA is not supported by the GLSL backend");
+    }
     EmitContext ctx{program, bindings, profile, runtime_info};
     Precolor(program);
     EmitCode(ctx, program);

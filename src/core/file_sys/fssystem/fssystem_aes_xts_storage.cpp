@@ -40,6 +40,11 @@ AesXtsStorage::AesXtsStorage(VirtualFile base, const void* key1, const void* key
     std::memcpy(m_key.data() + 0x10, key2, KeySize / 2);
     std::memcpy(m_iv.data(), iv, IvSize);
 
+    if (std::equal(m_key.begin(), m_key.begin() + KeySize / 2, m_key.begin() + KeySize / 2)) {
+        LOG_ERROR(Crypto, "Cannot initialize AES-XTS storage with identical key halves");
+        return;
+    }
+
     m_cipher.emplace(m_key, Core::Crypto::Mode::XTS);
 }
 
@@ -47,6 +52,9 @@ size_t AesXtsStorage::Read(u8* buffer, size_t size, size_t offset) const {
     // Allow zero-size reads.
     if (size == 0)
         return size;
+
+    if (!m_cipher)
+        return 0;
 
     // Ensure buffer is valid and we can only read at block aligned offsets.
     ASSERT(buffer != nullptr);

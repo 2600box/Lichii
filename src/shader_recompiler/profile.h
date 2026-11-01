@@ -13,6 +13,8 @@ namespace Shader {
 enum class Stage : u32;
 
 struct Profile {
+    bool support_hmma16816_f16{};
+    u32 max_compute_shared_memory_size{};
     u32 supported_spirv{0x00010000};
     bool unified_descriptor_binding{};
     bool support_descriptor_aliasing{};

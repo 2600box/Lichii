@@ -17,6 +17,10 @@
 #include "shader_recompiler/runtime_info.h"
 
 namespace Shader::Backend::GLASM {
+void EmitHmma16816F16(EmitContext&) {
+    throw HmmaRejected("HMMA is not supported by the GLASM backend");
+}
+
 namespace {
 template <class Func>
 struct FuncTraits {};
@@ -400,6 +404,9 @@ std::string_view GetTessSpacing(TessSpacing spacing) {
 
 std::string EmitGLASM(const Profile& profile, const RuntimeInfo& runtime_info, IR::Program& program,
                       Bindings& bindings) {
+    if (program.info.uses_hmma) {
+        throw HmmaRejected("HMMA is not supported by the GLASM backend");
+    }
     EmitContext ctx{program, bindings, profile, runtime_info};
     Precolor(program);
     EmitCode(ctx, program);

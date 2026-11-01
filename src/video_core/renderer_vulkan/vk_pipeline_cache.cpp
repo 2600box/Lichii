@@ -68,7 +68,7 @@ using VideoCommon::FileEnvironment;
 using VideoCommon::GenericEnvironment;
 using VideoCommon::GraphicsEnvironment;
 
-constexpr u32 CACHE_VERSION = 18;
+constexpr u32 CACHE_VERSION = 19;
 constexpr size_t VULKAN_CACHE_FLUSH_PIPELINES = 128;
 constexpr size_t VULKAN_CACHE_FLUSH_MIN_SECONDS = 30;
 constexpr std::array<char, 8> VULKAN_CACHE_MAGIC_NUMBER{'y', 'u', 'z', 'u', 'v', 'k', 'c', 'h'};
@@ -460,6 +460,8 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         supported_subgroup_stages &= ~(1u << static_cast<u32>(Shader::Stage::Geometry));
     }
     profile = Shader::Profile{
+        .support_hmma16816_f16 = device.IsHmma16816F16Supported(),
+        .max_compute_shared_memory_size = device.GetMaxComputeSharedMemorySize(),
         .supported_spirv = device.SupportedSpirvVersion(),
         .unified_descriptor_binding = true,
         .support_descriptor_aliasing = device.IsDescriptorAliasingSupported(),
@@ -681,7 +683,12 @@ ComputePipeline* PipelineCache::CurrentComputePipeline() {
     if (!is_new) {
         return pipeline.get();
     }
-    pipeline = CreateComputePipeline(key, shader);
+    try {
+        pipeline = CreateComputePipeline(key, shader);
+    } catch (const Shader::HmmaRejected&) {
+        compute_cache.erase(pair);
+        throw;
+    }
     return pipeline.get();
 }
 
@@ -729,7 +736,12 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
 
         workers.QueueWork([this, key, env_ = std::move(env), &state, &callback]() mutable {
             ShaderPools pools;
-            auto pipeline{CreateComputePipeline(pools, key, env_, state.statistics.get(), false)};
+            std::unique_ptr<ComputePipeline> pipeline;
+            try {
+                pipeline = CreateComputePipeline(pools, key, env_, state.statistics.get(), false);
+            } catch (const Shader::HmmaRejected& exception) {
+                LOG_WARNING(Render_Vulkan, "Skipping cached HMMA shader: {}", exception.what());
+            }
             std::scoped_lock lock{state.mutex};
             if (pipeline) {
                 compute_cache.emplace(key, std::move(pipeline));
@@ -1428,6 +1440,9 @@ std::unique_ptr<ComputePipeline> PipelineCache::CreateComputePipeline(
     PipelineStatistics* statistics, bool build_in_parallel) try {
     auto hash = key.Hash();
     if (device.HasBrokenCompute()) {
+        if (env.UsesHmma()) {
+            throw Shader::HmmaRejected("HMMA requires a supported compute device");
+        }
         LOG_ERROR(Render_Vulkan, "Skipping {:#016x}", hash);
         return nullptr;
     }
@@ -1447,7 +1462,8 @@ std::unique_ptr<ComputePipeline> PipelineCache::CreateComputePipeline(
         driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY ||
         driver_id == VK_DRIVER_ID_ARM_PROPRIETARY || driver_id == VK_DRIVER_ID_MOLTENVK;
     const u32 max_shared_memory = device.GetMaxComputeSharedMemorySize();
-    if (needs_shared_mem_clamp && program.shared_memory_size > max_shared_memory) {
+    if (needs_shared_mem_clamp && program.shared_memory_size > max_shared_memory &&
+        !program.info.uses_hmma) {
         LOG_WARNING(Render_Vulkan,
                     "Compute shader {:#016x} requests {}KB shared memory but device max is {}KB - clamping",
                     key.unique_hash,
@@ -1457,7 +1473,15 @@ std::unique_ptr<ComputePipeline> PipelineCache::CreateComputePipeline(
     }
     const std::vector<u32> code{EmitSPIRV(profile, program)};
     device.SaveShader(code);
-    vk::ShaderModule spv_module{BuildShader(device, code)};
+    vk::ShaderModule spv_module;
+    try {
+        spv_module = BuildShader(device, code);
+    } catch (const vk::Exception& exception) {
+        if (program.info.uses_hmma) {
+            throw Shader::HmmaRejected("HMMA shader module creation failed: {}", exception.what());
+        }
+        throw;
+    }
 
     // Text log + .spv dump. Same split as the graphics path.
     const bool should_log = GPU::Logging::IsActive();
@@ -1486,9 +1510,19 @@ std::unique_ptr<ComputePipeline> PipelineCache::CreateComputePipeline(
                                              &shader_notify, program.info, std::move(spv_module),
                                              key.unique_hash);
 
+} catch (const Shader::HmmaRejected&) {
+    throw;
 } catch (const Shader::Exception& exception) {
+    if (env.UsesHmma()) {
+        throw Shader::HmmaRejected("HMMA compute translation failed: {}", exception.what());
+    }
     LOG_ERROR(Render_Vulkan, "{}", exception.what());
     return nullptr;
+} catch (const vk::Exception& exception) {
+    if (env.UsesHmma()) {
+        throw Shader::HmmaRejected("HMMA compute pipeline failed: {}", exception.what());
+    }
+    throw;
 }
 
 void PipelineCache::SerializeVulkanPipelineCache(const std::filesystem::path& filename,

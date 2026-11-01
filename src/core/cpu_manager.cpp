@@ -16,6 +16,7 @@
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/physical_core.h"
+#include "core/nx2_cpu_profile.h"
 #include "video_core/gpu.h"
 
 namespace Core {
@@ -171,6 +172,7 @@ void CpuManager::ShutdownThread(Kernel::KernelCore& kernel) {
 void CpuManager::RunThread(std::stop_token token, std::size_t core) {
     /// Initialization
     system.RegisterCoreThread(core);
+    const Core::Nx2CpuProfile::CoreRegistration cpu_profile{core};
     std::string name = is_multicore ? ("CPUCore_" + std::to_string(core)) : std::string{"CPUThread"};
     Common::SetCurrentThreadName(name.c_str());
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);

@@ -438,6 +438,9 @@ void VisitUsages(Info& info, IR::Inst& inst) {
     case IR::Opcode::DemoteToHelperInvocation:
         info.uses_demote_to_helper_invocation = true;
         break;
+    case IR::Opcode::Hmma16816F16:
+        info.uses_hmma = true;
+        break;
     case IR::Opcode::GetAttribute:
     case IR::Opcode::GetAttributeU32:
         info.loads.mask[static_cast<size_t>(inst.Arg(0).Attribute())] = true;

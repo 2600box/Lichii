@@ -11,15 +11,14 @@
 
 #include "video_core/host1x/nx2_video_decoder.h"
 
-using Tegra::Host1x::NvdecCommon::VideoCodec;
 using Tegra::Host1x::ParseNx2VideoConfiguration;
 
 TEST_CASE("Nx2 video MIME configurations retain their codec", "[nx2_video]") {
     const std::array cases{
-        std::pair{std::string_view{"video/vp9"}, VideoCodec::VP9},
-        std::pair{std::string_view{"video/vp8"}, VideoCodec::VP8},
-        std::pair{std::string_view{"video/avc"}, VideoCodec::H264},
-        std::pair{std::string_view{"video/h264"}, VideoCodec::H264},
+        std::pair{std::string_view{"video/vp9"}, AV_CODEC_ID_VP9},
+        std::pair{std::string_view{"video/vp8"}, AV_CODEC_ID_VP8},
+        std::pair{std::string_view{"video/avc"}, AV_CODEC_ID_H264},
+        std::pair{std::string_view{"video/h264"}, AV_CODEC_ID_H264},
     };
     for (const auto& [mime, codec] : cases) {
         std::vector<u8> data(mime.begin(), mime.end());
@@ -46,7 +45,7 @@ TEST_CASE("Nx2 video binary H264 parameters preserve embedded zeroes", "[nx2_vid
             data.insert(data.end(), {0x68, 0x80});
             const auto parsed = ParseNx2VideoConfiguration(data);
             REQUIRE(parsed);
-            CHECK(parsed->codec == VideoCodec::H264);
+            CHECK(parsed->codec == AV_CODEC_ID_H264);
             CHECK(parsed->extradata.data() == data.data());
             CHECK(std::ranges::equal(parsed->extradata, data));
         }

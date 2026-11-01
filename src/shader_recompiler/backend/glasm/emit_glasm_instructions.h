@@ -21,6 +21,7 @@ namespace Shader::Backend::GLASM {
 class EmitContext;
 
 // Microinstruction emitters
+void EmitHmma16816F16(EmitContext& ctx);
 void EmitPhi(EmitContext& ctx, IR::Inst& inst);
 void EmitVoid(EmitContext& ctx);
 void EmitIdentity(EmitContext& ctx, IR::Inst& inst, const IR::Value& value);

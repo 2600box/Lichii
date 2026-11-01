@@ -44,11 +44,18 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
       pipeline_cache(pipeline_cache_), guest_descriptor_queue{guest_descriptor_queue_},
       descriptor_buffer_ring{descriptor_buffer_ring_}, info{info_},
       shader_hash{shader_hash_}, spv_module(std::move(spv_module_)) {
+    if (info.uses_hmma && !device.IsHmma16816F16Supported()) {
+        throw Shader::HmmaRejected("HMMA compute pipeline is not qualified on this device");
+    }
     const u32 storage_buffers = Shader::NumDescriptors(info.storage_buffers_descriptors);
     const u32 storage_buffer_limit =
         (std::min)(device.GetMaxPerStageDescriptorStorageBuffers(),
                    device.GetMaxDescriptorSetStorageBuffers());
     if (storage_buffers > storage_buffer_limit) {
+        if (info.uses_hmma) {
+            throw Shader::HmmaRejected("HMMA needs {} storage buffers, device supports {}",
+                                       storage_buffers, storage_buffer_limit);
+        }
         throw Shader::NotImplementedException(
             "Compute shader {:016X} needs {} storage buffers, device supports {}",
             shader_hash, storage_buffers, storage_buffer_limit);
@@ -110,7 +117,9 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
                 .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                 .pNext =
                     device.IsExtSubgroupSizeControlSupported() ? &subgroup_size_ci : nullptr,
-                .flags = 0,
+                .flags = info.uses_hmma
+                             ? VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+                             : VkPipelineShaderStageCreateFlags{},
                 .stage = VK_SHADER_STAGE_COMPUTE_BIT,
                 .module = *spv_module,
                 .pName = "main",
@@ -123,6 +132,13 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
         try {
             pipeline = device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);
         } catch (const vk::Exception& exception) {
+            if (info.uses_hmma) {
+                if (shader_notify) {
+                    shader_notify->MarkShaderComplete();
+                }
+                throw Shader::HmmaRejected("HMMA compute pipeline creation failed: {}",
+                                           exception.what());
+            }
             LOG_CRITICAL(Render_Vulkan, "Adreno rejected compute shader {:016X}: {}", shader_hash,
                          exception.what());
             std::scoped_lock lock{build_mutex};
@@ -151,7 +167,7 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
             shader_notify->MarkShaderComplete();
         }
     }};
-    if (thread_worker) {
+    if (thread_worker && !info.uses_hmma) {
         thread_worker->QueueWork(std::move(func));
     } else {
         func();

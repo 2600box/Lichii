@@ -14,6 +14,7 @@
 #include <string>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <utility>
 
@@ -28,12 +29,14 @@
 #include <ranges>
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/exception.h"
+#include "shader_recompiler/frontend/ampere/hmma_program.h"
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
 #include "shader_recompiler/frontend/ampere/program_override.h"
 #include "shader_recompiler/frontend/ampere/program_capture.h"
 #include "shader_recompiler/frontend/ampere/program_address_map.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/memory_manager.h"
+#include "video_core/native_shader_capture.h"
 #include "video_core/shader_environment.h"
 #include "video_core/texture_cache/format_lookup_table.h"
 #include "video_core/textures/texture.h"
@@ -154,21 +157,52 @@ std::array<u32, 3> GenericEnvironment::WorkgroupSize() const {
 }
 
 u64 GenericEnvironment::ReadInstruction(u32 address) {
+    if (lowered_native && lowered_native->hmma_program) {
+        const auto& program = *lowered_native->hmma_program;
+        Shader::Ampere::ValidateHmmaFetch(program, address);
+        if (Shader::Ampere::FindHmmaSite(program, address)) {
+            throw Shader::HmmaRejected("Raw instruction read at typed HMMA site {:#x}", address);
+        }
+    }
     read_lowest = (std::min)(read_lowest, address);
     read_highest = (std::max)(read_highest, address);
 
     if (address >= cached_lowest && address < cached_highest) {
-        return code[(address - cached_lowest) / INST_SIZE];
+        const u64 instruction = code[(address - cached_lowest) / INST_SIZE];
+        if (instruction == Shader::Ampere::HmmaGuard) {
+            throw Shader::HmmaRejected("Missing HMMA metadata at guarded instruction {:#x}", address);
+        }
+        return instruction;
     }
     if (native_source_size) {
         throw Shader::RuntimeError("Lowered native instruction address out of range: {:#x}", address);
     }
     has_unbound_instructions = true;
-    return gpu_memory->Read<u64>(program_base + address);
+    const u64 instruction = gpu_memory->Read<u64>(program_base + address);
+    if (instruction == Shader::Ampere::HmmaGuard) {
+        throw Shader::HmmaRejected("Unbound guarded instruction at {:#x}", address);
+    }
+    return instruction;
+}
+
+Shader::FetchedInstruction GenericEnvironment::FetchInstruction(u32 address) {
+    if (lowered_native && lowered_native->hmma_program) {
+        const auto& program = *lowered_native->hmma_program;
+        Shader::Ampere::ValidateHmmaFetch(program, address);
+        if (const auto* site = Shader::Ampere::FindHmmaSite(program, address)) {
+            read_lowest = (std::min)(read_lowest, address);
+            read_highest = (std::max)(read_highest, address);
+            return site->instruction;
+        }
+    }
+    return Shader::MaxwellInstructionWord{ReadInstruction(address)};
 }
 
 u32 GenericEnvironment::TranslateProgramAddress(u32 address) const {
     if (const auto translated = Shader::Ampere::NativeProgramAddress(code, address)) return *translated;
+    if (lowered_native && lowered_native->hmma_program) {
+        throw Shader::HmmaRejected("Invalid HMMA native program address {:#x}", address);
+    }
     if (native_source_size || Shader::Ampere::HasNativeAddressMap(code))
         throw Shader::RuntimeError("Invalid native indirect branch address {:#x}", address);
     return address;
@@ -177,8 +211,15 @@ u32 GenericEnvironment::TranslateProgramAddress(u32 address) const {
 std::optional<u64> GenericEnvironment::Analyze() {
     if (native_source_size) {
         // Include the converted header and a version tag to isolate this experimental ABI.
-        return Common::CityHash64(reinterpret_cast<const char*>(code.data()),
-                                  code.size() * sizeof(u64)) ^ 0x4f554e4345000002ULL;
+        u64 hash = Common::CityHash64(reinterpret_cast<const char*>(code.data()),
+                                     code.size() * sizeof(u64)) ^ 0x4f554e4345000003ULL;
+        if (lowered_native && lowered_native->hmma_program) {
+            const std::array<u64, 3> identity{hash, lowered_native->hmma_program->native_digest,
+                                            Shader::Ampere::HmmaProgramRevision};
+            hash = Common::CityHash64(reinterpret_cast<const char*>(identity.data()),
+                                      sizeof(identity));
+        }
+        return hash;
     }
     const std::optional<u64> size{TryFindSize()};
     if (!size) {
@@ -192,6 +233,9 @@ std::optional<u64> GenericEnvironment::Analyze() {
 void GenericEnvironment::SetCachedSize(size_t size_bytes) {
     if (native_source_size) {
         if (size_bytes != CachedSizeBytes()) {
+            if (lowered_native && lowered_native->hmma_program) {
+                throw Shader::HmmaRejected("HMMA shader changed while constructing pipeline");
+            }
             throw Shader::RuntimeError("Native shader changed while constructing pipeline");
         }
         return;
@@ -219,6 +263,13 @@ bool GenericEnvironment::CanBeSerialized() const noexcept {
 }
 
 u64 GenericEnvironment::CalculateHash() const {
+    if (lowered_native && lowered_native->hmma_program) {
+        const std::array<u64, 3> identity{
+            Common::CityHash64(reinterpret_cast<const char*>(code.data()), code.size() * sizeof(u64)) ^
+                0x4f554e4345000003ULL,
+            lowered_native->hmma_program->native_digest, Shader::Ampere::HmmaProgramRevision};
+        return Common::CityHash64(reinterpret_cast<const char*>(identity.data()), sizeof(identity));
+    }
     const size_t size{ReadSizeBytes()};
     const auto data{std::make_unique<char[]>(size)};
     gpu_memory->ReadBlock(program_base + read_lowest, data.get(), size);
@@ -235,6 +286,12 @@ void GenericEnvironment::Serialize(std::ofstream& file) const {
     const u64 num_texture_pixel_formats{static_cast<u64>(texture_pixel_formats.size())};
     const u64 num_cbuf_values{static_cast<u64>(cbuf_values.size())};
     const u64 num_cbuf_replacement_values{static_cast<u64>(cbuf_replacements.size())};
+    if (num_texture_types > Shader::Ampere::HmmaMetadataLimit ||
+        num_texture_pixel_formats > Shader::Ampere::HmmaMetadataLimit ||
+        num_cbuf_values > Shader::Ampere::HmmaMetadataLimit ||
+        num_cbuf_replacement_values > Shader::Ampere::HmmaMetadataLimit) {
+        throw Shader::HmmaRejected("Shader resource metadata exceeds cache bounds");
+    }
 
     file.write(reinterpret_cast<const char*>(&code_size), sizeof(code_size))
         .write(reinterpret_cast<const char*>(&num_texture_types), sizeof(num_texture_types))
@@ -278,6 +335,9 @@ void GenericEnvironment::Serialize(std::ofstream& file) const {
                        sizeof(gp_passthrough_mask));
         }
     }
+    Shader::Ampere::WriteHmmaProgram(
+        file, lowered_native && lowered_native->hmma_program ? &*lowered_native->hmma_program
+                                                            : nullptr);
 }
 
 std::optional<u64> GenericEnvironment::TryFindSize() {
@@ -383,6 +443,16 @@ void GenericEnvironment::InitializeNativeCode(std::shared_ptr<const LoweredNativ
     if (!lowered) {
         lowered = LowerNativeCode(source_header_size);
     }
+    if (lowered->hmma_program) {
+        Shader::Ampere::ValidateHmmaLaunch(stage, workgroup_size,
+                                          Shader::Ampere::ExperimentalHmmaEnabled());
+        if (lowered->source_size != lowered->hmma_program->source_size ||
+            lowered->code != lowered->hmma_program->code) {
+            throw Shader::HmmaRejected("Shared HMMA program disagrees with source provenance");
+        }
+    } else if (std::ranges::find(lowered->code, Shader::Ampere::HmmaGuard) != lowered->code.end()) {
+        throw Shader::HmmaRejected("Missing shared HMMA program metadata");
+    }
     if (lowered->texture_bound != ~0U) {
         // Native TEX carries its cbuf index explicitly; TEXS obtains it from the environment.
         texture_bound = lowered->texture_bound;
@@ -418,6 +488,9 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
         native.push_back(instruction);
         const auto status = capture.Observe(instruction, index);
         if (status == Shader::Ampere::ProgramCaptureState::Result::InvalidTarget) {
+            if (Shader::Ampere::ExperimentalHmmaEnabled() && Shader::Ampere::ContainsHmma(native)) {
+                throw Shader::HmmaRejected("HMMA branch outside native capture bounds");
+            }
             if (const char* dir = std::getenv("EDEN_NX2_SHADER_DUMP")) {
                 const auto path = fmt::format("{}/rejected-{:x}.bin", dir, program_base + native_header_size);
                 if (std::FILE* file = std::fopen(path.c_str(), "wb")) {
@@ -431,6 +504,20 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
                                        instruction.words[2], instruction.words[3]);
         }
         if (status == Shader::Ampere::ProgramCaptureState::Result::Complete) break;
+    }
+    const bool experimental_hmma = Shader::Ampere::ExperimentalHmmaEnabled() &&
+                                    Shader::Ampere::ContainsHmma(native);
+    if (experimental_hmma) {
+        std::array<u64, sizeof(sph) / sizeof(u64)> header{};
+        std::memcpy(header.data(), &sph, sizeof(sph));
+        auto result = std::make_shared<LoweredNativeCode>();
+        result->hmma_program = std::make_shared<Shader::Ampere::HmmaProgram>(
+            Shader::Ampere::BuildHmmaProgram(native, header, native_header_size, stage,
+                                            workgroup_size, true));
+        result->code = result->hmma_program->code;
+        result->source_size = result->hmma_program->source_size;
+        result->texture_bound = result->hmma_program->texture_bound;
+        return result;
     }
     auto lowered = Shader::Ampere::LowerToMaxwell(native, stage == Shader::Stage::Geometry);
     // EDEN_NX2_REJECT=<hex address>,...: treat these programs as rejected (to find which newly
@@ -523,6 +610,9 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
                         native.resize(source_bytes / sizeof(Shader::Ampere::Instruction));
                         gpu_memory->ReadBlock(program_base + native_header_size, native.data(), source_bytes);
                     }
+                    if (Shader::Ampere::ExperimentalHmmaEnabled() && Shader::Ampere::ContainsHmma(native)) {
+                        throw Shader::HmmaRejected("Native override cannot replace an HMMA program");
+                    }
                     lowered = Shader::Ampere::DecodeProgramOverride(bytes, native);
                     if (!lowered) throw Shader::RuntimeError("Native shader override rejected: {}", lowered.error);
                     LOG_WARNING(Shader, "Native shader resumed: key={}, instructions={}", key, lowered.instructions.size());
@@ -535,6 +625,11 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
     if (!lowered) {
         const size_t failed = lowered.error_offset / sizeof(Shader::Ampere::Instruction);
         const auto words = failed < native.size() ? native[failed].words : std::array<u32, 4>{};
+        if (stage == Shader::Stage::Fragment && (words[0] & 0xfff) == 0x370 &&
+            Settings::GetCurrentProgramID() == NativeShaderCapture::Title &&
+            std::getenv("EDEN_NX2_FE_CAPTURE")) {
+            CaptureRejectedNative(native, lowered.error_offset);
+        }
         throw Shader::RuntimeError(
             "Native shader at {:#x}, instruction {:#x}: {} [op {:03x} {:08x} {:08x} {:08x} {:08x}]",
             program_base, lowered.error_offset, lowered.error, words[0] & 0xfff, words[0],
@@ -696,6 +791,80 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
     is_proprietary_driver = maxwell3d->GetNativeMacroEngine().native_turing || texture_bound == 2;
     has_hle_engine_state =
         maxwell3d->engine_state == Tegra::Engines::Maxwell3D::EngineHint::OnHLEMacro;
+}
+
+void GraphicsEnvironment::CaptureRejectedNative(
+    std::span<const Shader::Ampere::Instruction> native, u32 error_offset) {
+    namespace Capture = NativeShaderCapture;
+    static std::mutex mutex;
+    static Capture::Budget budget;
+    static std::optional<std::chrono::steady_clock::time_point> started;
+    static bool stopped{};
+    const std::scoped_lock lock{mutex};
+    if (stopped) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (!started) started = now;
+    if (now - *started > std::chrono::seconds{30}) return;
+    const u64 key = Shader::Ampere::NativeProgramKey(native);
+    if (!budget.Reserve(key)) return;
+    try {
+        const char* directory = std::getenv("EDEN_NX2_FE_CAPTURE");
+        if (!directory || !*directory || !maxwell3d || snapshot || stage_index != 4 ||
+            native.size_bytes() > Capture::MaxNativeBytes)
+            throw Shader::RuntimeError("Invalid diagnostic capture state");
+        const auto folder = std::filesystem::path{directory};
+        if (!std::filesystem::is_directory(folder))
+            throw Shader::RuntimeError("Diagnostic capture directory missing");
+        const auto path = folder / fmt::format("{:016x}.bin", key);
+        const auto partial = folder / fmt::format("{:016x}.partial", key);
+        if (std::filesystem::exists(path) || std::filesystem::exists(partial))
+            throw Shader::RuntimeError("Diagnostic capture already exists");
+        const auto mapped = [&](u64 address, size_t size) {
+            return size && address <= (std::numeric_limits<u64>::max)() - size &&
+                   gpu_memory->IsWithinGPUAddressRange(address) &&
+                   gpu_memory->IsWithinGPUAddressRange(address + size - 1) &&
+                   gpu_memory->IsFullyMappedRange(address, size);
+        };
+        std::array<u8, 128> header;
+        if (!mapped(program_base, header.size()))
+            throw Shader::RuntimeError("Unmapped diagnostic shader header");
+        gpu_memory->ReadBlock(program_base, header.data(), header.size());
+        const auto& source = maxwell3d->state.shader_stages[stage_index].const_buffers;
+        static_assert(std::tuple_size_v<std::remove_cvref_t<decltype(source)>> == Capture::MaxBuffers);
+        std::array<Capture::Buffer, Capture::MaxBuffers> buffers;
+        u32 copied = 0;
+        for (size_t i = 0; i < source.size(); ++i) {
+            const auto& input = source[i];
+            auto& output = buffers[i];
+            output.address = input.address;
+            output.declared_size = input.size;
+            if (!input.enabled) continue;
+            if (input.size > Capture::MaxBufferBytes) {
+                output.status = 3;
+            } else if (!mapped(input.address, input.size)) {
+                output.status = 2;
+            } else {
+                output.status = 1;
+                output.bytes.resize(input.size);
+                gpu_memory->ReadBlock(input.address, output.bytes.data(), output.bytes.size());
+                ++copied;
+            }
+        }
+        std::ofstream file;
+        file.exceptions(std::ios::badbit | std::ios::failbit);
+        file.open(partial, std::ios::binary);
+        if (!Capture::Write(file, Settings::GetCurrentProgramID(), program_base, key, texture_bound,
+                            error_offset, header,
+                            {reinterpret_cast<const u8*>(native.data()), native.size_bytes()}, buffers))
+            throw Shader::RuntimeError("Invalid diagnostic capture record");
+        file.close();
+        std::filesystem::rename(partial, path);
+        LOG_INFO(Shader, "FE diagnostic capture saved: key={:016x}, native_bytes={}, buffers={}, limit={}",
+                 key, native.size_bytes(), copied, Capture::MaxRecords);
+    } catch (...) {
+        stopped = true;
+        LOG_WARNING(Shader, "FE diagnostic capture stopped after an I/O or snapshot failure");
+    }
 }
 
 u32 GraphicsEnvironment::ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) {
@@ -900,7 +1069,7 @@ u32 ComputeEnvironment::ReadViewportTransformState() {
     return viewport_transform_state;
 }
 
-void FileEnvironment::Deserialize(std::ifstream& file) {
+void FileEnvironment::Deserialize(std::ifstream& file) try {
     u64 code_size{};
     u64 num_texture_types{};
     u64 num_texture_pixel_formats{};
@@ -920,6 +1089,14 @@ void FileEnvironment::Deserialize(std::ifstream& file) {
         .read(reinterpret_cast<char*>(&read_highest), sizeof(read_highest))
         .read(reinterpret_cast<char*>(&viewport_transform_state), sizeof(viewport_transform_state))
         .read(reinterpret_cast<char*>(&stage), sizeof(stage));
+    if (!file || code_size == 0 || code_size > 64 * 1024 * 1024 || code_size % sizeof(u64) ||
+        num_texture_types > Shader::Ampere::HmmaMetadataLimit ||
+        num_texture_pixel_formats > Shader::Ampere::HmmaMetadataLimit ||
+        num_cbuf_values > Shader::Ampere::HmmaMetadataLimit ||
+        num_cbuf_replacement_values > Shader::Ampere::HmmaMetadataLimit ||
+        read_lowest > read_highest || u64{read_highest} - read_lowest + sizeof(u64) != code_size) {
+        throw Shader::HmmaRejected("Invalid shader cache metadata bounds");
+    }
     code.resize(Common::DivCeil(code_size, sizeof(u64)));
     file.read(reinterpret_cast<char*>(code.data()), code_size);
     for (size_t i = 0; i < num_texture_types; ++i) {
@@ -961,8 +1138,23 @@ void FileEnvironment::Deserialize(std::ifstream& file) {
             file.read(reinterpret_cast<char*>(&gp_passthrough_mask), sizeof(gp_passthrough_mask));
         }
     }
+    if (auto program = Shader::Ampere::ReadHmmaProgram(
+            file, code, stage, workgroup_size, Shader::Ampere::ExperimentalHmmaEnabled())) {
+        hmma_program = std::make_shared<Shader::Ampere::HmmaProgram>(std::move(*program));
+    } else {
+        hmma_program.reset();
+    }
+    if (hmma_program && (read_lowest != 0 || start_address != 0x50)) {
+        throw Shader::HmmaRejected("Invalid cached HMMA program base");
+    }
+    if (hmma_program && hmma_program->texture_bound != ~0U &&
+        texture_bound != hmma_program->texture_bound) {
+        throw Shader::HmmaRejected("Cached HMMA texture binding disagrees with native program");
+    }
     // Native programs fold bank 1 reads as they did when they were built.
     is_proprietary_driver = texture_bound == 2 || Shader::Ampere::HasNativeAddressMap(code);
+} catch (const std::ios_base::failure&) {
+    throw Shader::HmmaRejected("Truncated shader environment cache");
 }
 
 void FileEnvironment::Dump(u64 pipeline_hash, u64 shader_hash) {
@@ -971,16 +1163,39 @@ void FileEnvironment::Dump(u64 pipeline_hash, u64 shader_hash) {
 
 u32 FileEnvironment::TranslateProgramAddress(u32 address) const {
     if (const auto translated = Shader::Ampere::NativeProgramAddress(code, address)) return *translated;
+    if (hmma_program) {
+        throw Shader::HmmaRejected("Invalid cached HMMA native program address {:#x}", address);
+    }
     if (Shader::Ampere::HasNativeAddressMap(code))
         throw Shader::RuntimeError("Invalid cached native indirect branch address {:#x}", address);
     return address;
 }
 
 u64 FileEnvironment::ReadInstruction(u32 address) {
+    if (hmma_program) {
+        Shader::Ampere::ValidateHmmaFetch(*hmma_program, address);
+        if (Shader::Ampere::FindHmmaSite(*hmma_program, address)) {
+            throw Shader::HmmaRejected("Raw cached instruction read at typed HMMA site {:#x}", address);
+        }
+    }
     if (address < read_lowest || address > read_highest) {
         throw Shader::LogicError("Out of bounds address {}", address);
     }
-    return code[(address - read_lowest) / sizeof(u64)];
+    const u64 instruction = code[(address - read_lowest) / sizeof(u64)];
+    if (instruction == Shader::Ampere::HmmaGuard) {
+        throw Shader::HmmaRejected("Missing cached HMMA metadata at guarded instruction {:#x}", address);
+    }
+    return instruction;
+}
+
+Shader::FetchedInstruction FileEnvironment::FetchInstruction(u32 address) {
+    if (hmma_program) {
+        Shader::Ampere::ValidateHmmaFetch(*hmma_program, address);
+        if (const auto* site = Shader::Ampere::FindHmmaSite(*hmma_program, address)) {
+            return site->instruction;
+        }
+    }
+    return Shader::MaxwellInstructionWord{ReadInstruction(address)};
 }
 
 u32 FileEnvironment::ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) {
@@ -1051,20 +1266,39 @@ void SerializePipeline(std::span<const char> key, std::span<const GenericEnviron
                   Common::FS::PathToUTF8String(filename));
         return;
     }
-    if (file.tellp() == 0) {
-        // Write header
-        file.write(MAGIC_NUMBER.data(), MAGIC_NUMBER.size())
-            .write(reinterpret_cast<const char*>(&cache_version), sizeof(cache_version));
+    const auto original_size = file.tellp();
+    if (original_size < 0) {
+        throw std::ios_base::failure("Failed to determine shader cache append offset");
     }
-    if (!std::ranges::all_of(envs, &GenericEnvironment::CanBeSerialized)) {
-        return;
+    try {
+        if (original_size == 0) {
+            // Write header
+            file.write(MAGIC_NUMBER.data(), MAGIC_NUMBER.size())
+                .write(reinterpret_cast<const char*>(&cache_version), sizeof(cache_version));
+        }
+        if (envs.empty() || envs.size() > Shader::Ampere::HmmaMetadataLimit) {
+            throw Shader::HmmaRejected("Invalid serialized environment count");
+        }
+        if (!std::ranges::all_of(envs, &GenericEnvironment::CanBeSerialized)) {
+            return;
+        }
+        const u32 num_envs{static_cast<u32>(envs.size())};
+        file.write(reinterpret_cast<const char*>(&num_envs), sizeof(num_envs));
+        for (const GenericEnvironment* const env : envs) {
+            env->Serialize(file);
+        }
+        file.write(key.data(), key.size_bytes());
+        file.flush();
+    } catch (const Shader::HmmaRejected& e) {
+        file.exceptions(std::ios::goodbit);
+        file.close();
+        std::error_code error;
+        std::filesystem::resize_file(filename, static_cast<std::uintmax_t>(original_size), error);
+        LOG_WARNING(Shader, "Rejected shader cache append: {}", e.what());
+        if (error) {
+            LOG_ERROR(Common_Filesystem, "Failed to roll back shader cache append: {}", error.message());
+        }
     }
-    const u32 num_envs{static_cast<u32>(envs.size())};
-    file.write(reinterpret_cast<const char*>(&num_envs), sizeof(num_envs));
-    for (const GenericEnvironment* const env : envs) {
-        env->Serialize(file);
-    }
-    file.write(key.data(), key.size_bytes());
 
 } catch (const std::ios_base::failure& e) {
     LOG_ERROR(Common_Filesystem, "{}", e.what());
@@ -1112,6 +1346,9 @@ void LoadPipelines(
         }
         u32 num_envs{};
         file.read(reinterpret_cast<char*>(&num_envs), sizeof(num_envs));
+        if (!num_envs || num_envs > Shader::Ampere::HmmaMetadataLimit) {
+            throw Shader::HmmaRejected("Invalid cached environment count");
+        }
         std::vector<FileEnvironment> envs(num_envs);
         for (FileEnvironment& env : envs) {
             env.Deserialize(file);
@@ -1123,6 +1360,8 @@ void LoadPipelines(
         }
     }
 
+} catch (const Shader::HmmaRejected& e) {
+    LOG_WARNING(Shader, "Rejected cached HMMA environment: {}", e.what());
 } catch (const std::ios_base::failure& e) {
     LOG_ERROR(Common_Filesystem, "{}", e.what());
     if (!Common::FS::RemoveFile(filename)) {

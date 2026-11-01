@@ -53,6 +53,7 @@ VK_DEFINE_HANDLE(VmaAllocator)
 
 // Define all features which may be used by the implementation and require an extension here.
 #define FOR_EACH_VK_FEATURE_EXT(FEATURE)                                                           \
+    FEATURE(KHR, CooperativeMatrix, COOPERATIVE_MATRIX, cooperative_matrix)                       \
     FEATURE(EXT, BorderColorSwizzle, BORDER_COLOR_SWIZZLE, border_color_swizzle)                   \
     FEATURE(EXT, ColorWriteEnable, COLOR_WRITE_ENABLE, color_write_enable)                         \
     FEATURE(EXT, CustomBorderColor, CUSTOM_BORDER_COLOR, custom_border_color)                      \
@@ -442,7 +443,11 @@ FN_MAX_LIMIT_LIST
 
     /// Returns true if the device supports float16 natively.
     bool IsFloat16Supported() const {
-        return features.shader_float16_int8.shaderFloat16;
+        return features.shader_float16_int8.shaderFloat16 && !hmma_supported;
+    }
+
+    bool IsHmma16816F16Supported() const {
+        return hmma_supported;
     }
 
     /// Returns true if the device can run shaders built against the Vulkan memory model.
@@ -1129,6 +1134,7 @@ private:
     /// Checks if the physical device is suitable and configures the object state
     /// with all necessary info about its properties.
     bool GetSuitability(bool requires_swapchain);
+    bool CheckHmmaSupport() const;
 
     // Remove extensions which have incomplete feature support.
     void RemoveUnsuitableExtensions();
@@ -1219,6 +1225,7 @@ private:
         VkPhysicalDevicePushDescriptorPropertiesKHR push_descriptor{};
         VkPhysicalDeviceDescriptorBufferPropertiesEXT descriptor_buffer{};
         VkPhysicalDeviceSubgroupSizeControlProperties subgroup_size_control{};
+        VkPhysicalDeviceCooperativeMatrixPropertiesKHR cooperative_matrix{};
         VkPhysicalDeviceTransformFeedbackPropertiesEXT transform_feedback{};
         VkPhysicalDeviceMaintenance5PropertiesKHR maintenance5{};
         VkPhysicalDeviceDepthStencilResolveProperties depth_stencil_resolve{};
@@ -1239,6 +1246,7 @@ private:
     bool is_blit_depth24_stencil8_supported{}; ///< Support for blitting from and to D24S8.
     bool is_blit_depth32_stencil8_supported{}; ///< Support for blitting from and to D32S8.
     bool is_warp_potentially_bigger{};         ///< Host warp size can be bigger than guest.
+    bool hmma_supported{};
     bool is_integrated{};                      ///< Is GPU an iGPU.
     bool is_virtual{};                         ///< Is GPU a virtual GPU.
     bool is_non_gpu{};                         ///< Is SoftwareRasterizer, FPGA, non-GPU device.

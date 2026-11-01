@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <bit>
 #include <optional>
+#include <unordered_set>
 #include "common/container/unordered_map.h"
 #include <tuple>
 #include <limits>
@@ -367,6 +368,38 @@ static inline std::optional<ConstBufferAddr> TrackCached(const IR::Value& v, Env
 std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environment& env, const HostTranslateInfo& host_info, const IR::Block* block);
 
 std::optional<ConstBufferAddr> Track(const IR::Value& value, Environment& env, const HostTranslateInfo& host_info, const IR::Block* block) {
+    boost::container::small_vector<IR::Value, 8> pending{value};
+    std::unordered_set<const IR::Inst*> visited;
+    while (!pending.empty()) {
+        const IR::Value current = ResolveConditionalPhi(pending.back(), block);
+        pending.pop_back();
+        if (current.IsImmediate()) continue;
+        const IR::Inst* const inst = current.InstRecursive();
+        if (!visited.insert(inst).second) continue;
+        switch (inst->GetOpcode()) {
+        case IR::Opcode::GetCbufU32:
+        case IR::Opcode::GetCbufU32x2:
+            continue;
+        case IR::Opcode::LoadGlobalU8:
+        case IR::Opcode::LoadGlobalS8:
+        case IR::Opcode::LoadGlobalU16:
+        case IR::Opcode::LoadGlobalS16:
+        case IR::Opcode::LoadGlobal32:
+        case IR::Opcode::LoadGlobal64:
+        case IR::Opcode::LoadGlobal128:
+        case IR::Opcode::LoadStorageU8:
+        case IR::Opcode::LoadStorageS8:
+        case IR::Opcode::LoadStorageU16:
+        case IR::Opcode::LoadStorageS16:
+        case IR::Opcode::LoadStorage32:
+        case IR::Opcode::LoadStorage64:
+        case IR::Opcode::LoadStorage128:
+            return std::nullopt;
+        default:
+            for (size_t i = 0; i < inst->NumArgs(); ++i) pending.push_back(inst->Arg(i));
+            break;
+        }
+    }
     return IR::BreadthFirstSearch(value, [&env, &host_info, block](const IR::Inst* inst) {
         return TryGetConstBuffer(inst, env, host_info, block);
     }, [&](IR::Value operand) { return ResolveConditionalPhi(operand, block); });

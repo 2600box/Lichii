@@ -54,7 +54,7 @@ using VideoCommon::LoadPipelines;
 using VideoCommon::SerializePipeline;
 using Context = ShaderContext::Context;
 
-constexpr u32 CACHE_VERSION = 15;
+constexpr u32 CACHE_VERSION = 16;
 
 template <typename Container>
 auto MakeSpan(Container& container) {
@@ -318,7 +318,12 @@ void ShaderCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading,
         file.read(reinterpret_cast<char*>(&key), sizeof(key));
         queue_work([this, key, env_ = std::move(env), &state, &callback](Context* ctx) mutable {
             ctx->pools.ReleaseContents();
-            auto pipeline{CreateComputePipeline(ctx->pools, key, env_, true)};
+            std::unique_ptr<ComputePipeline> pipeline;
+            try {
+                pipeline = CreateComputePipeline(ctx->pools, key, env_, true);
+            } catch (const Shader::HmmaRejected& exception) {
+                LOG_WARNING(Render_OpenGL, "Skipping cached HMMA shader: {}", exception.what());
+            }
             std::scoped_lock lock{state.mutex};
             if (pipeline) {
                 compute_cache.emplace(key, std::move(pipeline));
@@ -445,7 +450,12 @@ ComputePipeline* ShaderCache::CurrentComputePipeline() {
     if (!is_new) {
         return pipeline.get();
     }
-    pipeline = CreateComputePipeline(key, shader);
+    try {
+        pipeline = CreateComputePipeline(key, shader);
+    } catch (const Shader::HmmaRejected&) {
+        compute_cache.erase(pair);
+        throw;
+    }
     return pipeline.get();
 }
 
@@ -595,6 +605,9 @@ std::unique_ptr<ComputePipeline> ShaderCache::CreateComputePipeline(
 std::unique_ptr<ComputePipeline> ShaderCache::CreateComputePipeline(
     ShaderContext::ShaderPools& pools, const ComputePipelineKey& key, Shader::Environment& env,
     bool force_context_flush) try {
+    if (env.UsesHmma()) {
+        throw Shader::HmmaRejected("HMMA requires the qualified Vulkan backend");
+    }
     auto hash = key.Hash();
     LOG_INFO(Render_OpenGL, "{:#016x}", hash);
 
@@ -625,6 +638,8 @@ std::unique_ptr<ComputePipeline> ShaderCache::CreateComputePipeline(
         UNREACHABLE();
     }
     return std::make_unique<ComputePipeline>(device, texture_cache, buffer_cache, program_manager, program.info, code, code_spirv, force_context_flush);
+} catch (const Shader::HmmaRejected&) {
+    throw;
 } catch (Shader::Exception& exception) {
     LOG_ERROR(Render_OpenGL, "{}", exception.what());
     return nullptr;

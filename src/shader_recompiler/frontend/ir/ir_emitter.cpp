@@ -2080,6 +2080,13 @@ U32 IREmitter::SubgroupGeMask() {
     return Inst<U32>(Opcode::SubgroupGeMask);
 }
 
+Value IREmitter::Hmma16816F16(const Value& a, const Value& b, const Value& c) {
+    if (a.Type() != Type::U32x4 || b.Type() != Type::U32x2 || c.Type() != Type::U32x2) {
+        throw InvalidArgument("HMMA requires packed U32x4/U32x2/U32x2 fragments");
+    }
+    return Inst(Opcode::Hmma16816F16, a, b, c);
+}
+
 U32 IREmitter::ShuffleIndex(const IR::U32& value, const IR::U32& index, const IR::U32& clamp,
                             const IR::U32& seg_mask) {
     return Inst<U32>(Opcode::ShuffleIndex, value, index, clamp, seg_mask);

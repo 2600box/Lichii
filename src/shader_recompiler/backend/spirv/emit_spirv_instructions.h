@@ -24,6 +24,7 @@ using Sirit::Id;
 class EmitContext;
 
 // Microinstruction emitters
+Id EmitHmma16816F16(EmitContext& ctx, Id a, Id b, Id c);
 Id EmitPhi(EmitContext& ctx, IR::Inst* inst);
 void EmitVoid(EmitContext& ctx);
 Id EmitIdentity(EmitContext& ctx, const IR::Value& value);

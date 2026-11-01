@@ -1166,6 +1166,7 @@ add_library(core STATIC
     memory/dmnt_cheat_vm.cpp
     memory/dmnt_cheat_vm.h
     memory/read_traps.h
+    nx2_cpu_profile.h
     perf_stats.cpp
     perf_stats.h
     reporter.cpp

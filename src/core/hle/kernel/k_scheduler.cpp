@@ -21,6 +21,7 @@
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/physical_core.h"
+#include "core/nx2_cpu_profile.h"
 
 namespace Kernel {
 
@@ -117,7 +118,10 @@ void KScheduler::PreemptSingleCore(KernelCore& kernel) {
     auto& previous_scheduler = kernel.Scheduler(thread->GetCurrentCore());
     previous_scheduler.Unload(kernel, thread);
 
-    Common::Fiber::YieldTo(thread->GetHostContext(), *m_switch_fiber);
+    {
+        const Core::Nx2CpuProfile::SwitchScope profile;
+        Common::Fiber::YieldTo(thread->GetHostContext(), *m_switch_fiber);
+    }
 
     GetCurrentThread(kernel).EnableDispatch(kernel);
 }
@@ -410,6 +414,7 @@ void KScheduler::ScheduleImpl(KernelCore& kernel) {
     m_switch_cur_thread = cur_thread;
     m_switch_highest_priority_thread = highest_priority_thread;
     m_switch_from_schedule = true;
+    const Core::Nx2CpuProfile::SwitchScope profile;
     Common::Fiber::YieldTo(cur_thread->m_host_context, *m_switch_fiber);
 
     // Returning from ScheduleImpl occurs after this thread has been scheduled again.

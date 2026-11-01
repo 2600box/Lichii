@@ -25,6 +25,43 @@
 
 namespace Shader::Maxwell {
 namespace {
+void ValidateHmmaControlFlow(const IR::Program& program) {
+    using Type = IR::AbstractSyntaxNode::Type;
+    std::optional<size_t> last_hmma;
+    for (size_t index = 0; index < program.syntax_list.size(); ++index) {
+        const auto& node = program.syntax_list[index];
+        if (node.type == Type::Block && std::ranges::any_of(node.data.block->Instructions(),
+                [](const IR::Inst& inst) { return inst.GetOpcode() == IR::Opcode::Hmma16816F16; })) {
+            last_hmma = index;
+        }
+    }
+    if (!last_hmma) return;
+    if (program.stage != Stage::Compute || program.workgroup_size != std::array<u32, 3>{128, 1, 1}) {
+        throw HmmaRejected("HMMA requires a 128x1x1 compute workgroup");
+    }
+    u32 depth{};
+    for (size_t index = 0; index <= *last_hmma; ++index) {
+        const auto& node = program.syntax_list[index];
+        switch (node.type) {
+        case Type::If:
+            ++depth;
+            break;
+        case Type::EndIf:
+            if (depth == 0) throw HmmaRejected("HMMA control flow has an unmatched merge");
+            --depth;
+            break;
+        case Type::Block:
+            if (depth != 0 && std::ranges::any_of(node.data.block->Instructions(),
+                    [](const IR::Inst& inst) { return inst.GetOpcode() == IR::Opcode::Hmma16816F16; })) {
+                throw HmmaRejected("HMMA occurs inside a nonuniform structured region");
+            }
+            break;
+        default:
+            throw HmmaRejected("HMMA requires converged selections without earlier loops or exits");
+        }
+    }
+}
+
 IR::BlockList GenerateBlocks(const IR::AbstractSyntaxList& syntax_list) {
     size_t num_syntax_blocks{};
     for (const auto& node : syntax_list) {
@@ -411,6 +448,7 @@ IR::Program TranslateProgram(ObjectPool<IR::Inst>& inst_pool, ObjectPool<IR::Blo
 
     CollectInterpolationInfo(env, program);
     AddNVNStorageBuffers(program);
+    ValidateHmmaControlFlow(program);
     return program;
 }
 

@@ -170,6 +170,9 @@ public:
                          IR::Program& program, Bindings& binding);
     ~EmitContext();
 
+    void PatchHmma(std::vector<u32>& code) const;
+    Id hmma_function{};
+
     [[nodiscard]] Id Def(const IR::Value& value);
 
     [[nodiscard]] Id BitOffset8(const IR::Value& offset);
@@ -396,6 +399,8 @@ public:
     bool uses_nonuniform_storage_texel_buffer{};
 
 private:
+    void DefineHmma(const IR::Program& program);
+    ::Common::unordered_map<u32, std::vector<u32>> hmma_rewrites;
     void DefineCommonTypes(const Info& info);
     void DefineCommonConstants();
     void DefineInterfaces(const IR::Program& program);

@@ -24,7 +24,10 @@ union Encoding {
 template <typename Callable>
 std::optional<u64> Track(Environment& env, Location block_begin, Location& pos, Callable&& func) {
     while (pos >= block_begin) {
-        const u64 insn{env.ReadInstruction(pos.Offset())};
+        const auto fetched = env.FetchInstruction(pos.Offset());
+        const auto* word = std::get_if<MaxwellInstructionWord>(&fetched);
+        if (!word) return std::nullopt;
+        const u64 insn{word->value};
         --pos;
         if (func(insn, Decode(insn))) {
             return insn;
