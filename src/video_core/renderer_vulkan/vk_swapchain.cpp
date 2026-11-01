@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <array>
-#include <limits>
 #include <vector>
 
 #ifdef __ANDROID__
@@ -90,19 +89,6 @@ static VkPresentModeKHR ChooseSwapPresentMode(bool has_imm, bool has_mailbox,
     }
 }
 
-VkExtent2D ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities, u32 width, u32 height) {
-    constexpr auto undefined_size{(std::numeric_limits<u32>::max)()};
-    if (capabilities.currentExtent.width != undefined_size) {
-        return capabilities.currentExtent;
-    }
-    VkExtent2D extent;
-    extent.width = (std::max)(capabilities.minImageExtent.width,
-                            (std::min)(capabilities.maxImageExtent.width, width));
-    extent.height = (std::max)(capabilities.minImageExtent.height,
-                             (std::min)(capabilities.maxImageExtent.height, height));
-    return extent;
-}
-
 VkCompositeAlphaFlagBitsKHR ChooseAlphaFlags(const VkSurfaceCapabilitiesKHR& capabilities) {
     if (capabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) {
         return VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
@@ -127,91 +113,105 @@ Swapchain::Swapchain(
     , device{device_}
     , scheduler{scheduler_}
 {
-    Create(surface, width_, height_);
+    if (!Create(surface, width_, height_)) {
+        throw vk::Exception(VK_ERROR_INITIALIZATION_FAILED);
+    }
 }
 
 Swapchain::~Swapchain() = default;
 
-void Swapchain::Create(
+bool Swapchain::Create(
     VkSurfaceKHR_T* surface_,
     u32 width_,
     u32 height_)
 {
-    is_outdated = false;
-    is_suboptimal = false;
+    const auto physical_device = device.GetPhysical();
+    const auto capabilities{physical_device.GetSurfaceCapabilitiesKHR(VkSurfaceKHR(surface_))};
+    if (!IsSwapchainExtentDrawable(capabilities.maxImageExtent) ||
+        !IsSwapchainExtentDrawable(ChooseSwapExtent(capabilities, width_, height_))) {
+        is_outdated = true;
+        return false;
+    }
+
+    // Presentation submits work outside the scheduler's timeline. Waiting for a
+    // scheduler tick does not make its images or binary semaphores safe to free.
+    // Serialize with both queue submit and present while draining that work.
+    std::scoped_lock lock{scheduler.submit_mutex};
+    if (swapchain) {
+        vk::Check(device.GetLogical().WaitIdle());
+    }
+    Destroy();
+
     width = width_;
     height = height_;
     surface = surface_;
-
-    const auto physical_device = device.GetPhysical();
-    const auto capabilities{physical_device.GetSurfaceCapabilitiesKHR(VkSurfaceKHR(surface))};
-    if (capabilities.maxImageExtent.width == 0 || capabilities.maxImageExtent.height == 0) {
-        return;
+    is_outdated = true;
+    if (!CreateSwapchain(capabilities)) {
+        return false;
     }
-
-    Destroy();
-
-    CreateSwapchain(capabilities);
     CreateSemaphores();
 
-    resource_ticks.clear();
-    resource_ticks.resize(image_count);
+    is_outdated = false;
+    is_suboptimal = false;
+    return true;
 }
 
-bool Swapchain::AcquireNextImage(bool may_flush) {
+SwapchainAcquireResult Swapchain::AcquireNextImage(VkSemaphore image_acquired) {
+    // A finite wait lets minimized/transitioning windows release their queued frames.
+    constexpr u64 acquire_timeout_ns = 100'000'000;
     const VkResult result = device.GetLogical().AcquireNextImageKHR(
-        *swapchain, (std::numeric_limits<u64>::max)(), *present_semaphores[frame_index],
+        *swapchain, acquire_timeout_ns, image_acquired,
         VK_NULL_HANDLE, &image_index);
-    switch (result) {
-    case VK_SUCCESS:
+    const auto acquired = ClassifySwapchainAcquire(result);
+    switch (acquired) {
+    case SwapchainAcquireResult::Acquired:
         break;
-    case VK_SUBOPTIMAL_KHR:
+    case SwapchainAcquireResult::Suboptimal:
         is_suboptimal = true;
         break;
-    case VK_ERROR_OUT_OF_DATE_KHR:
+    case SwapchainAcquireResult::Outdated:
         is_outdated = true;
-        break;
-    case VK_ERROR_SURFACE_LOST_KHR:
-        vk::Check(result);
-        break;
-    default:
+        return acquired;
+    case SwapchainAcquireResult::Unavailable:
+        return acquired;
+    case SwapchainAcquireResult::Error:
         LOG_ERROR(Render_Vulkan, "vkAcquireNextImageKHR returned {}", string_VkResult(result));
-        break;
+        vk::Check(result);
+        return acquired;
     }
 
-    const auto wait_with_frame_pacing = [this, may_flush] {
-    switch (Settings::values.frame_pacing_mode.GetValue()) {
-    case Settings::FramePacingMode::Target_Auto:
-        scheduler.Wait(resource_ticks[image_index], 0.0, may_flush);
-        break;
-    case Settings::FramePacingMode::Target_30:
-        scheduler.Wait(resource_ticks[image_index], 30.0, may_flush);
-        break;
-    case Settings::FramePacingMode::Target_60:
-        scheduler.Wait(resource_ticks[image_index], 60.0, may_flush);
-        break;
-    case Settings::FramePacingMode::Target_90:
-        scheduler.Wait(resource_ticks[image_index], 90.0, may_flush);
-        break;
-    case Settings::FramePacingMode::Target_120:
-        scheduler.Wait(resource_ticks[image_index], 120.0, may_flush);
-        break;
-    }
+    // Image acquisition, render_ready, and the frame's present_done fence order
+    // the copy. An unrelated scheduler.CurrentTick() can still be unsubmitted;
+    // waiting for it here stalls async presentation and does not protect WSI.
+    const auto wait_with_frame_pacing = [this] {
+        switch (Settings::values.frame_pacing_mode.GetValue()) {
+        case Settings::FramePacingMode::Target_Auto:
+            break;
+        case Settings::FramePacingMode::Target_30:
+            scheduler.Wait(0, 30.0, false);
+            break;
+        case Settings::FramePacingMode::Target_60:
+            scheduler.Wait(0, 60.0, false);
+            break;
+        case Settings::FramePacingMode::Target_90:
+            scheduler.Wait(0, 90.0, false);
+            break;
+        case Settings::FramePacingMode::Target_120:
+            scheduler.Wait(0, 120.0, false);
+            break;
+        }
     };
 
 #ifdef __ANDROID__
-    if (android_get_device_api_level() >= 30) {
-        scheduler.Wait(resource_ticks[image_index], 0.0, may_flush);
-    } else {
+    // Android 11+ uses platform frame pacing.
+    if (android_get_device_api_level() < 30) {
         wait_with_frame_pacing();
     }
 #else
     wait_with_frame_pacing();
 #endif
 
-    resource_ticks[image_index] = scheduler.CurrentTick();
-
-    return is_suboptimal || is_outdated;
+    return acquired;
 }
 
 void Swapchain::Present(VkSemaphore render_semaphore) {
@@ -232,6 +232,7 @@ void Swapchain::Present(VkSemaphore render_semaphore) {
         break;
     case VK_SUBOPTIMAL_KHR:
         LOG_DEBUG(Render_Vulkan, "Suboptimal swapchain");
+        is_suboptimal = true;
         break;
     case VK_ERROR_OUT_OF_DATE_KHR:
         is_outdated = true;
@@ -241,6 +242,7 @@ void Swapchain::Present(VkSemaphore render_semaphore) {
         break;
     default:
         LOG_CRITICAL(Render_Vulkan, "Failed to present with error {}", string_VkResult(result));
+        vk::Check(result);
         break;
     }
     ++frame_index;
@@ -249,7 +251,7 @@ void Swapchain::Present(VkSemaphore render_semaphore) {
     }
 }
 
-void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
+bool Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
     const auto physical_device{device.GetPhysical()};
     const auto formats{physical_device.GetSurfaceFormatsKHR(VkSurfaceKHR(surface))};
     const auto present_modes = physical_device.GetSurfacePresentModesKHR(VkSurfaceKHR(surface));
@@ -331,10 +333,16 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
         format_list.pNext = std::exchange(swapchain_ci.pNext, &format_list);
         swapchain_ci.flags |= VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR;
     }
-    // Request the size again to reduce the possibility of a TOCTOU race condition.
-    const auto updated_capabilities = physical_device.GetSurfaceCapabilitiesKHR(VkSurfaceKHR(surface));
-    swapchain_ci.imageExtent = ChooseSwapExtent(updated_capabilities, width, height);
-    // Don't add code within this and the swapchain creation.
+    // Resizing can continue while we wait for the old swapchain to finish. Probe
+    // again immediately before creation, including the zero-extent check.
+    const auto updated = physical_device.GetSurfaceCapabilitiesKHR(VkSurfaceKHR(surface));
+    if (!IsSwapchainExtentDrawable(updated.maxImageExtent)) {
+        return false;
+    }
+    swapchain_ci.imageExtent = ChooseSwapExtent(updated, width, height);
+    if (!IsSwapchainExtentDrawable(swapchain_ci.imageExtent)) {
+        return false;
+    }
     swapchain = device.GetLogical().CreateSwapchainKHR(swapchain_ci);
 
     extent = swapchain_ci.imageExtent;
@@ -347,12 +355,10 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
 #else
     image_view_format = VK_FORMAT_B8G8R8A8_UNORM;
 #endif
+    return true;
 }
 
 void Swapchain::CreateSemaphores() {
-    present_semaphores.resize(image_count);
-    std::ranges::generate(present_semaphores,
-                          [this] { return device.GetLogical().CreateSemaphore(); });
     render_semaphores.resize(image_count);
     std::ranges::generate(render_semaphores,
                           [this] { return device.GetLogical().CreateSemaphore(); });
@@ -360,9 +366,17 @@ void Swapchain::CreateSemaphores() {
 
 void Swapchain::Destroy() {
     frame_index = 0;
-    present_semaphores.clear();
     render_semaphores.clear();
     swapchain.reset();
+}
+
+void Swapchain::Release() {
+    std::scoped_lock lock{scheduler.submit_mutex};
+    if (swapchain) {
+        vk::Check(device.GetLogical().WaitIdle());
+        Destroy();
+    }
+    is_outdated = true;
 }
 
 bool Swapchain::NeedsPresentModeUpdate() const {

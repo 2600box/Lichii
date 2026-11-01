@@ -35,6 +35,7 @@
 #include "ui_configure_graphics.h"
 #include "yuzu/configuration/configuration_shared.h"
 #include "yuzu/configuration/configure_graphics.h"
+#include "yuzu/configuration/scrollable_graphics.h"
 #include "yuzu/configuration/shared_widget.h"
 
 #ifdef HAS_RESHADE
@@ -56,6 +57,7 @@ ConfigureGraphics::ConfigureGraphics(
     RetrieveVulkanDevices();
 
     ui->setupUi(this);
+    ConfigurationShared::MakeGraphicsScrollable(this);
 
     Setup(builder);
 

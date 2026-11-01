@@ -22,12 +22,17 @@
 namespace Vulkan {
 namespace {
 
-[[nodiscard]] bool AreExtensionsSupported(const vk::InstanceDispatch& dld, std::vector<VkExtensionProperties> const& properties, std::span<const char* const> extensions) {
+[[nodiscard]] bool HasExtension(std::span<const VkExtensionProperties> properties,
+                                const char* extension) {
+    return std::ranges::any_of(properties, [extension](const auto& property) {
+        return std::strcmp(extension, property.extensionName) == 0;
+    });
+}
+
+[[nodiscard]] bool AreExtensionsSupported(std::span<const VkExtensionProperties> properties,
+                                        std::span<const char* const> extensions) {
     for (const char* extension : extensions) {
-        const auto it = std::ranges::find_if(properties, [extension](const auto& prop) {
-            return std::strcmp(extension, prop.extensionName) == 0;
-        });
-        if (it == properties.end()) {
+        if (!HasExtension(properties, extension)) {
             LOG_ERROR(Render_Vulkan, "Required instance extension {} is not available", extension);
             return false;
         }
@@ -36,7 +41,7 @@ namespace {
 }
 
 [[nodiscard]] std::vector<const char*> RequiredExtensions(
-    const vk::InstanceDispatch& dld, std::vector<VkExtensionProperties> const& properties,
+    std::vector<VkExtensionProperties> const& properties,
     Core::Frontend::WindowSystemType window_type, bool enable_validation) {
     std::vector<const char*> extensions;
     extensions.reserve(6);
@@ -77,10 +82,10 @@ namespace {
     // Probe optional extensions against the same snapshot the caller verifies against, so the
     // check here and the verification in CreateInstance can never disagree (see TOCTOU note below).
 #ifdef __APPLE__
-    if (AreExtensionsSupported(dld, properties, std::array{VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME}))
+    if (HasExtension(properties, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME))
         extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
 #endif
-    if (enable_validation && AreExtensionsSupported(dld, properties, std::array{VK_EXT_DEBUG_UTILS_EXTENSION_NAME}))
+    if (enable_validation && HasExtension(properties, VK_EXT_DEBUG_UTILS_EXTENSION_NAME))
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     return extensions;
 }
@@ -139,8 +144,8 @@ vk::Instance CreateInstance(const Common::DynamicLibrary& library, vk::InstanceD
         throw vk::Exception(VK_ERROR_EXTENSION_NOT_PRESENT);
     }
     std::vector<const char*> const extensions =
-        RequiredExtensions(dld, *properties, window_type, enable_validation);
-    if (!AreExtensionsSupported(dld, *properties, extensions))
+        RequiredExtensions(*properties, window_type, enable_validation);
+    if (!AreExtensionsSupported(*properties, extensions))
         throw vk::Exception(VK_ERROR_EXTENSION_NOT_PRESENT);
     std::vector<const char*> layers = Layers(enable_validation);
     RemoveUnavailableLayers(dld, layers);

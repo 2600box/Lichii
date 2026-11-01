@@ -10,6 +10,76 @@ If a PR specifies it is for a given platform (i.e `linux`) then just test on Lin
 
 You may also build artifacts yourself, be aware that the resulting builds are NOT the same as those from CI, because of package versioning and build environment differences. One famous example is FFmpeg randomly breaking on many Arch distros due to packaging differences.
 
+## macOS regression checks (issue #13)
+
+These checks require an actual Mac and legally obtained game dumps; passing the
+host-side unit tests does not establish M5 performance or game compatibility.
+
+- Test a packaged release on a Mac without Homebrew OpenSSL or developer CA
+  files. Check for updates, then download the matching macOS asset. Certificate
+  verification must remain enabled. Network failures now log their actual cause.
+- Open global and per-game Graphics, Advanced, and Extras settings at a small
+  desktop size and with Retina scaling. Scroll to every setting and check that
+  controls, Apply/OK, and Cancel are reachable. Repeat after enlarging the window.
+- During gameplay, repeatedly enter and leave fullscreen with the green window
+  button and the fullscreen shortcut. Also resize, minimize/restore, and move
+  between displays. Repeat with asynchronous presentation on and off and with
+  Vulkan validation enabled. Check for invalid image indices, binary semaphore
+  reuse, and destruction of in-use swapchain images/semaphores.
+- Compare Pokepia in the same scene, with the same settings and warmed shader
+  caches. Disabled render-target slots should no longer produce
+  `surface.cpp: Unimplemented format=0`. This removes erroneous work in MoltenVK
+  shader-key construction; it is not a guarantee of 60 FPS.
+- Fire Emblem: Fortune's Weave also has **independent shader translation
+  blockers** in the issue's logs: call linkage, integer carry, runtime traps,
+  opcode `0xfae`, dot-product modifiers, cooperative matrix operations,
+  gradient textures, and uniform bindless-handle provenance. These are not
+  resolved by the platform changes. Re-test rendering and collect a fresh log
+  plus the rejected shader dumps and their constant-buffer/descriptor context
+  before changing translation semantics. Do not turn unsupported instructions
+  into no-ops or remove safety checks to claim rendering support.
+
+### Capturing the remaining shader failures
+
+For the black-screen investigation, start a fresh emulator process from Terminal:
+
+```sh
+capture_dir="$(mktemp -d -t eglantine-issue13)"
+cd "$capture_dir"
+printf 'Capture directory: %s\n' "$capture_dir"
+EDEN_NX2_SHADER_DUMP="$capture_dir" \
+EDEN_NX2_SHADER_DUMP_MAPPED=1 \
+EDEN_NATIVE_DRAW_DIAGNOSTICS=1 \
+/Applications/eglantine.app/Contents/MacOS/eglantine
+```
+
+Reproduce the black screen, exit, and retain the capture directory together with
+`~/.local/share/eden/log/eden_log.txt`. These existing diagnostic switches save
+native programs even when lowering rejects them; the ordinary guest-shader dump
+option alone does not capture all such failures. Run performance comparisons
+without these switches, since capturing adds overhead.
+
+### Testing an external macOS Vulkan driver
+
+The release continues to bundle MoltenVK. To experiment with another ICD such as
+[Mesa KosmicKrisp](https://docs.mesa3d.org/drivers/kosmickrisp.html), install that
+driver and a compatible Vulkan loader separately, then launch the executable
+directly from Terminal with explicit paths:
+
+```sh
+LIBVULKAN_PATH=/absolute/path/to/libvulkan.1.dylib \
+VK_DRIVER_FILES=/absolute/path/to/kosmickrisp_icd.json \
+/Applications/eglantine.app/Contents/MacOS/eglantine
+```
+
+Use the loader library, not an ICD library that only exports ICD entry points.
+Confirm the selected driver in the startup log and Graphics device list. An
+invalid `LIBVULKAN_PATH` now fails explicitly instead of silently reverting to
+MoltenVK. Extended Dynamic State remains off by default on macOS but can be
+selected for an ICD that supports it; features are still checked against the
+device. This is an experimental test path, not a claim of KosmicKrisp game
+compatibility. Unset both variables to return to the bundled driver.
+
 ## Quickstart
 
 Think of the source code as a "tree", with the "trunk" of that tree being our `master` branch, any other branches are PRs or separate development branches, only our stable releases pull from `master` - all other branches are considered unstable and aren't recommended to pull from unless you're testing multiple branches at once.

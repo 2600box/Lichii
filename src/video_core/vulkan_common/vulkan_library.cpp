@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <string>
 
 #include "common/dynamic_library.h"
@@ -22,15 +23,26 @@ std::shared_ptr<Common::DynamicLibrary> OpenLibrary(
 #else
     auto library = std::make_shared<Common::DynamicLibrary>();
 #ifdef __APPLE__
+    // An explicit loader is also how users opt into a Mesa/KosmicKrisp ICD.
+    // Never silently replace a broken override with the bundled MoltenVK.
+    if (const char* override_path = std::getenv("LIBVULKAN_PATH");
+        override_path && *override_path) {
+        if (library->Open(override_path)) {
+            LOG_INFO(Render_Vulkan, "Using Vulkan library override: {}", override_path);
+        } else {
+            LOG_ERROR(Render_Vulkan, "Could not open Vulkan library override: {}", override_path);
+        }
+        return library;
+    }
     const auto libvulkan_filename =
         Common::FS::GetBundleDirectory() / "Contents/Frameworks/libvulkan.1.dylib";
     const auto libmoltenvk_filename =
         Common::FS::GetBundleDirectory() / "Contents/Frameworks/libMoltenVK.dylib";
-    const char* library_paths[] = {std::getenv("LIBVULKAN_PATH"), libvulkan_filename.c_str(),
-                                   libmoltenvk_filename.c_str()};
-    // Check if a path to a specific Vulkan library has been specified.
+    const char* library_paths[] = {libvulkan_filename.c_str(), libmoltenvk_filename.c_str(),
+                                  "libvulkan.1.dylib", "libvulkan.dylib"};
     for (const auto& library_path : library_paths) {
         if (library_path && library->Open(library_path)) {
+            LOG_INFO(Render_Vulkan, "Using Vulkan library: {}", library_path);
             break;
         }
     }

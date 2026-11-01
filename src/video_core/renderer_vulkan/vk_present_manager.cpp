@@ -153,6 +153,7 @@ PresentManager::PresentManager(const vk::Instance& instance_,
             .pNext = nullptr,
             .flags = 0,
         });
+        frame.image_acquired = dld.CreateSemaphore();
         frame.present_done = dld.CreateFence({
             .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
             .pNext = nullptr,
@@ -355,9 +356,12 @@ void PresentManager::PresentThread(std::stop_token token) {
     }
 }
 
-void PresentManager::RecreateSwapchain(Frame* frame) {
-    swapchain.Create(*surface, frame->width, frame->height); // Pass raw pointer
+bool PresentManager::RecreateSwapchain(Frame* frame) {
+    if (!swapchain.Create(*surface, frame->width, frame->height)) {
+        return false;
+    }
     SetImageCount();
+    return true;
 }
 
 void PresentManager::SetImageCount() {
@@ -393,49 +397,73 @@ void PresentManager::DiscardFrame(Frame* frame) {
     };
 
     std::scoped_lock submit_lock{scheduler.submit_mutex};
-    void(device.GetGraphicsQueue().Submit(submit_info, *frame->present_done));
+    vk::Check(device.GetGraphicsQueue().Submit(submit_info, *frame->present_done));
 }
 
 void PresentManager::CopyToSwapchain(Frame* frame) {
     bool requires_recreation = false;
+    bool submitted = false;
 
     for (u32 attempt = 0; attempt < MAX_PRESENT_ATTEMPTS; ++attempt) {
         try {
             // Recreate surface and swapchain if needed.
+            if (surface_lost) {
+                // All swapchains using a surface must be destroyed before the surface itself.
+                swapchain.Release();
+                auto replacement = CreateSurface(instance, render_window.GetWindowInfo());
+                surface = std::move(replacement);
+                surface_lost = false;
+                requires_recreation = true;
+            }
             if (requires_recreation) {
-#ifdef __ANDROID__
-                surface = CreateSurface(instance, render_window.GetWindowInfo());
-#endif
-                RecreateSwapchain(frame);
+                if (!RecreateSwapchain(frame)) {
+                    break;
+                }
             }
 
             // Draw to swapchain.
-            return CopyToSwapchainImpl(frame);
+            return CopyToSwapchainImpl(frame, submitted);
         } catch (const vk::Exception& except) {
-            if (except.GetResult() != VK_ERROR_SURFACE_LOST_KHR) {
+            if (except.GetResult() != VK_ERROR_SURFACE_LOST_KHR &&
+                except.GetResult() != VK_ERROR_OUT_OF_DATE_KHR) {
                 throw;
             }
 
             requires_recreation = true;
+            surface_lost = except.GetResult() == VK_ERROR_SURFACE_LOST_KHR;
+            if (submitted) {
+                // Present failed after the copy consumed render_ready and signaled
+                // present_done. Retrying/discarding this frame would wait on the
+                // same binary semaphore twice. Recover on the next frame instead.
+                return;
+            }
         }
     }
 
     DiscardFrame(frame);
 }
 
-void PresentManager::CopyToSwapchainImpl(Frame* frame) {
+void PresentManager::CopyToSwapchainImpl(Frame* frame, bool& submitted) {
 
     // If the size of the incoming frames has changed, recreate the swapchain
     // to account for that.
     const bool is_suboptimal = swapchain.NeedsRecreation();
     const bool size_changed =
         swapchain.GetWidth() != frame->width || swapchain.GetHeight() != frame->height;
-    if (is_suboptimal || size_changed) {
-        RecreateSwapchain(frame);
+    if ((is_suboptimal || size_changed) && !RecreateSwapchain(frame)) {
+        return DiscardFrame(frame);
     }
 
-    while (swapchain.AcquireNextImage(!use_present_thread)) {
-        RecreateSwapchain(frame);
+    for (u32 attempt = 0;; ++attempt) {
+        const auto result = swapchain.AcquireNextImage(*frame->image_acquired);
+        if (result == SwapchainAcquireResult::Acquired ||
+            result == SwapchainAcquireResult::Suboptimal) {
+            break;
+        }
+        if (result != SwapchainAcquireResult::Outdated || attempt + 1 >= MAX_PRESENT_ATTEMPTS ||
+            !RecreateSwapchain(frame)) {
+            return DiscardFrame(frame);
+        }
     }
 
     const vk::CommandBuffer cmdbuf{frame->cmdbuf};
@@ -544,7 +572,7 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
 
     cmdbuf.End();
 
-    const VkSemaphore present_semaphore = swapchain.CurrentPresentSemaphore();
+    const VkSemaphore present_semaphore = *frame->image_acquired;
     const VkSemaphore render_semaphore = swapchain.CurrentRenderSemaphore();
     const std::array wait_semaphores = {present_semaphore, *frame->render_ready};
 
@@ -580,6 +608,8 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
             break;
         }
     }
+
+    submitted = true;
 
     // Present
     swapchain.Present(render_semaphore);

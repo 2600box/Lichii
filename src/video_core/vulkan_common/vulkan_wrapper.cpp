@@ -14,6 +14,7 @@
 #include "common/logging.h"
 #include "video_core/vulkan_common/vk_enum_string_helper.h"
 #include "video_core/vulkan_common/vma.h"
+#include "video_core/vulkan_common/vulkan_instance_flags.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace Vulkan::vk {
@@ -457,11 +458,8 @@ VkResult Free(VkDevice device, VkCommandPool handle, Span<VkCommandBuffer> buffe
 
 Instance Instance::Create(u32 version, Span<const char*> layers, Span<const char*> extensions,
                           InstanceDispatch& dispatch) {
-#ifdef __APPLE__
-    constexpr VkFlags ci_flags{VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR};
-#else
-    constexpr VkFlags ci_flags{};
-#endif
+    const VkInstanceCreateFlags ci_flags =
+        InstanceFlagsForExtensions(std::span{extensions.data(), extensions.size()});
     // DO NOT TOUCH, breaks RNDA3!!
 	// Don't know why, but gloom + yellow line glitch appears
     const VkApplicationInfo application_info{

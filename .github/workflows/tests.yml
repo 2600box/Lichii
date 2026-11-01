@@ -104,3 +104,75 @@ jobs:
       - name: Run dynarmic tests
         shell: bash
         run: build/tests/bin/dynarmic_tests.exe --durations yes
+
+  macos:
+    name: macOS graphics and HTTPS regressions (arm64)
+    runs-on: macos-15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          test "$(uname -m)" = arm64
+          brew install autoconf automake boost ccache cmake ffmpeg fmt glslang \
+            libtool libusb lz4 ninja nlohmann-json openssl@3 pkgconf sdl3 \
+            speexdsp zlib zstd
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          host: mac
+          target: desktop
+          arch: clang_64
+          modules: qtcharts
+          cache: true
+
+      - name: Cache dependencies and compiler objects
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/cpm
+            .ccache
+          key: macos-tests-${{ hashFiles('cpmfile.json') }}-${{ github.sha }}
+          restore-keys: |
+            macos-tests-${{ hashFiles('cpmfile.json') }}-
+
+      - name: Configure
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+        run: >-
+          cmake -S . -B build/tests -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_OSX_ARCHITECTURES=arm64
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0
+          -DYUZU_TESTS=ON -DDYNARMIC_TESTS=OFF
+          -DENABLE_QT=ON -DYUZU_USE_BUNDLED_QT=OFF
+          "-DCMAKE_PREFIX_PATH=$QT_ROOT_DIR;$(brew --prefix)"
+          "-DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)"
+          -DYUZU_USE_BUNDLED_OPENSSL=OFF
+          -DYUZU_USE_BUNDLED_SDL3=OFF -DYUZU_USE_BUNDLED_MOLTENVK=ON
+          -DVulkanHeaders_FORCE_BUNDLED=ON -DVulkanUtilityLibraries_FORCE_BUNDLED=ON
+          -DYUZU_CMD=OFF -DYUZU_ROOM=OFF -DYUZU_ROOM_STANDALONE=OFF
+          -DENABLE_WEB_SERVICE=OFF -DENABLE_UPDATE_CHECKER=ON
+          "-DEGLANTINE_UPDATE_REPO=$GITHUB_REPOSITORY"
+          -DUSE_DISCORD_PRESENCE=OFF -DENABLE_WERROR=OFF -DUSE_CCACHE=ON
+
+      - name: Build application and regression tests
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+        run: cmake --build build/tests --target yuzu tests configuration_tests --parallel 2
+
+      - name: Run graphics and layout regressions
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          build/tests/bin/tests '[vulkan]' --reporter console
+          ctest --test-dir build/tests -R '^configuration_tests$' --output-on-failure
+
+      - name: Check GitHub HTTPS without Homebrew certificate files
+        env:
+          SSL_CERT_FILE: /dev/null
+          SSL_CERT_DIR: /nonexistent-eglantine-ca-directory
+        run: build/tests/bin/tests '[network]' --reporter console

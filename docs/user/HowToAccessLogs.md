@@ -36,6 +36,17 @@ Use this when you need to review the logs to determine an issue or provide them 
 3. Your log files are now here for your review or upload.
 </aside>
 
+### macOS
+
+The default log directory is `/Users/<USER>/.local/share/eden/log`. In Finder,
+press **Shift+Command+G** and enter `~/.local/share/eden/log`, or use
+**File > Open Eden Folder > Log Folder** in the emulator. A portable installation
+or an overridden data directory can change this location.
+
+Reproduce the problem, close the emulator, and copy `eden_log.txt` before launching
+it again. For an application crash, also include the macOS crash report from
+Console (Crash Reports), or `~/Library/Logs/DiagnosticReports`.
+
 ### Android
 
 *Logs are stored in the application data, so you wouldn't be able to access the files directly without a rooted device.*

@@ -3,7 +3,8 @@
 
 #pragma once
 
-#define CPPHTTPLIB_DISABLE_MACOSX_AUTOMATIC_ROOT_CERTIFICATES 1
+// Use the macOS Keychain trust store. A packaged app cannot rely on the
+// Homebrew OpenSSL certificate directory from the machine that built it.
 #define CPPHTTPLIB_OPENSSL_SUPPORT 1
 
 #ifdef __GNUC__

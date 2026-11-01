@@ -11,6 +11,7 @@ add_executable(tests
     common/fibers.cpp
     common/host_memory.cpp
     common/host_memory_fallback.cpp
+    common/https.cpp
     common/param_package.cpp
     common/range_map.cpp
     common/ring_buffer.cpp
@@ -29,6 +30,8 @@ add_executable(tests
     core/internal_network/network.cpp
     video_core/memory_tracker.cpp
     video_core/memory_budget.cpp
+    video_core/color_output.cpp
+    video_core/swapchain_state.cpp
     video_core/astc_recompression_override.cpp
     video_core/nx2_video_configuration.cpp
     video_core/nx2_decoder_image.cpp
@@ -72,6 +75,24 @@ target_link_libraries(tests PRIVATE common core input_common video_core)
 target_link_libraries(tests PRIVATE ${PLATFORM_LIBRARIES} Catch2::Catch2WithMain Threads::Threads)
 
 add_test(NAME tests COMMAND tests)
+
+if (ENABLE_QT)
+    add_executable(configuration_tests qt/scrollable_graphics.cpp)
+    target_include_directories(configuration_tests PRIVATE ${PROJECT_SOURCE_DIR}/src)
+    target_link_libraries(configuration_tests PRIVATE Qt6::Widgets Catch2::Catch2WithMain)
+    if (TARGET Qt6::QOffscreenIntegrationPlugin)
+        qt_import_plugins(configuration_tests INCLUDE Qt6::QOffscreenIntegrationPlugin)
+    endif()
+    add_test(NAME configuration_tests COMMAND configuration_tests)
+    set_tests_properties(configuration_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+    if (TARGET Qt6::QOffscreenIntegrationPlugin)
+        # The application deploys only its native platform plugin beside these
+        # binaries. Locate the headless test plugin in the original Qt package.
+        set_property(TEST configuration_tests APPEND PROPERTY ENVIRONMENT
+            "QT_QPA_PLATFORM_PLUGIN_PATH=$<TARGET_FILE_DIR:Qt6::QOffscreenIntegrationPlugin>")
+    endif()
+endif()
 
 # needed for vma
 if (NOT MSVC)

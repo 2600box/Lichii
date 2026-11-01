@@ -15,6 +15,7 @@
 #include "ui_configure_graphics_extensions.h"
 #include "yuzu/configuration/configuration_shared.h"
 #include "yuzu/configuration/configure_graphics_extensions.h"
+#include "yuzu/configuration/scrollable_graphics.h"
 #include "yuzu/configuration/shared_widget.h"
 
 ConfigureGraphicsExtensions::ConfigureGraphicsExtensions(
@@ -24,6 +25,7 @@ ConfigureGraphicsExtensions::ConfigureGraphicsExtensions(
       system{system_} {
 
     ui->setupUi(this);
+    ConfigurationShared::MakeGraphicsScrollable(this);
 
     Setup(builder);
 
@@ -39,6 +41,8 @@ void ConfigureGraphicsExtensions::Setup(const ConfigurationShared::Builder& buil
 
     std::map<u32, QWidget*> hold{}; // A map will sort the data for us
 
+    // Feature availability is checked by the selected Vulkan device. macOS
+    // defaults EDS to disabled for MoltenVK, but other ICDs can support it.
     for (auto setting :
          Settings::values.linkage.by_category[Settings::Category::RendererExtensions]) {
         ConfigurationShared::Widget* widget = [&]() {
@@ -61,14 +65,6 @@ void ConfigureGraphicsExtensions::Setup(const ConfigurationShared::Builder& buil
         }
 
         hold.emplace(setting->Id(), widget);
-
-#ifdef __APPLE__
-        if (setting->Id() == Settings::values.dyna_state.Id()) {
-            widget->setEnabled(false);
-            widget->setToolTip(tr("Extended Dynamic State is disabled on macOS due to MoltenVK "
-                                  "compatibility issues that cause black screens."));
-        }
-#endif
     }
 
     for (const auto& [id, widget] : hold) {

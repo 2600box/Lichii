@@ -242,6 +242,12 @@ endif()
 target_link_libraries(common PRIVATE OpenSSL::SSL)
 target_link_libraries(common PUBLIC Boost::filesystem Boost::context httplib::httplib nlohmann_json::nlohmann_json)
 
+if (APPLE)
+    # Also needed when using a system/header-only cpp-httplib package.
+    find_library(CoreFoundation_LIBRARY CoreFoundation REQUIRED)
+    target_link_libraries(common PUBLIC ${Security_LIBRARY} ${CoreFoundation_LIBRARY})
+endif()
+
 if (lz4_ADDED)
     target_include_directories(common PRIVATE ${lz4_SOURCE_DIR}/lib)
 endif()

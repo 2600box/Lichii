@@ -119,6 +119,10 @@ std::optional<std::string> MakeRequest(const std::string& url, const std::string
         constexpr std::size_t timeout_seconds = 15;
 
         std::unique_ptr<httplib::Client> client = std::make_unique<httplib::Client>(url);
+        if (!client->is_valid()) {
+            LOG_ERROR(Common, "Invalid URL {}{}", url, path);
+            return {};
+        }
         client->set_connection_timeout(timeout_seconds);
         client->set_read_timeout(timeout_seconds);
         client->set_write_timeout(timeout_seconds);
@@ -126,11 +130,6 @@ std::optional<std::string> MakeRequest(const std::string& url, const std::string
 #ifdef YUZU_BUNDLED_OPENSSL
         client->load_ca_cert_store(kCert, sizeof(kCert));
 #endif
-
-        if (client == nullptr) {
-            LOG_ERROR(Common, "Invalid URL {}{}", url, path);
-            return {};
-        }
 
         httplib::Request request{
             .method = "GET",
@@ -143,7 +142,8 @@ std::optional<std::string> MakeRequest(const std::string& url, const std::string
         httplib::Result result = client->send(request);
 
         if (!result) {
-            LOG_ERROR(Common, "GET to {}{} returned null", url, path);
+            LOG_ERROR(Common, "GET to {}{} failed: {}", url, path,
+                      httplib::to_string(result.error()));
             return {};
         }
 

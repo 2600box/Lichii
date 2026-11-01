@@ -36,6 +36,7 @@
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
+#include "video_core/renderer_vulkan/vk_color_output.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -208,20 +209,6 @@ Shader::TessSpacing MaxwellToTessSpacing(u32 raw) {
     }
     ASSERT(false);
     return Shader::TessSpacing::Equal;
-}
-
-Shader::AttributeType ColorOutputType(u8 render_target_format) {
-    const auto format = static_cast<Tegra::RenderTargetFormat>(render_target_format);
-    if (format == Tegra::RenderTargetFormat::NONE) {
-        return Shader::AttributeType::Float;
-    }
-    const auto pixel_format = VideoCore::Surface::PixelFormatFromRenderTargetFormat(format);
-    if (!VideoCore::Surface::IsPixelFormatInteger(pixel_format)) {
-        return Shader::AttributeType::Float;
-    }
-    return VideoCore::Surface::IsPixelFormatSignedInteger(pixel_format)
-               ? Shader::AttributeType::SignedInt
-               : Shader::AttributeType::UnsignedInt;
 }
 
 // What translation and SPIR-V emission read of a pipeline key, plus the settings they read

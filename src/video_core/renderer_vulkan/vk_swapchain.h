@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "common/common_types.h"
+#include "video_core/renderer_vulkan/vk_swapchain_state.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace Layout {
@@ -30,22 +31,24 @@ public:
         u32 height);
     ~Swapchain();
 
-    /// Creates (or recreates) the swapchain with a given size.
-    void Create(
+    /// Creates (or recreates) the swapchain. False if the surface has no drawable extent.
+    bool Create(
         VkSurfaceKHR_T* surface,
         u32 width,
         u32 height);
 
-    /// Acquires the next image in the swapchain, waits as needed.
-    /// `may_flush`: false on the async present thread (see Scheduler::Wait).
-    bool AcquireNextImage(bool may_flush = true);
+    /// Acquires an image. The caller fences reuse of image_acquired with its copy submission.
+    SwapchainAcquireResult AcquireNextImage(VkSemaphore image_acquired);
 
     /// Presents the rendered image to the swapchain.
     void Present(VkSemaphore render_semaphore);
 
+    /// Finish outstanding work and release the swapchain before replacing its surface.
+    void Release();
+
     /// Returns true when the swapchain needs to be recreated.
     bool NeedsRecreation() const {
-        return IsSubOptimal() || NeedsPresentModeUpdate();
+        return !swapchain || is_outdated || IsSubOptimal() || NeedsPresentModeUpdate();
     }
 
     /// Returns true when the swapchain is outdated.
@@ -90,10 +93,6 @@ public:
         return surface_format.format;
     }
 
-    VkSemaphore CurrentPresentSemaphore() const {
-        return *present_semaphores[frame_index];
-    }
-
     VkSemaphore CurrentRenderSemaphore() const {
         return *render_semaphores[image_index];
     }
@@ -111,7 +110,7 @@ public:
     }
 
 private:
-    void CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities);
+    bool CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities);
     void CreateSemaphores();
     void CreateImageViews();
 
@@ -128,8 +127,6 @@ private:
 
     std::size_t image_count{};
     std::vector<VkImage> images;
-    std::vector<u64> resource_ticks;
-    std::vector<vk::Semaphore> present_semaphores;
     std::vector<vk::Semaphore> render_semaphores;
 
     u32 width;

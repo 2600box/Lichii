@@ -36,6 +36,8 @@ struct Frame {
     vk::Framebuffer framebuffer;
     vk::CommandBuffer cmdbuf;
     vk::Semaphore render_ready;
+    // Reuse only after present_done: it fences the submit consuming this semaphore.
+    vk::Semaphore image_acquired;
     vk::Fence present_done;
     bool storage_capable{};
 };
@@ -77,9 +79,9 @@ private:
 
     void CopyToSwapchain(Frame* frame);
 
-    void CopyToSwapchainImpl(Frame* frame);
+    void CopyToSwapchainImpl(Frame* frame, bool& submitted);
 
-    void RecreateSwapchain(Frame* frame);
+    bool RecreateSwapchain(Frame* frame);
 
     void DiscardFrame(Frame* frame);
 
@@ -106,6 +108,7 @@ private:
     bool blit_supported;
     bool storage_supported;
     bool use_present_thread;
+    bool surface_lost{};
     std::atomic<std::size_t> image_count{};
     std::atomic<std::size_t> swapchain_image_count{};
     std::atomic<VkFormat> swapchain_image_format{};

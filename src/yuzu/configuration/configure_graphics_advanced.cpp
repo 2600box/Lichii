@@ -13,6 +13,7 @@
 #include "ui_configure_graphics_advanced.h"
 #include "yuzu/configuration/configuration_shared.h"
 #include "yuzu/configuration/configure_graphics_advanced.h"
+#include "yuzu/configuration/scrollable_graphics.h"
 #include "yuzu/configuration/shared_widget.h"
 
 ConfigureGraphicsAdvanced::ConfigureGraphicsAdvanced(
@@ -21,6 +22,7 @@ ConfigureGraphicsAdvanced::ConfigureGraphicsAdvanced(
     : Tab(group_, parent), ui{std::make_unique<Ui::ConfigureGraphicsAdvanced>()}, system{system_} {
 
     ui->setupUi(this);
+    ConfigurationShared::MakeGraphicsScrollable(this);
 
     Setup(builder);
 
