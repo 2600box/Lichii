@@ -31,6 +31,7 @@ add_executable(tests
     video_core/memory_tracker.cpp
     video_core/memory_budget.cpp
     video_core/color_output.cpp
+    video_core/gpfifo_capture.cpp
     video_core/swapchain_state.cpp
     video_core/astc_recompression_override.cpp
     video_core/nx2_video_configuration.cpp
