@@ -15,6 +15,7 @@ on:
       - "CMakeModules/**"
       - "externals/**"
       - "tools/windows/**"
+      - "tools/macos/**"
       - ".patch/**"
       - "cpmfile.json"
       - ".github/workflows/tests.yml"
@@ -121,6 +122,9 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+
+      - name: Test trust fixture lifecycle without modifying the keychain
+        run: python3 -m unittest discover -s tools/macos -p 'test_https_trust_fixture.py' -v
 
       - name: Install dependencies
         run: |

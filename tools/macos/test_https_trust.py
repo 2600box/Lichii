@@ -14,9 +14,44 @@ import threading
 import uuid
 
 
+class TemporaryTrustRoot:
+    """Manage only a freshly generated root on a disposable hosted runner."""
+
+    def __init__(self, run, certificate, fingerprint):
+        self.run = run
+        self.certificate = str(certificate)
+        self.fingerprint = fingerprint
+        self.keychain = "/Library/Keychains/System.keychain"
+        self.installed = False
+
+    def set(self, *settings):
+        # add-trusted-cert calls SecTrustSettingsSetTrustSettings, which REPLACES
+        # this certificate's previous settings, rather than accumulating them.
+        # Do not remove between cases: remove-trusted-cert hangs on current CI
+        # images (https://github.com/actions/runner-images/issues/12116).
+        # Mark before invoking the command so partial failures get cleaned up.
+        self.installed = True
+        self.run("sudo", "-n", "security", "add-trusted-cert", "-d", "-k", self.keychain,
+                 *settings, self.certificate)
+
+    def cleanup(self):
+        if not self.installed:
+            return
+        try:
+            # Deleting a keychain certificate alone need not remove its trust
+            # settings. Leave an explicit deny record, never a trusted root;
+            # the disposable VM teardown removes this residual record.
+            self.set("-r", "deny")
+        finally:
+            self.run("sudo", "-n", "security", "delete-certificate", "-Z",
+                     self.fingerprint, self.keychain)
+            self.installed = False
+
+
 def main():
-    if sys.platform != "darwin" or os.environ.get("GITHUB_ACTIONS") != "true":
-        raise SystemExit("This test modifies trust settings; run only on a disposable macOS CI runner")
+    if (sys.platform != "darwin" or os.environ.get("GITHUB_ACTIONS") != "true" or
+            os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"):
+        raise SystemExit("This test modifies trust settings; run only on a GitHub-hosted macOS runner")
     parser = argparse.ArgumentParser()
     parser.add_argument("tests", type=Path)
     parser.add_argument("--openssl", required=True)
@@ -29,9 +64,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="eglantine-tls-") as temporary:
         directory = Path(temporary)
         servers = []
-        installed = False
         root = directory / "root.pem"
-        keychain = "/Library/Keychains/System.keychain"
         identity = uuid.uuid4().hex
 
         def openssl(*arguments):
@@ -70,6 +103,7 @@ def main():
         untrusted = certificate("untrusted", "untrusted-root")
         wrong_host = certificate("wrong-host", "root", "wrong.invalid")
         fingerprint = hashlib.sha1(ssl.PEM_cert_to_DER_cert(root.read_text())).hexdigest()
+        trust_root = TemporaryTrustRoot(run, root, fingerprint)
 
         class Handler(http.server.BaseHTTPRequestHandler):
             redirects = {}
@@ -101,24 +135,6 @@ def main():
             servers.append(server)
             return server.server_port
 
-        def clear_trust():
-            nonlocal installed
-            if installed:
-                try:
-                    run("sudo", "-n", "security", "remove-trusted-cert", "-d", str(root))
-                finally:
-                    run("sudo", "-n", "security", "delete-certificate", "-Z", fingerprint, keychain)
-                    installed = False
-
-        def trust(*settings):
-            nonlocal installed
-            clear_trust()
-            # Only this uniquely generated public certificate enters the keychain;
-            # no private keys or existing certificates/settings are modified.
-            installed = True
-            run("sudo", "-n", "security", "add-trusted-cert", "-d", "-k", keychain,
-                *settings, str(root))
-
         def check(label, accepted, path="/"):
             print(f"Native trust case: {label}", flush=True)
             environment = dict(os.environ, EGLANTINE_TEST_TLS_URL=f"https://localhost:{origin}",
@@ -143,21 +159,21 @@ def main():
             }
             check("untrusted root", False)
             check_custom_ca()
-            trust("-r", "trustRoot", "-p", "ssl")
+            trust_root.set("-r", "trustRoot", "-p", "ssl")
             check("trusted SSL root without filesystem CA files", True)
             check_custom_ca()
             check("trusted cross-host redirect", True, "/redirect-good")
             check("redirect to untrusted root", False, "/redirect-untrusted")
             check("redirect with wrong hostname", False, "/redirect-wrong-host")
-            trust("-r", "trustRoot", "-p", "codeSign")
+            trust_root.set("-r", "trustRoot", "-p", "codeSign")
             check("root trusted only for code signing", False)
-            trust("-r", "trustRoot", "-p", "ssl", "-s", "wrong.invalid")
+            trust_root.set("-r", "trustRoot", "-p", "ssl", "-s", "wrong.invalid")
             check("root trusted only for another hostname", False)
-            trust("-r", "deny")
+            trust_root.set("-r", "deny")
             check("explicitly distrusted root", False)
         finally:
             try:
-                clear_trust()
+                trust_root.cleanup()
             finally:
                 for server in servers:
                     server.shutdown()
