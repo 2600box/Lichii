@@ -107,7 +107,7 @@ void UpdateDialog::Download() {
     client->set_follow_location(true);
     client->set_default_headers({{"User-Agent", "Eglantine"}});
 
-#ifdef YUZU_BUNDLED_OPENSSL
+#if defined(YUZU_BUNDLED_OPENSSL) && !defined(CPPHTTPLIB_EGLANTINE_MACOS_NATIVE_TRUST)
     client->load_ca_cert_store(kCert, sizeof(kCert));
 #endif
 

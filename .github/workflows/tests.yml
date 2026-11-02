@@ -120,7 +120,7 @@ jobs:
             speexdsp zlib zstd
 
       - name: Install Qt
-        uses: jurplel/install-qt-action@v4
+        uses: jurplel/install-qt-action@b344308e4483fc892e0d27b3cd1b173ebdd95f06 # v4
         with:
           version: '6.8.3'
           host: mac
@@ -176,3 +176,8 @@ jobs:
           SSL_CERT_FILE: /dev/null
           SSL_CERT_DIR: /nonexistent-eglantine-ca-directory
         run: build/tests/bin/tests '[network]' --reporter console
+
+      - name: Reject distrusted and restricted macOS roots, including redirects
+        run: >-
+          python3 tools/macos/test_https_trust.py build/tests/bin/tests
+          --openssl "$(brew --prefix openssl@3)/bin/openssl"

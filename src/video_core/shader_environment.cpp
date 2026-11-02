@@ -629,8 +629,17 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
             if (table.enabled && table.size && table.size <= Tegra::Engines::Maxwell3D::Regs::MaxConstBufferSize) {
                 std::vector<u8> bytes(table.size);
                 gpu_memory->ReadBlock(table.address, bytes.data(), bytes.size());
-                std::ofstream dump(fmt::format("native-graphics-cbuf-{}-1.bin", static_cast<u32>(program)), std::ios::binary);
-                dump.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+                const char* capture_directory = std::getenv("EDEN_NX2_SHADER_DUMP");
+                const auto dump_directory = capture_directory
+                                                ? std::filesystem::path{Common::FS::ToU8String(capture_directory)}
+                                                : std::filesystem::path{};
+                const auto dump_path = dump_directory /
+                    fmt::format("native-graphics-cbuf-{}-1.bin", static_cast<u32>(program));
+                std::ofstream dump(dump_path, std::ios::binary);
+                if (!dump.write(reinterpret_cast<const char*>(bytes.data()), bytes.size())) {
+                    LOG_ERROR(Render, "Could not write native constant buffer dump: {}",
+                              dump_path.string());
+                }
             }
         }
         if (program == Maxwell::ShaderType::Pixel && std::getenv("EDEN_NX2_SHADER_DUMP")) {

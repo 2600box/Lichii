@@ -107,7 +107,7 @@ void DiscordImpl::Update() {
         client.set_read_timeout(3);
         client.set_follow_location(true);
 
-#ifdef YUZU_BUNDLED_OPENSSL
+#if defined(YUZU_BUNDLED_OPENSSL) && !defined(CPPHTTPLIB_EGLANTINE_MACOS_NATIVE_TRUST)
         client.load_ca_cert_store(kCert, sizeof(kCert));
 #endif
 

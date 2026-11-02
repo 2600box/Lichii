@@ -77,7 +77,7 @@ struct Client::Impl {
             cli->set_connection_timeout(TIMEOUT_SECONDS);
             cli->set_read_timeout(TIMEOUT_SECONDS);
             cli->set_write_timeout(TIMEOUT_SECONDS);
-#ifdef YUZU_BUNDLED_OPENSSL
+#if defined(YUZU_BUNDLED_OPENSSL) && !defined(CPPHTTPLIB_EGLANTINE_MACOS_NATIVE_TRUST)
             cli->load_ca_cert_store(kCert, sizeof(kCert));
 #endif
         }

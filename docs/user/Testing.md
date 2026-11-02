@@ -53,11 +53,17 @@ EDEN_NATIVE_DRAW_DIAGNOSTICS=1 \
 /Applications/eglantine.app/Contents/MacOS/eglantine
 ```
 
-Reproduce the black screen, exit, and retain the capture directory together with
-`~/.local/share/eden/log/eden_log.txt`. These existing diagnostic switches save
+Before exiting, use **File > Open Eglantine Folders > Log Folder** to locate the
+active log directory. Reproduce the black screen, exit, and retain `eden_log.txt`
+from that directory together with the capture directory. Portable installations
+and data-directory overrides can change the log location. These diagnostic switches save
 native programs even when lowering rejects them; the ordinary guest-shader dump
 option alone does not capture all such failures. Run performance comparisons
 without these switches, since capturing adds overhead.
+
+With `EDEN_NX2_SHADER_DUMP` set, native constant-buffer dumps also go into that
+directory. This does not depend on the shell working directory: the macOS app
+changes its working directory to the bundle's parent during startup.
 
 ### Testing an external macOS Vulkan driver
 

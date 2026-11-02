@@ -21,7 +21,7 @@ Use this when you need to review the logs to determine an issue or provide them 
 <aside>
 
 1. Open Eden.
-2. Navigate to *File > Open Eden Folder > Log Folder*, a Windows explorer window will appear.
+2. Navigate to *File > Open Eglantine Folders > Log Folder*, a Windows explorer window will appear.
 3. Your log files are now here for your review or upload.
 </aside>
 
@@ -32,7 +32,7 @@ Use this when you need to review the logs to determine an issue or provide them 
 <aside>
 
 1. Open Eden.
-2. Navigate to *File > Open Eden Folder > Log Folder*, a Dolphin file explorer window will appear.
+2. Navigate to *File > Open Eglantine Folders > Log Folder*, a Dolphin file explorer window will appear.
 3. Your log files are now here for your review or upload.
 </aside>
 
@@ -40,7 +40,7 @@ Use this when you need to review the logs to determine an issue or provide them 
 
 The default log directory is `/Users/<USER>/.local/share/eden/log`. In Finder,
 press **Shift+Command+G** and enter `~/.local/share/eden/log`, or use
-**File > Open Eden Folder > Log Folder** in the emulator. A portable installation
+**File > Open Eglantine Folders > Log Folder** in the emulator. A portable installation
 or an overridden data directory can change this location.
 
 Reproduce the problem, close the emulator, and copy `eden_log.txt` before launching

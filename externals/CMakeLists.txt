@@ -67,7 +67,13 @@ endif()
 if (IOS)
     set(HTTPLIB_USE_BROTLI_IF_AVAILABLE OFF)
 endif()
-AddJsonPackage(httplib)
+if (APPLE AND NOT IOS)
+    # System packages may export Keychain roots without respecting distrust or
+    # scoped trust settings. The pinned patch evaluates each peer with SecTrust.
+    AddJsonPackage(NAME httplib FORCE_BUNDLED_PACKAGE ON)
+else()
+    AddJsonPackage(httplib)
+endif()
 
 if (YUZU_STATIC_ROOM)
     return()
