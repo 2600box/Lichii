@@ -82,7 +82,7 @@ TEST_CASE("Nx2 216 rejects overflowing and unaligned guest ranges", "[nx2_tiles]
     Nx2SparseMapRequest request{.gpu_address = 0x100000, .size = 0x1000,
                                 .memory_handle = 1, .offset = 0x2000};
     CHECK(request.Valid());
-    CHECK(request.Backing(0x200000, 0x3000) == 0x202000);
+    CHECK(request.Backing(0x200000, 0x3000) == u64{0x202000});
     CHECK_FALSE(request.Backing(0x200000, 0x2fff));
     request.offset = std::numeric_limits<u64>::max() - 0xfff;
     CHECK_FALSE(request.Backing(0x200000, 0x3000));
