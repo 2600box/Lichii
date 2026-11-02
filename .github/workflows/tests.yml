@@ -106,8 +106,18 @@ jobs:
         run: build/tests/bin/dynarmic_tests.exe --durations yes
 
   macos:
-    name: macOS graphics and HTTPS regressions (arm64)
+    name: ${{ matrix.name }}
     runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - openssl: system
+            bundled_openssl: 'OFF'
+            name: macOS graphics and HTTPS regressions (arm64)
+          - openssl: bundled
+            bundled_openssl: 'ON'
+            name: macOS graphics and HTTPS regressions (arm64, bundled OpenSSL)
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -135,9 +145,9 @@ jobs:
           path: |
             .cache/cpm
             .ccache
-          key: macos-tests-${{ hashFiles('cpmfile.json') }}-${{ github.sha }}
+          key: macos-tests-${{ matrix.openssl }}-${{ hashFiles('cpmfile.json') }}-${{ github.sha }}
           restore-keys: |
-            macos-tests-${{ hashFiles('cpmfile.json') }}-
+            macos-tests-${{ matrix.openssl }}-${{ hashFiles('cpmfile.json') }}-
 
       - name: Configure
         env:
@@ -145,19 +155,42 @@ jobs:
         run: >-
           cmake -S . -B build/tests -G Ninja
           -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
           -DCMAKE_OSX_ARCHITECTURES=arm64
           -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0
           -DYUZU_TESTS=ON -DDYNARMIC_TESTS=OFF
           -DENABLE_QT=ON -DYUZU_USE_BUNDLED_QT=OFF
           "-DCMAKE_PREFIX_PATH=$QT_ROOT_DIR;$(brew --prefix)"
           "-DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)"
-          -DYUZU_USE_BUNDLED_OPENSSL=OFF
+          -DYUZU_USE_BUNDLED_OPENSSL=${{ matrix.bundled_openssl }}
           -DYUZU_USE_BUNDLED_SDL3=OFF -DYUZU_USE_BUNDLED_MOLTENVK=ON
           -DVulkanHeaders_FORCE_BUNDLED=ON -DVulkanUtilityLibraries_FORCE_BUNDLED=ON
           -DYUZU_CMD=OFF -DYUZU_ROOM=OFF -DYUZU_ROOM_STANDALONE=OFF
           -DENABLE_WEB_SERVICE=OFF -DENABLE_UPDATE_CHECKER=ON
           "-DEGLANTINE_UPDATE_REPO=$GITHUB_REPOSITORY"
           -DUSE_DISCORD_PRESENCE=OFF -DENABLE_WERROR=OFF -DUSE_CCACHE=ON
+
+      - name: Verify the requested OpenSSL configuration is active
+        env:
+          EXPECT_BUNDLED_OPENSSL: ${{ matrix.bundled_openssl }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import shlex
+          from pathlib import Path
+
+          entries = json.loads(Path('build/tests/compile_commands.json').read_text())
+          request = next(entry for entry in entries
+                         if entry['file'].endswith('/src/common/net/net.cpp'))
+          arguments = shlex.split(request['command'])
+          bundled = any(arg == '-DYUZU_BUNDLED_OPENSSL' or
+                        arg.startswith('-DYUZU_BUNDLED_OPENSSL=') for arg in arguments)
+          expected = os.environ['EXPECT_BUNDLED_OPENSSL'] == 'ON'
+          if bundled != expected:
+              raise SystemExit(f'Wrong OpenSSL configuration: bundled={bundled}, expected={expected}')
+          print(f'Confirmed bundled OpenSSL: {bundled}')
+          PY
 
       - name: Build application and regression tests
         env:
