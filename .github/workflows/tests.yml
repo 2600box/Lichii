@@ -193,11 +193,13 @@ jobs:
           PY
 
       - name: Build application and regression tests
+        id: build_regressions
         env:
           CCACHE_DIR: ${{ github.workspace }}/.ccache
         run: cmake --build build/tests --target yuzu tests configuration_tests --parallel 2
 
       - name: Run graphics and layout regressions
+        if: ${{ !cancelled() && steps.build_regressions.outcome == 'success' }}
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
@@ -205,12 +207,14 @@ jobs:
           ctest --test-dir build/tests -R '^configuration_tests$' --output-on-failure
 
       - name: Check GitHub HTTPS without Homebrew certificate files
+        if: ${{ !cancelled() && steps.build_regressions.outcome == 'success' }}
         env:
           SSL_CERT_FILE: /dev/null
           SSL_CERT_DIR: /nonexistent-eglantine-ca-directory
         run: build/tests/bin/tests '[network]' --reporter console
 
       - name: Reject distrusted and restricted macOS roots, including redirects
+        if: ${{ !cancelled() && steps.build_regressions.outcome == 'success' }}
         run: >-
           python3 tools/macos/test_https_trust.py build/tests/bin/tests
           --openssl "$(brew --prefix openssl@3)/bin/openssl"

@@ -7,12 +7,32 @@
 #ifdef __APPLE__
 #include "common/httplib.h"
 #endif
+#include "common/logging.h"
 #include "common/net/net.h"
 #include "common/scm_rev.h"
+
+namespace {
+void EnableCiHttpLogs() {
+    // MakeRequest already records transport failures and HTTP status errors.
+    // Enable its logger on disposable CI runners without touching local app logs.
+    static const bool initialized = [] {
+        const char* ci = std::getenv("GITHUB_ACTIONS");
+        if (ci && std::string_view{ci} == "true") {
+            Common::Log::Initialize();
+            Common::Log::SetGlobalFilter(Common::Log::Filter{Common::Log::Level::Info});
+            Common::Log::SetColorConsoleBackendEnabled(true);
+        }
+        return true;
+    }();
+    (void)initialized;
+}
+} // namespace
 
 // Opt-in: the normal unit suite must work offline. macOS CI runs this with
 // OpenSSL's filesystem CA paths disabled to exercise the native trust store.
 TEST_CASE("Update requests use a verified HTTPS connection to GitHub", "[.][network]") {
+    EnableCiHttpLogs();
+    INFO("Update repository: " << Common::g_build_auto_update_repo);
     const auto body = Common::Net::MakeRequest(
         "https://api.github.com",
         std::string{"/repos/"} + Common::g_build_auto_update_repo + "/releases?per_page=1");
@@ -62,6 +82,7 @@ TEST_CASE("macOS HTTPS preserves explicit CA configuration", "[.][macos_custom_c
 // Run only via tools/macos/test_https_trust.py on an isolated CI runner.
 TEST_CASE("macOS HTTPS enforces native trust for requests and streamed downloads",
           "[.][macos_trust]") {
+    EnableCiHttpLogs();
     const char* url = std::getenv("EGLANTINE_TEST_TLS_URL");
     const char* path = std::getenv("EGLANTINE_TEST_TLS_PATH");
     const char* expected = std::getenv("EGLANTINE_TEST_TLS_ACCEPT");
