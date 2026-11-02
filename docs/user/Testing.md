@@ -61,9 +61,10 @@ native programs even when lowering rejects them; the ordinary guest-shader dump
 option alone does not capture all such failures. Run performance comparisons
 without these switches, since capturing adds overhead.
 
-With `EDEN_NX2_SHADER_DUMP` set, native constant-buffer dumps also go into that
-directory. This does not depend on the shell working directory: the macOS app
-changes its working directory to the bundle's parent during startup.
+`EDEN_NATIVE_DRAW_DIAGNOSTICS` enables native constant-buffer dumps. With
+`EDEN_NX2_SHADER_DUMP` also set, those dumps go into the configured directory.
+This does not depend on the shell working directory: the macOS app changes its
+working directory to the bundle's parent during startup.
 
 ### Testing an external macOS Vulkan driver
 

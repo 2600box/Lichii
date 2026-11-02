@@ -635,10 +635,15 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
                                                 : std::filesystem::path{};
                 const auto dump_path = dump_directory /
                     fmt::format("native-graphics-cbuf-{}-1.bin", static_cast<u32>(program));
-                std::ofstream dump(dump_path, std::ios::binary);
-                if (!dump.write(reinterpret_cast<const char*>(bytes.data()), bytes.size())) {
-                    LOG_ERROR(Render, "Could not write native constant buffer dump: {}",
-                              dump_path.string());
+                if (!dump_directory.empty() && !Common::FS::CreateDirs(dump_directory)) {
+                    LOG_ERROR(Render, "Could not create native constant buffer dump directory: {}",
+                              Common::FS::PathToUTF8String(dump_directory));
+                } else {
+                    std::ofstream dump(dump_path, std::ios::binary);
+                    if (!dump.write(reinterpret_cast<const char*>(bytes.data()), bytes.size())) {
+                        LOG_ERROR(Render, "Could not write native constant buffer dump: {}",
+                                  Common::FS::PathToUTF8String(dump_path));
+                    }
                 }
             }
         }
