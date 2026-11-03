@@ -1,12 +1,20 @@
 @import "tailwindcss";
 
+@font-face {
+  font-family: 'Paper Mono';
+  src: url('/fonts/PaperMono.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+}
+
 @theme {
   --color-canvas: #0c0c0e;
   --color-surface: #141417;
   --color-elevated: #19191d;
   --color-accent: #ff4d82;
-  --font-sans: 'Inter Tight Variable', 'Inter Tight', Arial, sans-serif;
-  --font-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  --font-sans: 'Paper Mono', monospace;
+  --font-mono: 'Paper Mono', monospace;
 }
 
 @layer base {
@@ -64,7 +72,7 @@
   .site-footer a { display: inline-flex; align-items: center; gap: 6px; }
   .site-footer a:hover { color: white; }
   .catalog-intro { @apply grid grid-cols-2; gap: 60px; padding-top: 62px; padding-bottom: 48px; align-items: end; }
-  .catalog-intro h1 { font-size: clamp(60px, 6.6vw, 96px); font-weight: 780; line-height: 1.02; letter-spacing: -.055em; margin-bottom: 22px; }
+  .catalog-intro h1 { font-size: clamp(52px, 5.5vw, 80px); font-weight: 780; line-height: 1.02; letter-spacing: -.055em; margin-bottom: 22px; }
   .catalog-intro > div:first-child > p { color: #b5b5bd; font-size: 18px; line-height: 1.55; max-width: 570px; }
   .catalog-overview { padding-bottom: 2px; }
   .overview-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 14px; margin-bottom: 18px; }
@@ -282,16 +290,16 @@
 }
 @media (max-width: 900px) {
   .header-inner { padding: 8px 25px; gap: 25px; }.site-header nav { gap: 18px; }.page { padding: 0 25px 60px; }.site-footer { padding: 25px; flex-wrap: wrap; }
-  .catalog-intro { grid-template-columns: 1fr; padding: 45px 0 35px; gap: 35px; }.catalog-intro h1 { font-size: 76px; }.catalog-intro > div:first-child > p { max-width: 680px; }.overview-title { flex-direction: row; align-items: center; }.status-legend .status { font-size: 12px; }
+  .catalog-intro { grid-template-columns: 1fr; padding: 45px 0 35px; gap: 35px; }.catalog-intro h1 { font-size: clamp(48px, 8.5vw, 76px); }.catalog-intro > div:first-child > p { max-width: 680px; }.overview-title { flex-direction: row; align-items: center; }.status-legend .status { font-size: 12px; }
   .bottom-grid { grid-template-columns: 1fr 1fr; gap: 25px; }.contribute h2 { font-size: 25px; }.panel { padding: 23px; }.contribute-steps > div { flex-direction: column; gap: 5px; }.contribute-steps span { text-align: left; }
   .detail-grid, .form-grid { grid-template-columns: 1fr; }.detail-sidebar { display: grid; grid-template-columns: 1fr 1fr; gap: 25px; }.detail-sidebar > .contribute { grid-row: span 2; }.form-sidebar { display: none; }.game-summary { grid-template-columns: 1fr 1fr; }.form-section-heading p { max-width: none; }.outcome-grid { grid-template-columns: repeat(5, 1fr); }
   .cover-large { width: 120px; height: 180px; }.game-hero, .hero-content { min-height: 300px; }.hero-content { padding: 65px 25px 25px; gap: 22px; }.hero-content h1 { font-size: 44px; }
   .guide-layout { grid-template-columns: 170px 1fr; gap: 30px; }.guide-checks, .privacy-columns { grid-template-columns: 1fr; }
 }
 @media (max-width: 640px) {
-  .header-inner { padding: 8px 18px 0; min-height: auto; display: grid; grid-template-columns: 1fr auto; gap: 4px 15px; }.brand img { width: 100px; height: 48px; }.site-header nav { grid-row: 2; grid-column: 1 / -1; justify-content: space-between; gap: 20px; padding: 6px 0; }.site-header nav a { font-size: 13px; padding: 10px 0; }.header-cta { grid-row: 1; grid-column: 2; font-size: 12px; padding: 10px 13px; }
+  .header-inner { padding: 8px 18px 0; min-height: auto; display: grid; grid-template-columns: 1fr auto; gap: 4px 15px; }.brand img { width: 100px; height: 48px; }.site-header nav { grid-row: 2; grid-column: 1 / -1; justify-content: space-between; gap: 12px; padding: 6px 0; }.site-header nav a { font-size: 12px; padding: 10px 0; }.header-cta { grid-row: 1; grid-column: 2; font-size: 12px; padding: 10px 13px; }
   .page { padding: 0 18px 45px; }.site-footer { padding: 25px 18px; font-size: 11px; line-height: 1.6; gap: 16px; }.site-footer > div { gap: 22px; }
-  .catalog-intro { padding: 35px 0 28px; gap: 27px; }.catalog-intro h1 { font-size: 64px; margin-bottom: 18px; }.catalog-intro > div:first-child > p { font-size: 16px; line-height: 1.65; }.catalog-intro > div:first-child > p br { display: none; }.overview-title { align-items: flex-start; flex-direction: column; font-size: 13px; gap: 7px; margin-bottom: 13px; }.overview-title .mono { font-size: 10px; }.status-track { height: 9px; }.status-legend { grid-template-columns: repeat(3, 1fr); gap: 14px 10px; margin: 16px 0; }.status-legend .status { font-size: 12px; }.status-legend strong { font-size: 20px; line-height: 1.2; margin-top: 7px; }
+  .catalog-intro { padding: 35px 0 28px; gap: 27px; }.catalog-intro h1 { font-size: 48px; margin-bottom: 18px; }.catalog-intro > div:first-child > p { font-size: 16px; line-height: 1.65; }.catalog-intro > div:first-child > p br { display: none; }.overview-title { align-items: flex-start; flex-direction: column; font-size: 13px; gap: 7px; margin-bottom: 13px; }.overview-title .mono { font-size: 10px; }.status-track { height: 9px; }.status-legend { grid-template-columns: repeat(3, 1fr); gap: 14px 10px; margin: 16px 0; }.status-legend .status { font-size: 12px; }.status-legend strong { font-size: 20px; line-height: 1.2; margin-top: 7px; }
   .search-box { padding: 12px 14px; gap: 10px; border-radius: 8px; }.search-box input { font-size: 18px; }.search-box kbd { display: none; }.filter-bar { gap: 14px; margin-bottom: 21px; }.filter-group { gap: 6px; width: 100%; }.filter-group label { font-size: 11px; gap: 4px; padding: 8px; }.filter-group select { max-width: 95px; }.sort-label { margin-left: auto; font-size: 12px; }
   .game-table { min-width: 0; width: 100%; }.game-table th:nth-child(3), .game-table td:nth-child(3), .game-table th:nth-child(5), .game-table td:nth-child(5), .game-table th:nth-child(6), .game-table td:nth-child(6) { display: none; }.game-table th:first-child, .game-table td:first-child { min-width: 0; width: 72%; padding-left: 0; padding-right: 15px; }.game-table th:nth-child(2) { font-size: 0; padding-right: 0; text-align: right; }.game-table th:nth-child(2)::after { content: 'RESULT'; font-size: 9px; }.game-table th:first-child { font-size: 9px; }.game-table td:nth-child(2) { padding-right: 0; text-align: right; }.game-table td { padding-top: 13px; padding-bottom: 13px; }.game-cell { gap: 11px; }.game-cell strong { font-size: 14px; line-height: 1.35; }.game-cell span { font-size: 10px; margin-top: 4px; }.game-table .status { font-size: 11px; gap: 5px; }.game-table .status i { width: 6px; height: 6px; }.game-table .cover { width: 35px; height: 52px; }.pagination { padding: 17px 0; font-size: 11px; }.catalog-source { margin-left: 0; margin-right: 0; font-size: 10px; }
   .bottom-grid { grid-template-columns: 1fr; gap: 35px; margin-top: 40px; }.section-heading h2 { font-size: 24px; }.section-heading a { font-size: 11px; gap: 4px; }.contribute h2 { font-size: 28px; }.contribute-steps > div { flex-direction: row; gap: 15px; }.contribute-steps span { text-align: right; }.empty { padding: 30px 14px; min-height: 235px; }

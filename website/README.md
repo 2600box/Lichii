@@ -2,7 +2,7 @@
 
 A standalone Switch 2 community report site. All application files live in `website/`; the emulator is unchanged.
 
-The launch follows the [dark Paper design](https://app.paper.design/file/01M6GQ17RX2F3XN1N9H2Z01KMA/p-2-0). The database starts with **465 catalog entries and zero reports**. Every title is untested until a real report is submitted. There are no generated players, statistics, performance figures or log files.
+The launch follows the [dark Paper design](https://app.paper.design/file/01M6GQ17RX2F3XN1N9H2Z01KMA/p-2-0), using self-hosted [Paper Mono](https://paper.design/mono) throughout. The font comes from [paper-design/paper-mono at e6eaece](https://github.com/paper-design/paper-mono/tree/e6eaeceaef02e77e3db997711e07a16378de2bd7) under the SIL Open Font License 1.1, included at `public/fonts/OFL.txt`. The database starts with **465 catalog entries and zero reports**. Every title is untested until a real report is submitted. There are no generated players, statistics, performance figures or log files.
 
 ## Run locally
 

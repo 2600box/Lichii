@@ -1,7 +1,6 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Link, Route, Routes } from 'react-router-dom';
-import '@fontsource-variable/inter-tight';
 import './styles.css';
 import { Layout } from './components.tsx';
 import { Catalog, GameDetail } from './catalog.tsx';
