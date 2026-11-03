@@ -9,7 +9,6 @@ on:
         default: true
   push:
     branches:
-      - nx2
       - nx2-experimental
     # A binary only changes when build inputs change; docs-only pushes skip the build.
     paths:
@@ -578,8 +577,8 @@ jobs:
           compression-level: 0
           retention-days: 7
 
-  # Publishes every binary as a GitHub pre-release once every platform built: on pushes to nx2
-  # and nx2-experimental, and on manual runs unless "Publish the binaries as a GitHub release" is
+  # Publishes every binary as a GitHub pre-release once every platform built: on pushes to
+  # nx2-experimental, and on manual runs unless "Publish the binaries as a GitHub release" is
   # unticked.
   release:
     name: Publish release
