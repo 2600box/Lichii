@@ -661,15 +661,3 @@ jobs:
           Linux (tar.gz): extract it and run ./lichii or ./eden-cli; it uses your system libraries, so Qt 6 and the usual libraries must be installed.
           macOS: Apple Silicon and macOS 15 or newer. Unzip and move lichii.app to Applications; eden-cli is inside it, in Contents/MacOS. The app is not notarized, so the first time right-click it and choose Open (or run xattr -dr com.apple.quarantine lichii.app).
           The -pgo builds are the same programs compiled with profile-guided optimization (clang plus Eden's profile); prefer them when your CPU supports it. The Windows PGO build is a MinGW build, so it carries its own DLLs and needs no Visual C++ redistributable."
-
-      - name: Ping Discord
-        shell: bash
-        env:
-          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: |
-          URL="https://github.com/${GITHUB_REPOSITORY}/releases/tag/build-${GITHUB_RUN_NUMBER}"
-          MSG=$(printf '## <@&1566184315178713190> Eglantine %s build %s (%s)\n%s' \
-            "$GITHUB_REF_NAME" "$GITHUB_RUN_NUMBER" "${GITHUB_SHA::7}" "$URL")
-          jq -n --arg content "$MSG" \
-            '{content: $content, allowed_mentions: {roles: ["1566184315178713190"]}}' \
-          | curl -fsS -H "Content-Type: application/json" -d @- "$WEBHOOK"
