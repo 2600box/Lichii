@@ -1,0 +1,29 @@
+{
+  "worldwideExhaustive": false,
+  "sgdbPlatformListingAvailable": false,
+  "nintendoScope": "Nintendo Europe English, type:GAME AND system_type:nintendoswitch2",
+  "nintendoRecordsProcessed": 692,
+  "matchedNintendoRecords": 466,
+  "uniqueSgdbGames": 465,
+  "unmatchedNintendoRecords": 226,
+  "reportCount": 0,
+  "reportsSeeded": false,
+  "limitations": [
+    "Nintendo regional index is not a worldwide catalogue.",
+    "SGDB autocomplete is ranked and not paginated; non-matches are unresolved, not proven absent.",
+    "SGDB has no Switch 2 membership field. Nintendo supplies platform evidence.",
+    "Generic SGDB release timestamps are not platform release dates; exported dates use Nintendo EU.",
+    "Shared SGDB IDs can represent multiple Nintendo editions; membership.json preserves every source record."
+  ],
+  "exportedAt": "2026-11-03T14:11:40.391430+00:00",
+  "coversAvailable": 410,
+  "heroesAvailable": 366,
+  "coversAbsent": 55,
+  "heroesAbsent": 99,
+  "artworkErrors": {},
+  "requestCount": 1889,
+  "firstFetchedAt": "2026-11-03T14:00:47.173864+00:00",
+  "lastFetchedAt": "2026-11-03T14:08:26.521302+00:00",
+  "artworkSelection": "Public score_desc first page, static only; safe flags filtered; English preferred; ten manually checked cover pins",
+  "validation": "Every local asset decoded and dimensions checked. Representative contact sheets reviewed separately, not all artwork."
+}

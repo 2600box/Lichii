@@ -1,0 +1,50 @@
+{
+  "scope": "Nintendo Europe English index; not worldwide",
+  "completeForQuery": true,
+  "reportedTotal": 692,
+  "uniqueRecords": 692,
+  "pages": [
+    {
+      "url": "https://search.nintendo-europe.com/en/select?q=%2A&fq=type%3AGAME+AND+system_type%3Anintendoswitch2&rows=100&start=0&sort=sorting_title+asc%2Cfs_id+asc&wt=json",
+      "start": 0,
+      "returned": 100,
+      "total": 692
+    },
+    {
+      "url": "https://search.nintendo-europe.com/en/select?q=%2A&fq=type%3AGAME+AND+system_type%3Anintendoswitch2&rows=100&start=100&sort=sorting_title+asc%2Cfs_id+asc&wt=json",
+      "start": 100,
+      "returned": 100,
+      "total": 692
+    },
+    {
+      "url": "https://search.nintendo-europe.com/en/select?q=%2A&fq=type%3AGAME+AND+system_type%3Anintendoswitch2&rows=100&start=200&sort=sorting_title+asc%2Cfs_id+asc&wt=json",
+      "start": 200,
+      "returned": 100,
+      "total": 692
+    },
+    {
+      "url": "https://search.nintendo-europe.com/en/select?q=%2A&fq=type%3AGAME+AND+system_type%3Anintendoswitch2&rows=100&start=300&sort=sorting_title+asc%2Cfs_id+asc&wt=json",
+      "start": 300,
+      "returned": 100,
+      "total": 692
+    },
+    {
+      "url": "https://search.nintendo-europe.com/en/select?q=%2A&fq=type%3AGAME+AND+system_type%3Anintendoswitch2&rows=100&start=400&sort=sorting_title+asc%2Cfs_id+asc&wt=json",
+      "start": 400,
+      "returned": 100,
+      "total": 692
+    },
+    {
+      "url": "https://search.nintendo-europe.com/en/select?q=%2A&fq=type%3AGAME+AND+system_type%3Anintendoswitch2&rows=100&start=500&sort=sorting_title+asc%2Cfs_id+asc&wt=json",
+      "start": 500,
+      "returned": 100,
+      "total": 692
+    },
+    {
+      "url": "https://search.nintendo-europe.com/en/select?q=%2A&fq=type%3AGAME+AND+system_type%3Anintendoswitch2&rows=100&start=600&sort=sorting_title+asc%2Cfs_id+asc&wt=json",
+      "start": 600,
+      "returned": 92,
+      "total": 692
+    }
+  ]
+}

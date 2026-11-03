@@ -1,0 +1,6 @@
+raw/
+art/
+handoff/
+*.json
+__pycache__/
+*.png
