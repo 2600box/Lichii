@@ -213,7 +213,7 @@ back one whole frame inside the emulator. No capture tool is needed.
 | Variable | Value |
 |---|---|
 | `EDEN_NX2_FRAME_DUMP` | Directory for the dump. It is created if missing. When unset, the dump code stays inactive. |
-| `EDEN_NX2_FRAME_DUMP_AT` | Which frame to capture: seconds after boot (`45`) or a frame number with an `f` suffix (`2700f`). Default `60`. |
+| `EDEN_NX2_FRAME_DUMP_AT` | Which frame to capture: seconds after boot (`45`), a frame number with an `f` suffix (`2700f`), or `file` to capture once `capture.now` exists in the dump directory (checked every 30 frames). Default `60`. |
 
 Example for the character select screen:
 
