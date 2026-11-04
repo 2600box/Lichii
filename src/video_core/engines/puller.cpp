@@ -33,18 +33,20 @@ namespace {
 constexpr u32 Gf100BindClassMask = 0xffff;
 constexpr u32 Gf100BindValidMask =  0x1f0000 | Gf100BindClassMask;
 
-// Reads a semaphore word, flushing a GPU-written copy out of the buffer cache first.
+// Reads a semaphore word as the GPU sees it: a release a fence holds for the guest CPU counts, and
+// a GPU-written copy is flushed out of the buffer cache first.
 u32 ReadSemaphoreWord(DmaPusher& dma_pusher, GPUVAddr address) {
-    if (const auto device = dma_pusher.memory_manager.GpuToCpuAddress(address);
-        device && dma_pusher.rasterizer->MustFlushRegion(*device, sizeof(u32),
-                                                          VideoCommon::CacheType::BufferCache)) {
+    const auto device = dma_pusher.memory_manager.GpuToCpuAddress(address);
+    if (device && dma_pusher.rasterizer->MustFlushRegion(*device, sizeof(u32),
+                                                         VideoCommon::CacheType::BufferCache)) {
         VideoCommon::GpuSplit::Get().Run(
             [rasterizer = dma_pusher.rasterizer, device = *device] {
                 rasterizer->FlushRegion(device, sizeof(u32), VideoCommon::CacheType::BufferCache);
             },
             VideoCommon::DrainSite::SemaphoreFlush);
     }
-    return dma_pusher.memory_manager.Read<u32>(address);
+    const u32 memory = dma_pusher.memory_manager.Read<u32>(address);
+    return device ? Nx2SemaphoreWaiters::Get().Read(*device, memory) : memory;
 }
 
 // With the GPU thread split (gpu_split.h) the rasterizer belongs to the back thread: work that

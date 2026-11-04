@@ -23,6 +23,7 @@
 #include "common/thread.h"
 #include "video_core/delayed_destruction_ring.h"
 #include "video_core/gpu.h"
+#include "video_core/gpu_split.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/nx2_profile.h"
@@ -87,10 +88,13 @@ public:
         }
         auto [should_flush, committed_flushes] = CommitCacheFlushes();
         // Downloads committed here reach guest memory when the fence pops: a guest that saw the
-        // fence first would read the bytes they replace (GPU readbacks).
-        const bool delay_operation =
-            delay_fence || (committed_flushes != 0 && DelaysDownloadFences());
-        if (!delay_fence && committed_flushes == 0 && SkipEmptyFence()) {
+        // fence first would read the bytes they replace (GPU readbacks). Every operation after a
+        // held one is held too: run at once, a later semaphore release landed before the held
+        // one, which then set it back to its older value (Mario Kart World's acquires hung).
+        const bool delay_operation = delay_fence ||
+                                     (committed_flushes != 0 && DelaysDownloadFences()) ||
+                                     delayed_fences.load(std::memory_order_acquire) != 0;
+        if (!delay_operation && committed_flushes == 0 && SkipEmptyFence()) {
             Nx2Profile::Scope skipped_scope{Nx2Profile::Zone::FenceSkipped};
             func();
             rasterizer.InvalidateGPUCache();
@@ -111,7 +115,10 @@ public:
             pending_operations.emplace_back(std::move(uncommitted_operations));
             uncommitted_operations.clear(); // moved-from: make it empty explicitly
         }
-        pending_flushes.push_back(committed_flushes);
+        if (delay_operation) {
+            delayed_fences.fetch_add(1, std::memory_order_relaxed);
+        }
+        pending_flushes.push_back(committed_flushes | (delay_operation ? DelayedOperation : 0));
         QueueFence(new_fence);
         if (!delay_operation) {
             func();
@@ -156,6 +163,12 @@ public:
                 wait_cv.notify_all();
             });
             SignalFence(std::move(func));
+            // A held operation runs on the fencing thread once the fence's deferred submission
+            // (Scheduler::DeferFlush) is out, which the split's back makes only between entries:
+            // blocked here, it never would.
+            if (!wait_finished.load(std::memory_order_relaxed)) {
+                GpuSplit::Get().RunIdleHook();
+            }
             std::unique_lock lk(wait_mutex);
             wait_cv.wait(
                 lk, [&wait_finished] { return wait_finished.load(std::memory_order_relaxed); });
@@ -211,12 +224,16 @@ private:
                     return;
                 }
             }
-            PopAsyncFlushes(pending_flushes.front());
+            const u8 flushes = pending_flushes.front();
+            PopAsyncFlushes(flushes);
             pending_flushes.pop_front();
             auto operations = std::move(pending_operations.front());
             pending_operations.pop_front();
             for (auto& operation : operations) {
                 operation();
+            }
+            if (flushes & DelayedOperation) {
+                delayed_fences.fetch_sub(1, std::memory_order_release);
             }
             {
                 std::unique_lock lock(ring_guard);
@@ -297,6 +314,9 @@ private:
                 for (auto& operation : released.operations) {
                     operation();
                 }
+                if (released.flushes & DelayedOperation) {
+                    delayed_fences.fetch_sub(1, std::memory_order_release);
+                }
             }
             {
                 std::unique_lock lock(ring_guard);
@@ -325,6 +345,7 @@ private:
 
     static constexpr u8 TextureFlushes = 1;
     static constexpr u8 BufferFlushes = 2;
+    static constexpr u8 DelayedOperation = 4; ///< The fence holds its own operation
 
     /// committed: what CommitAsyncFlushes returned for this fence.
     void PopAsyncFlushes(u8 committed) {
@@ -398,6 +419,7 @@ private:
     std::deque<std::function<void()>> uncommitted_operations;
     std::deque<std::deque<std::function<void()>>> pending_operations;
     std::deque<u8> pending_flushes; ///< Per fence: the caches that committed downloads
+    std::atomic<size_t> delayed_fences{}; ///< Fences holding their operation, not yet released
     u32 skipped_fences{}; ///< Empty fences skipped since the last one made (GPU thread only)
 
     std::mutex guard;
