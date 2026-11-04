@@ -128,7 +128,7 @@ bool DmaPusher::Step() {
         // overlapped the two halves again.
         static const bool fetch_drain = std::getenv("EDEN_NX2_FETCH_DRAIN") != nullptr;
         if (fetch_drain && g_nx2_ampere.load(std::memory_order_relaxed)) {
-            VideoCommon::GpuSplit::Get().Drain();
+            VideoCommon::GpuSplit::Get().Drain(VideoCommon::DrainSite::FetchDrain);
         }
         bool gpu_written = IsGpuWrittenCommands(dma_state.dma_get,
                                                  size_t{header.size} * sizeof(u32));
@@ -265,7 +265,7 @@ bool DmaPusher::Step() {
                 synced = true;
                 sync_cv.notify_all();
             });
-        });
+        }, VideoCommon::DrainSite::GpSyncFence);
     }
 
     return true;
@@ -683,7 +683,7 @@ bool DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {
         diag_before.resize(size / sizeof(u32));
         memory_manager.ReadBlockUnsafe(address, diag_before.data(), diag_before.size() * sizeof(u32));
     }
-    VideoCommon::GpuSplit::Get().Drain();
+    VideoCommon::GpuSplit::Get().Drain(VideoCommon::DrainSite::ListFlush);
     const GPUVAddr first_page = address & ~GPUVAddr{0xfff};
     const GPUVAddr end_page = (address + size + 0xfff) & ~GPUVAddr{0xfff};
     const bool dirty = memory_manager.IsMemoryDirty(first_page, end_page - first_page,
@@ -692,7 +692,8 @@ bool DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {
         VideoCommon::GpuSplit::Get().Run(
             [memory = &memory_manager, first_page, size = end_page - first_page] {
                 memory->FlushRegion(first_page, size, VideoCommon::CacheType::BufferCache);
-            });
+            },
+            VideoCommon::DrainSite::ListFlush);
     }
     if (diag) {
         auto kind = Nx2CmdPageDiag::Kind::NoWrite;

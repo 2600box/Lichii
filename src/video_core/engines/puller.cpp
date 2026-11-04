@@ -38,9 +38,11 @@ u32 ReadSemaphoreWord(DmaPusher& dma_pusher, GPUVAddr address) {
     if (const auto device = dma_pusher.memory_manager.GpuToCpuAddress(address);
         device && dma_pusher.rasterizer->MustFlushRegion(*device, sizeof(u32),
                                                           VideoCommon::CacheType::BufferCache)) {
-        VideoCommon::GpuSplit::Get().Run([rasterizer = dma_pusher.rasterizer, device = *device] {
-            rasterizer->FlushRegion(device, sizeof(u32), VideoCommon::CacheType::BufferCache);
-        });
+        VideoCommon::GpuSplit::Get().Run(
+            [rasterizer = dma_pusher.rasterizer, device = *device] {
+                rasterizer->FlushRegion(device, sizeof(u32), VideoCommon::CacheType::BufferCache);
+            },
+            VideoCommon::DrainSite::SemaphoreFlush);
     }
     return dma_pusher.memory_manager.Read<u32>(address);
 }
@@ -57,14 +59,15 @@ void OnBack(const Func& func) {
 }
 
 void DrainBack() {
-    VideoCommon::GpuSplit::Get().Drain();
+    VideoCommon::GpuSplit::Get().Drain(VideoCommon::DrainSite::Acquire);
 }
 
 // The fence manager records into the scheduler and downloads the CPU's writes over GPU data:
 // the back's state, which a drained back still uses from its idle hook (it submits).
 void ReleaseFences(DmaPusher& dma_pusher) {
     VideoCommon::GpuSplit::Get().Run(
-        [rasterizer = dma_pusher.rasterizer] { rasterizer->ReleaseFences(); });
+        [rasterizer = dma_pusher.rasterizer] { rasterizer->ReleaseFences(); },
+        VideoCommon::DrainSite::FenceRelease);
 }
 
 } // Anonymous namespace

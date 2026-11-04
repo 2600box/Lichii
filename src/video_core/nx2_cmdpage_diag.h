@@ -87,6 +87,11 @@ struct State {
     std::atomic<u64> missed_on_entry{};
     std::atomic<u64> missed_elsewhere{};
     std::atomic<u32> missed_logged{};
+    std::atomic<u64> dma_reads{};
+    std::atomic<u64> dma_reads_gpu_pages{};
+    std::atomic<u64> dma_reads_changed{};
+    std::atomic<u64> dma_reads_changed_gpu_pages{};
+    std::atomic<u32> dma_changed_logged{};
     std::array<u32, static_cast<size_t>(Kind::Count)> details_logged{};
     std::chrono::steady_clock::time_point last_log{std::chrono::steady_clock::now()};
 };
@@ -186,6 +191,25 @@ inline void CheckMissedWrite(u64 page_addr, u32 begin, u32 end) {
     }
 }
 
+/// The front's macro read `words` at `source` after draining (MME DMA): `changed` of them differ
+/// from guest memory read before the drain; `gpu_written`: on pages GPU work has written.
+inline void RecordDmaRead(u64 source, u32 words, u32 changed, bool gpu_written) {
+    State& state = Get();
+    state.dma_reads.fetch_add(1, std::memory_order_relaxed);
+    state.dma_reads_gpu_pages.fetch_add(gpu_written ? 1 : 0, std::memory_order_relaxed);
+    if (changed == 0) {
+        return;
+    }
+    state.dma_reads_changed.fetch_add(1, std::memory_order_relaxed);
+    state.dma_reads_changed_gpu_pages.fetch_add(gpu_written ? 1 : 0, std::memory_order_relaxed);
+    if (state.dma_changed_logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+        LOG_INFO(HW_GPU,
+                 "cmdpage diag: macro DMA read of {} words at {:#x} ({}GPU-written pages): {} "
+                 "words changed by the drain",
+                 words, source, gpu_written ? "" : "no ", changed);
+    }
+}
+
 inline void NoteSyncWait(std::chrono::steady_clock::duration waited) {
     State& state = Get();
     state.sync_waits.fetch_add(1, std::memory_order_relaxed);
@@ -227,7 +251,8 @@ inline void Log() {
              "{} {}/{}, {} {}/{}, {} {}/{}; changed words {} | list page reads copied {} synced "
              "{} unknown {} (on draw pages {}) | sync waits {} in {:.1f} ms | missed draw writes "
              "on entry {} elsewhere {} | list page writes draw {} (whole page {}) dispatch/copy "
-             "{}; draw-written list pages {}",
+             "{}; draw-written list pages {} | macro DMA reads {} (on GPU-written pages {}), "
+             "changed by the drain {} (on GPU-written pages {})",
              seconds, path(Path::Submitted), path(Path::Safe), path(Path::Copy), path(Path::Slow),
              Take(state.slow_drained), Take(state.slow_flushed),
              static_cast<double>(Take(state.slow_ns)) / 1e6, kind_names[0], kinds[0], changed[0],
@@ -237,7 +262,9 @@ inline void Log() {
              Take(state.reads_unknown), Take(state.reads_unknown_draw), Take(state.sync_waits),
              static_cast<double>(Take(state.sync_wait_ns)) / 1e6, Take(state.missed_on_entry),
              Take(state.missed_elsewhere), Take(state.draw_writes),
-             Take(state.draw_writes_whole_page), Take(state.other_writes), draw_pages);
+             Take(state.draw_writes_whole_page), Take(state.other_writes), draw_pages,
+             Take(state.dma_reads), Take(state.dma_reads_gpu_pages), Take(state.dma_reads_changed),
+             Take(state.dma_reads_changed_gpu_pages));
 }
 
 /// The front parsed an entry through `path`.

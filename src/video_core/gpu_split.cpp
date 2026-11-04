@@ -196,17 +196,19 @@ void GpuSplit::Publish() {
     }
 }
 
-void GpuSplit::Drain() {
+void GpuSplit::Drain(DrainSite site) {
     consumed_cache = consumed.load(std::memory_order_acquire);
     if (consumed_cache == write_position) {
         return;
     }
     Publish();
     Nx2Profile::Scope scope{Nx2Profile::Zone::SplitDrain};
+    const u64 start = Nx2Profile::Enabled() ? Nx2Profile::Now() : 0;
     for (u32 spins = 0;; ++spins) {
         consumed_cache = consumed.load(std::memory_order_acquire);
         if (consumed_cache == write_position) {
             publish_every = 8;
+            Nx2Profile::AddDrain(site, start);
             return;
         }
         if (spins < 16384) {
@@ -218,24 +220,26 @@ void GpuSplit::Drain() {
 }
 
 bool GpuSplit::WaitForWriters() {
-    return WaitFor(std::min(last_writer_position, write_position));
+    return WaitFor(std::min(last_writer_position, write_position), DrainSite::ListWriters);
 }
 
 bool GpuSplit::WaitForSync() {
-    return WaitFor(std::min(last_sync_position, write_position));
+    return WaitFor(std::min(last_sync_position, write_position), DrainSite::ListSync);
 }
 
-bool GpuSplit::WaitFor(u64 target) {
+bool GpuSplit::WaitFor(u64 target, DrainSite site) {
     consumed_cache = consumed.load(std::memory_order_acquire);
     if (consumed_cache >= target) {
         return false;
     }
     wait_target.store(target, std::memory_order_seq_cst);
     Publish();
+    const u64 start = Nx2Profile::Enabled() ? Nx2Profile::Now() : 0;
     for (u32 spins = 0;; ++spins) {
         consumed_cache = consumed.load(std::memory_order_acquire);
         if (consumed_cache >= target) {
             wait_target.store(~u64{0}, std::memory_order_relaxed);
+            Nx2Profile::AddDrain(site, start);
             return true;
         }
         if (spins < 16384) {
