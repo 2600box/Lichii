@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <cstring>
 #include <span>
+#include <vector>
 #include <catch2/catch_test_macros.hpp>
+#include <spirv/unified1/spirv.hpp11>
 
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
@@ -109,8 +111,15 @@ constexpr std::array<Instruction, 79> TennisControl{{
     {{0x0000794d, 0x00000000, 0x03800000, 0x000fea00}},
 }};
 
-// Run3 logged only these five header words; the test environment zero-fills the unknown remainder.
-constexpr std::array<u32, 5> TennisEvaluationHeaderPrefix{0x000c0c81, 0, 0, 0, 0xbd0bc000};
+// The program header of 15b2f0501bd24b1d-gfx-14c1f95b00.header.bin, captured on the stadium court
+// (words 20-31 of the 128-byte native header are zero).
+constexpr std::array<u32, 20> TennisEvaluationHeader{{
+    0x000c0c81, 0x00000000, 0x00000000, 0x00000000,
+    0xbd0bc000, 0x50000000, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x0001f000, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x00003000, 0x00000000,
+}};
 
 constexpr std::array<Instruction, 47> TennisEvaluation{{
     {{0x00007919, 0x00000000, 0x00001d00, 0x000e2800}},
@@ -339,7 +348,7 @@ TEST_CASE("Captured Mario Tennis Fever evaluation shader reads both tessellation
     REQUIRE(((coordinates >> 32) & 1) == 1);
     REQUIRE(((coordinates >> 47) & 3) == 1);
     TessellationEnvironment env{lowered.instructions, Shader::Stage::TessellationEval,
-                               TennisEvaluationHeaderPrefix};
+                               TennisEvaluationHeader};
     Shader::ObjectPool<Shader::Maxwell::Flow::Block> flow_pool;
     Shader::Maxwell::Flow::CFG cfg{env, flow_pool, Shader::Maxwell::Location{0x50}};
     Shader::ObjectPool<IR::Inst> inst_pool;
@@ -354,13 +363,30 @@ TEST_CASE("Captured Mario Tennis Fever evaluation shader reads both tessellation
     REQUIRE(program.info.uses_invocation_info);
     Shader::Profile profile{};
     profile.supported_spirv = 0x00010300;
+    // The logged state of the stadium court draw: quad domain, integer spacing, Triangles_CW.
     Shader::RuntimeInfo runtime{};
-    // The capture has no runtime tessellation state; quads are a synthetic test context.
     runtime.tess_primitive = Shader::TessPrimitive::Quads;
+    runtime.tess_spacing = Shader::TessSpacing::Equal;
+    runtime.tess_clockwise = true;
     Shader::Backend::Bindings bindings{};
     const auto spirv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime, program, bindings);
     REQUIRE(spirv.size() > 5);
     REQUIRE(spirv[0] == 0x07230203);
+    // The guest's Triangles_CW is already in Vulkan's upper-left domain convention (the GL
+    // backend inverts it for its lower-left origin), so the module keeps it as VertexOrderCw.
+    std::vector<u32> modes;
+    for (size_t word = 5; word < spirv.size(); word += spirv[word] >> 16) {
+        REQUIRE((spirv[word] >> 16) != 0);
+        if ((spirv[word] & 0xffff) == static_cast<u32>(spv::Op::OpExecutionMode)) {
+            modes.push_back(spirv[word + 2]);
+        }
+    }
+    for (const auto mode : {spv::ExecutionMode::Quads, spv::ExecutionMode::SpacingEqual,
+                            spv::ExecutionMode::VertexOrderCw}) {
+        REQUIRE(std::ranges::find(modes, static_cast<u32>(mode)) != modes.end());
+    }
+    REQUIRE(std::ranges::find(modes, static_cast<u32>(spv::ExecutionMode::VertexOrderCcw)) ==
+            modes.end());
 }
 
 TEST_CASE("Tessellation output-coordinate loads remain confined to evaluation U and V",
