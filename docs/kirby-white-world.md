@@ -121,6 +121,29 @@ build/shader-sweep/shader-sweep \
 Send the log, dump directory, and screenshots from both a menu and a race. Check whether
 the compute rejection is gone and whether the 3D world returns with it.
 
+## Root cause: the SMAA resolve's dither bias
+
+The first frame dump (frame 1338, character select) shows the 3D scene rendering correctly up to
+pass032. Pass037 (VS `eb21e6be1d399dda`, FS `f2eb2333f228f72c`, A2B10G10R10 864x480) is the
+first white image: 98.84% of its pixels are exactly (1,1,1,1). The remaining 1.16% are a strip
+that the pass never writes.
+
+That FS is an SMAA neighborhood-blend pass. It reads two textures (the blend weights and the
+color) and the texel size from bank 17 (root table 0, which the blit-constant pass fills).
+It encodes the result to sRGB. It then adds bank 17 words 0x10, 0x14 and 0x18 to the output
+*bits* as integers. On the console these words are the dither bias and hold zero. The blit
+block holds the texel size and a UV scale of 1.0 there instead. Integer-adding 1/864, 1/480 and
+1.0 to float bits overflows the exponent, so every written pixel saturates to white. The
+dispatch and upscale that follow keep it white.
+
+`BlitConstantsPass` already dropped this bias, but only when the color operand was a direct
+`BitCastU32F32`. Here the operand is a phi of the two sRGB branches. The pass now also accepts a
+phi whose incoming values are all float bit patterns. An integer, or an immediate added to the
+bias, is still kept.
+
+In the Kirby sweep, two of 1,038 SPIR-V modules change: this FS and its sibling `f7630c142a3b7203`,
+which uses the same VS. All results and statuses are otherwise identical.
+
 ## Frame dump
 
 The logs show every shader building, so the next step needs pixels. `EDEN_NX2_FRAME_DUMP` reads
