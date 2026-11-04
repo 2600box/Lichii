@@ -5,6 +5,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 add_executable(tests
+    core/nx2_video_ready.cpp
     core/nx2_present_pacer.cpp
     common/dkb_cpu_trace.cpp
     common/dkb_frame_trace.cpp
@@ -88,6 +89,7 @@ add_executable(tests
     core/nup_writer.cpp
     core/nup_metadata.cpp
     core/nx2_image_layout.cpp
+    core/nx2_video_input_queue.cpp
     core/ldn.cpp
     core/internal_network/socket_proxy.cpp
     core/priority_queue.cpp
@@ -106,6 +108,13 @@ add_executable(tests
     video_core/uniform_stream_reuse.cpp
     video_core/shader_invalidation.cpp
     video_core/descriptor_table.cpp
+    video_core/global_address_tracking.cpp
+    video_core/nvn_storage_descriptor.cpp
+    video_core/ampere_f2i.cpp
+    video_core/ampere_ldc.cpp
+    video_core/ampere_vote.cpp
+    video_core/shader_attributes.cpp
+    video_core/indirect_reset.cpp
     input_common/calibration_configuration_job.cpp
 )
 
