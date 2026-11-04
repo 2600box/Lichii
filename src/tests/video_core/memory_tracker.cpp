@@ -7,6 +7,7 @@
 #include <tuple>
 #include <vector>
 #include <optional>
+#include <random>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -83,6 +84,81 @@ private:
 } // Anonymous namespace
 
 using MemoryTracker = VideoCommon::MemoryTrackerBase<RasterizerInterface>;
+
+TEST_CASE("WordManager empty-word skips preserve ranges and tracking changes", "[video_core]") {
+    using VideoCommon::Type;
+    using Manager = VideoCommon::WordManager<RasterizerInterface, 16, HIGH_PAGE_SIZE>;
+    std::mt19937_64 random{0x504};
+    for (const auto type : {Type::CPU, Type::GPU, Type::CachedCPU, Type::Preflushable}) {
+        for (const bool clear : {false, true}) {
+            for (u32 trial = 0; trial < 100; ++trial) {
+                RasterizerInterface rasterizer;
+                Manager manager{c, rasterizer};
+                for (auto& word : manager.heap) {
+                    word = trial % 4 == 0 ? 0 : random();
+                }
+                if (trial % 4 == 1) {
+                    std::ranges::fill(manager.Span(type), 0);
+                }
+                auto expected = manager.heap;
+                std::vector<Range> expected_ranges;
+                std::vector<std::tuple<DAddr, u64, int>> expected_updates;
+                const u64 offset = trial == 0 ? 0 : random() % HIGH_PAGE_SIZE;
+                const u64 size = trial == 0 ? HIGH_PAGE_SIZE :
+                    random() % (HIGH_PAGE_SIZE - offset + 1);
+                const auto append = [](auto& ranges, u64 address) {
+                    if (!ranges.empty() && std::get<0>(ranges.back()) +
+                                               std::get<1>(ranges.back()) == address) {
+                        std::get<1>(ranges.back()) += PAGE;
+                    } else if constexpr (std::is_same_v<std::decay_t<decltype(ranges)>,
+                                                       std::vector<Range>>) {
+                        ranges.emplace_back(address, PAGE);
+                    } else {
+                        ranges.emplace_back(address, PAGE, 1);
+                    }
+                };
+                if (size != 0) {
+                    for (u64 page = offset / PAGE; page < (offset + size + PAGE - 1) / PAGE;
+                         ++page) {
+                        const u64 bit = u64{1} << (page % 64);
+                        const u64 index = page / 64;
+                        auto& state = expected[static_cast<size_t>(type) * 16 + index];
+                        auto& untracked = expected[static_cast<size_t>(Type::Untracked) * 16 + index];
+                        auto& cached = expected[static_cast<size_t>(Type::CachedCPU) * 16 + index];
+                        if (type == Type::GPU && (untracked & bit) != 0) {
+                            continue;
+                        }
+                        const bool modified = (state & bit) != 0;
+                        if (modified) {
+                            append(expected_ranges, c + page * PAGE);
+                        }
+                        if (!clear) {
+                            continue;
+                        }
+                        if (type == Type::CPU || type == Type::CachedCPU) {
+                            if ((untracked & bit) != 0) {
+                                append(expected_updates, c + page * PAGE);
+                            }
+                            untracked &= ~bit;
+                        }
+                        state &= ~bit;
+                        if (type == Type::CPU && modified) {
+                            cached &= ~bit;
+                        }
+                    }
+                }
+                std::vector<Range> actual_ranges;
+                manager.ForEachModifiedRange(type, clear, c + offset, size,
+                                             [&](u64 address, u64 length) {
+                                                 actual_ranges.emplace_back(address, length);
+                                             });
+                REQUIRE(actual_ranges == expected_ranges);
+                REQUIRE(manager.heap == expected);
+                REQUIRE(rasterizer.UpdateCallsList() == expected_updates);
+            }
+        }
+    }
+}
 
 TEST_CASE("MemoryTracker: Small region", "[video_core]") {
     RasterizerInterface rasterizer;
