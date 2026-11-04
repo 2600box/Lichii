@@ -144,6 +144,32 @@ bias, is still kept.
 In the Kirby sweep, two of 1,038 SPIR-V modules change: this FS and its sibling `f7630c142a3b7203`,
 which uses the same VS. All results and statuses are otherwise identical.
 
+## Black characters: incomplete texture handles
+
+The owner confirmed that the white-world fix works on `26a608918e`, but characters still
+render dark. The earlier `kirby-white4` trace records fragment shader
+`16ad27bb614d3e6e-gfx-130daf4e00.bin` querying handle `0x24000000`. This selects texture
+index zero and sampler `0x240`. Its TIC is a null entry, not an unrecognized compressed format:
+`0000000000024900/0000000000600000/0000000000000000/0000000000000000`, image address zero,
+dimensions 1x1x1, format INVALID, UNORM components.
+
+The captured shader contains a depth-comparison sample whose handle is
+`c6[LoadStorage32(...) << 4] | c2[0x570]`. Static handle tracking cannot represent the first
+operand. It then searches inside the OR and incorrectly treats the sampler operand alone as
+the entire handle. That index can depend on fragment inputs, so evaluating one handle on the
+CPU for the whole draw is not correct either. The fix uses the existing shader-indexed descriptor
+arrays for zero-based cbuf tables, composes a dynamic texture table with a constant sampler,
+and keeps that sampler's cbuf offset fixed when binding each array element. Tests check both
+operand orders, the retained shader-side index, and the unchanged fully static path. An owner
+run is still needed to establish how much of the character/shadow problem this explains.
+
+The `kirby-fix4` log does not establish the cause of the low frame rate. Its 636.1 ms pipeline
+summary spans 10.070 seconds and counts GPU-thread translation, not driver-worker compilation.
+Between 118 and 125 seconds the individual logged builds total 2,121.1 ms. The last logged
+build is at 124.556 seconds; the log continues to 157.936 seconds. Profile another run with
+`EDEN_NX2_GPU_PROFILE=1 EDEN_DKB_FRAME_TRACE=1`; exclude the deliberate frame-dump stall from
+performance measurements.
+
 ## Frame dump
 
 The logs show every shader building, so the next step needs pixels. `EDEN_NX2_FRAME_DUMP` reads

@@ -806,10 +806,12 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
         if (lhs->has_secondary || rhs->has_secondary) {
             return std::nullopt;
         }
-        if (lhs->count > 1 || rhs->count > 1) {
+        if (lhs->count > 1 && rhs->count > 1) {
             return std::nullopt;
         }
-        if (lhs->shift_left > 0 || lhs->index > rhs->index || lhs->offset > rhs->offset) {
+        if (rhs->count > 1 ||
+            (lhs->count == 1 &&
+             (lhs->shift_left > 0 || lhs->index > rhs->index || lhs->offset > rhs->offset))) {
             std::swap(lhs, rhs);
         }
         return ConstBufferAddr{
@@ -819,8 +821,8 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
             .secondary_index = rhs->index,
             .secondary_offset = rhs->offset,
             .secondary_shift_left = rhs->shift_left,
-            .dynamic_offset = {},
-            .count = 1,
+            .dynamic_offset = lhs->dynamic_offset,
+            .count = lhs->count,
             .has_secondary = true,
         };
     }
@@ -889,18 +891,19 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
         };
     }
     IR::Inst* const offset_inst{offset.InstRecursive()};
-    if (offset_inst->GetOpcode() != IR::Opcode::IAdd32) {
-        return std::nullopt;
-    }
     u32 base_offset{};
-    IR::U32 dynamic_offset;
-    if (offset_inst->Arg(0).IsImmediate()) {
-        base_offset = offset_inst->Arg(0).U32();
-        dynamic_offset = IR::U32{offset_inst->Arg(1)};
-    } else if (offset_inst->Arg(1).IsImmediate()) {
-        base_offset = offset_inst->Arg(1).U32();
-        dynamic_offset = IR::U32{offset_inst->Arg(0)};
-    } else {
+    IR::U32 dynamic_offset{offset};
+    if (offset_inst->GetOpcode() == IR::Opcode::IAdd32) {
+        if (offset_inst->Arg(0).IsImmediate()) {
+            base_offset = offset_inst->Arg(0).U32();
+            dynamic_offset = IR::U32{offset_inst->Arg(1)};
+        } else if (offset_inst->Arg(1).IsImmediate()) {
+            base_offset = offset_inst->Arg(1).U32();
+            dynamic_offset = IR::U32{offset_inst->Arg(0)};
+        } else {
+            return std::nullopt;
+        }
+    } else if (offset_inst->GetOpcode() != IR::Opcode::ShiftLeftLogical32) {
         return std::nullopt;
     }
     auto const size_shift = DynamicDescriptorSizeShift(dynamic_offset);
