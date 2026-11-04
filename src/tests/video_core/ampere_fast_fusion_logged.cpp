@@ -358,6 +358,14 @@ struct HalfIR {
                 visitor.FMNMX_reg(word);
             else if ((word >> 48) == 0x5c98)
                 visitor.MOV_reg(word);
+            else if ((word >> 48) == 0x5c28)
+                visitor.SHR_reg(word);
+            else if ((word >> 48) == 0x5c48)
+                visitor.SHL_reg(word);
+            else if (((word >> 48) & 0xfffc) == 0x5c10)
+                visitor.IADD_reg(word);
+            else if ((word & 0xfc00000000000000ULL) == 0x1c00000000000000ULL)
+                visitor.IADD32I(word);
             else if ((word >> 58) == 1)
                 visitor.LOP32I(word);
             else if ((word >> 56) == 1)
@@ -496,6 +504,10 @@ struct HalfIR {
             return a(0) ^ a(1);
         case IR::Opcode::BitwiseNot32:
             return ~u32(a(0));
+        case IR::Opcode::ShiftRightLogical32:
+            return u32(a(0)) >> (a(1) & 31);
+        case IR::Opcode::ShiftLeftLogical32:
+            return u32(a(0)) << (a(1) & 31);
         case IR::Opcode::IEqual:
             return a(0) == a(1);
         case IR::Opcode::INeg32:
@@ -562,6 +574,39 @@ TEST_CASE("Ocarina uniform multiply adds an immediate rather than reading a regi
             CHECK(machine.registers[0][220] == a * b + 0x3c00U);
             CHECK(machine.registers[0][222] == b);
             CHECK(machine.predicates == predicates);
+        }
+    }
+}
+
+TEST_CASE("Ocarina 64-bit right shifts include both words and clamp at 64",
+          "[video_core][ampere][oot]") {
+    for (const bool uniform : {false, true}) {
+        for (const u32 shift : {0U, 1U, 16U, 24U, 31U, 32U, 33U, 63U, 64U, 65U, 0xffffffffU}) {
+            const Instruction instruction = uniform
+                ? Instruction{{0x04077899, shift, 0x08001206, 0x002fc400}}
+                : Instruction{{0x032b7219, 44, 0x0000122d, 0x000fe200}};
+            const auto lowered = LowerToMaxwell(std::array{instruction, Exit});
+            INFO(lowered.error);
+            REQUIRE(lowered);
+            HalfIR translation{lowered.instructions};
+            for (const u64 input : {0ULL, 0xffffffff00000000ULL, 0x8000000180000000ULL,
+                                   0xfedcba9876543210ULL, 0xffffffffffffffffULL}) {
+                CAPTURE(uniform, shift, input);
+                translation.registers.fill(0xdeadbeef);
+                translation.registers[uniform ? 220 : 3] = u32(input);
+                translation.registers[uniform ? 222 : 45] = u32(input >> 32);
+                translation.registers[44] = shift;
+                translation.values.clear();
+                for (const auto& inst : translation.block.Instructions()) {
+                    if (inst.GetOpcode() == IR::Opcode::SetRegister)
+                        translation.registers.at(static_cast<size_t>(inst.Arg(0).Reg())) =
+                            u32(translation.Value(inst.Arg(1)));
+                    else
+                        translation.values.emplace(&inst, translation.Evaluate(inst));
+                }
+                CHECK(translation.registers[uniform ? 223 : 43] ==
+                      (shift >= 64 ? 0U : u32(input >> shift)));
+            }
         }
     }
 }
@@ -1312,8 +1357,10 @@ TEST_CASE("Fast Fusion nonadjacent call links require a closed write-safe window
     }
     for (const u32 site : {1U, 4U}) {
         auto unknown = original;
-        unknown[site] = Instruction{{0x00027308, 2, 0x1000, 0}};
-        CHECK_FALSE(LowerToMaxwell(unknown));
+        unknown[site] = Instruction{{0x02027209, 0x40000003, 0x07810200, 0}};
+        const auto rejected = LowerToMaxwell(unknown);
+        CHECK_FALSE(rejected);
+        CHECK(rejected.error == "native call linkage mode");
     }
     auto wrong_copy = original;
     wrong_copy[5].words[1] = 8;
