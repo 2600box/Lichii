@@ -362,6 +362,30 @@ TEST_CASE("Descriptor Debug poisoning touches only the current addressable range
     REQUIRE(table.Read(memory, 127).second);
 }
 
+TEST_CASE("Descriptor table limit changes retain storage but invalidate exposed IDs",
+          "[descriptor_table]") {
+    VideoCommon::DescriptorTable<u64> table;
+    table.Refresh(0x1000, 0x80000);
+    const auto descriptor_count = table.descriptors.size();
+    const auto id_count = table.bound_ids.size();
+    const auto* descriptors = table.descriptors.data();
+    const auto* ids = table.bound_ids.data();
+    table.descriptors[0x80000] = 0x1234;
+    table.bound_ids[0x80000] = 7;
+    table.read_descriptors[0x80000 / 64] = 1;
+
+    table.Refresh(0x1000, 127);
+    REQUIRE(table.descriptors.size() == descriptor_count);
+    REQUIRE(table.bound_ids.size() == id_count);
+    REQUIRE(table.LiveBoundIds().size() == 128);
+    table.Refresh(0x2000, 0x80000);
+    REQUIRE(table.descriptors.data() == descriptors);
+    REQUIRE(table.bound_ids.data() == ids);
+    REQUIRE(table.descriptors[0x80000] == 0x1234);
+    REQUIRE(table.bound_ids[0x80000] == 0);
+    REQUIRE(table.read_descriptors[0x80000 / 64] == 0);
+}
+
 TEST_CASE("Descriptor ID lookup CPU benchmark", "[.][descriptor_lookup_bench]") {
     using Descriptor = Tegra::Texture::TICEntry;
     using Id = Common::SlotId;

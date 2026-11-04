@@ -83,8 +83,10 @@ public:
         ClearReadDescriptors();
         invalidated = false;
         //
-        descriptors.resize(num_descriptors);
-        bound_ids.resize(num_descriptors, Id{0});
+        if (descriptors.size() < num_descriptors) {
+            descriptors.resize(num_descriptors);
+            bound_ids.resize(num_descriptors, Id{0});
+        }
     }
 
     std::vector<u64> read_descriptors;
