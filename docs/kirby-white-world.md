@@ -66,6 +66,21 @@ The X8Z24 fix from Eglantine #295 and the texture-header-offset fix are already 
 neither describes this format-zero entry. The subsequent upstream sync was merged
 through origin/nx2, including #47, #48, #49 and #50.
 
+## Ruled out: W scale factors and the graphics scale
+
+The `f9dff5c28c` run builds every shader and still shows the white world. 83 of its 501 dumps
+read `SR_WSCALEFACTOR_XY` and `SR_WSCALEFACTOR_Z` (S2UR 30 and 31): 82 graphics programs and
+compute `0x130d607b00`. In the vertex programs the factors scale W for frustum tests that
+choose an early EXIT, and lowering removes that rejection, so no IR reads the factors. None of
+the 50 cached modules that contain the stub's `0x00ff0000` constant bitcasts it to a float;
+each uses it only as a bit mask. The open upstream Eglantine #27 maps the factors to the
+viewport clip-control guardband (256.0 or 1.0), but that would change no emitted module here.
+
+`nx2:IGraphicsScaleController` command 1050 is `nn::oe::SetGraphicsScaleChangedNotificationEnabled(bool)`
+(seedds/nxnative `dm/host/hle_oe.c`). It now has a handler instead of the auto-stub. Its reply
+was already an empty success. Command 10 still returns 10, the handheld tier, which Donkey Kong
+Bananza uses only as a quality tier.
+
 ## Verification
 
 - Clang/Ninja shader build: all 199 Ampere and `[storage_buffer]` test cases pass
