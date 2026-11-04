@@ -2522,9 +2522,13 @@ void Call(Core::System& system, u32 imm) {
     const u64 presents = Core::g_nx2_present_count.load(std::memory_order_relaxed);
     const bool svc_trace = presents >= trace_range.first && presents <= trace_range.second;
     if (svc_trace) {
-        LOG_INFO(Kernel_SVC, "svc {:#04x} in  t{} [0]={:#x} [1]={:#x} [2]={:#x} [3]={:#x}", imm,
+        ThreadContext context{};
+        process.GetArmInterface(kernel.CurrentPhysicalCore().CoreIndex())->GetContext(context);
+        LOG_INFO(Kernel_SVC,
+                 "svc {:#04x} in  t{} [0]={:#x} [1]={:#x} [2]={:#x} [3]={:#x} pc={:#x} lr={:#x}", imm,
                  GetCurrentThread(kernel).GetThreadId(),
-                 GetArg64(args, 0), GetArg64(args, 1), GetArg64(args, 2), GetArg64(args, 3));
+                 GetArg64(args, 0), GetArg64(args, 1), GetArg64(args, 2), GetArg64(args, 3), context.pc,
+                 context.lr);
         if (imm == 0x18) {
             // WaitSynchronization: the handles, with the names services gave their events.
             std::string list;
