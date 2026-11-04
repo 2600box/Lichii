@@ -163,6 +163,21 @@ and keeps that sampler's cbuf offset fixed when binding each array element. Test
 operand orders, the retained shader-side index, and the unchanged fully static path. An owner
 run is still needed to establish how much of the character/shadow problem this explains.
 
+Vulkan recreates SPIR-V from cached environments, then supplies the new modules and descriptor
+layout to `vkCreateGraphicsPipelines`; the application's pipeline hash does not select an old
+driver binary directly. However, old environments omit the newly needed cbuf/texture reads.
+After a cache-load failure, the old disk-key set also prevents a live recompile from replacing
+that record. Vulkan cache version 50 and OpenGL version 46 therefore start fresh versioned files,
+without deleting the previous files. Expect a cold-cache first run.
+
+The initial array cap runs before final uniform and static texture counts are known. A final
+budget check now includes those resources and any NVN storage buffers, then tightens shader-side
+index clamps when reducing array counts. A metadata-only audit of the nine incomplete cached
+environments found four over-budget cases at a synthetic 1,024-resource limit. Their final totals
+are now 1,023 or 1,024. Audits at 128 and 1,048,576 also fit all nine; at 32, one cannot fit even
+one element per array and is rejected. Missing context was substituted only for this structural
+audit. The nine shaders remain unverified with real runtime data.
+
 The `kirby-fix4` log does not establish the cause of the low frame rate. Its 636.1 ms pipeline
 summary spans 10.070 seconds and counts GPU-thread translation, not driver-worker compilation.
 Between 118 and 125 seconds the individual logged builds total 2,121.1 ms. The last logged
