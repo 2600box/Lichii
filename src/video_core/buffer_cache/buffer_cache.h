@@ -17,6 +17,7 @@
 #include <fmt/ranges.h>
 
 #include "common/range_sets.inc"
+#include "common/shader_memory_trace.h"
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/buffer_cache/multi_range_refresh.h"
 #include "video_core/buffer_cache/uniform_stream_reuse.h"
@@ -278,6 +279,7 @@ void BufferCache<P>::ClearDownload(DAddr device_addr, u64 size) {
 
 template <class P>
 bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 amount) {
+    const Common::ShaderMemoryTrace::ScopedWriter trace_writer{"dma-copy"};
     const std::optional<DAddr> cpu_src_address = gpu_memory->GpuToCpuAddress(src_address);
     const std::optional<DAddr> cpu_dest_address = gpu_memory->GpuToCpuAddress(dest_address);
     if (!cpu_src_address || !cpu_dest_address) {
@@ -820,6 +822,7 @@ void BufferCache<P>::PopAsyncFlushes() {
 
 template <class P>
 void BufferCache<P>::PopAsyncBuffers() {
+    const Common::ShaderMemoryTrace::ScopedWriter trace_writer{"fence-download"};
     if (async_buffers.empty()) {
         return;
     }
@@ -2387,6 +2390,7 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer) {
 
 template <class P>
 void BufferCache<P>::DownloadBuffersMemory(std::span<const BufferId> buffer_ids) {
+    const Common::ShaderMemoryTrace::ScopedWriter trace_writer{"buffer-batch-download"};
     struct Download {
         BufferId buffer_id;
         BufferCopy copy;
@@ -2433,6 +2437,7 @@ void BufferCache<P>::DownloadBuffersMemory(std::span<const BufferId> buffer_ids)
 
 template <class P>
 void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64 size) {
+    const Common::ShaderMemoryTrace::ScopedWriter trace_writer{"buffer-download"};
     boost::container::small_vector<BufferCopy, 1> copies;
     u64 total_size_bytes = 0;
     u64 largest_copy = 0;

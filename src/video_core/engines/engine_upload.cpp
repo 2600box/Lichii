@@ -8,6 +8,7 @@
 
 #include "common/algorithm.h"
 #include "common/assert.h"
+#include "common/shader_memory_trace.h"
 #include "video_core/engines/engine_upload.h"
 #include "video_core/guest_memory.h"
 #include "video_core/memory_manager.h"
@@ -49,10 +50,17 @@ void State::ProcessData(const u32 data, const bool is_last_call) {
         }
         return;
     }
+    Common::ShaderMemoryTrace::NoteUpload(regs.dest.Address(), copy_size, write_offset, 0,
+                                         std::span<const u8>{inner_buffer}.first(write_offset));
     ProcessData(inner_buffer);
 }
 
 void State::ProcessData(const u32* data, size_t num_data) {
+    if (!native_partial) {
+        Common::ShaderMemoryTrace::NoteUpload(regs.dest.Address(), copy_size,
+                                             num_data * sizeof(u32), write_offset,
+                                             {reinterpret_cast<const u8*>(data), num_data * sizeof(u32)});
+    }
     if (native_partial && is_linear && regs.line_count == 1) {
         const auto count = std::min<size_t>(num_data * sizeof(u32), copy_size - write_offset);
         if (count) {
@@ -68,6 +76,10 @@ void State::ProcessData(const u32* data, size_t num_data) {
 }
 
 void State::ProcessData(std::span<const u8> read_buffer) {
+    if (!native_partial) {
+        Common::ShaderMemoryTrace::NoteUpload(regs.dest.Address(), copy_size,
+                                             read_buffer.size(), write_offset, read_buffer);
+    }
     const GPUVAddr address{regs.dest.Address()};
     if (is_linear) {
         for (size_t line = 0; line < regs.line_count; ++line) {

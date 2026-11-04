@@ -1895,6 +1895,7 @@ Tegra::Engines::AccelerateDMAInterface& RasterizerVulkan::AccessAccelerateDMA() 
 
 void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_size,
                                                 std::span<const u8> memory) {
+    const Common::ShaderMemoryTrace::ScopedWriter trace_writer{"inline-upload"};
     auto cpu_addr = gpu_memory->GpuToCpuAddress(address);
     if (gpu_memory->UsesNativeTiling()) {
         u32 first_word{};

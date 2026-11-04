@@ -24,6 +24,7 @@ add_library(
     address_space.cpp
     address_space.h
     algorithm.h
+    shader_memory_trace.h
     alignment.h
     announce_multiplayer_room.h
     assert.cpp

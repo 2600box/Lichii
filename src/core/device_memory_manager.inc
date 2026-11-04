@@ -21,6 +21,7 @@
 #include "common/paged_scalar.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
+#include "common/shader_memory_trace.h"
 #include "core/device_memory.h"
 #include "core/device_memory_manager.h"
 #include "core/memory.h"
@@ -519,6 +520,8 @@ void DeviceMemoryManager<Traits>::WriteBlock(DAddr address, const void* src_poin
             }
         },
         [&](size_t copy_amount, u8* const dst_ptr) {
+            Common::ShaderMemoryTrace::Observe("device-write", dst_ptr,
+                                              {static_cast<const u8*>(src_pointer), copy_amount});
             std::memcpy(dst_ptr, src_pointer, copy_amount);
         },
         [&](const std::size_t copy_amount) {
@@ -585,6 +588,8 @@ void DeviceMemoryManager<Traits>::WriteBlockUnsafe(DAddr address, const void* sr
             }
         },
         [&](size_t copy_amount, u8* const dst_ptr) {
+            Common::ShaderMemoryTrace::Observe("device-write-unsafe", dst_ptr,
+                                              {static_cast<const u8*>(src_pointer), copy_amount});
             std::memcpy(dst_ptr, src_pointer, copy_amount);
         },
         [&](const std::size_t copy_amount) {

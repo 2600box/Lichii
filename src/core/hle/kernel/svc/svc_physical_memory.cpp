@@ -5,6 +5,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 
 #include "core/core.h"
@@ -155,17 +157,53 @@ static bool MemTrace() {
     return trace;
 }
 
+static void TraceMemoryBudget(Core::System& system, bool map, u64 size, Result result) {
+    if (!MemTrace()) {
+        return;
+    }
+    static std::atomic<u64> maps{}, unmaps{}, failures{}, mapped_bytes{}, unmapped_bytes{};
+    (map ? maps : unmaps).fetch_add(1, std::memory_order_relaxed);
+    if (result.IsSuccess()) {
+        (map ? mapped_bytes : unmapped_bytes).fetch_add(size, std::memory_order_relaxed);
+    } else {
+        failures.fetch_add(1, std::memory_order_relaxed);
+    }
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    static std::atomic<s64> last_report{};
+    s64 last = last_report.load(std::memory_order_relaxed);
+    if (result.IsSuccess() && seconds - last < 5) {
+        return;
+    }
+    if (!last_report.compare_exchange_strong(last, seconds, std::memory_order_relaxed)) {
+        return;
+    }
+    static std::atomic<u32> reports{};
+    if (reports.fetch_add(1, std::memory_order_relaxed) >= 256) {
+        return;
+    }
+    auto& process = GetCurrentProcess(system.Kernel());
+    LOG_INFO(Kernel_SVC,
+             "mem trace summary: program={:#x} maps={} unmaps={} failures={} "
+             "successful_map_request_bytes={:#x} successful_unmap_request_bytes={:#x} "
+             "used={:#x} total={:#x}",
+             process.GetProgramId(), maps.load(), unmaps.load(), failures.load(), mapped_bytes.load(),
+             unmapped_bytes.load(), process.GetUsedNonSystemUserPhysicalMemorySize(system.Kernel()),
+             process.GetTotalNonSystemUserPhysicalMemorySize(system.Kernel()));
+}
+
 Result SetHeapSize64(Core::System& system, uint64_t* out_address, uint64_t size) {
     const Result result = SetHeapSize(system, out_address, size);
     if (MemTrace()) {
         LOG_INFO(Kernel_SVC, "mem trace: SetHeapSize {:#x} -> {:#x} at {:#x}", size, result.raw,
-                 *out_address);
+                 result.IsSuccess() ? *out_address : 0);
     }
     R_RETURN(result);
 }
 
 Result MapPhysicalMemory64(Core::System& system, uint64_t address, uint64_t size) {
     const Result result = MapPhysicalMemory(system, address, size);
+    TraceMemoryBudget(system, true, size, result);
     static u64 total{};
     if (MemTrace()) {
         if (result.IsSuccess()) {
@@ -182,6 +220,7 @@ Result MapPhysicalMemory64(Core::System& system, uint64_t address, uint64_t size
 
 Result UnmapPhysicalMemory64(Core::System& system, uint64_t address, uint64_t size) {
     const Result result = UnmapPhysicalMemory(system, address, size);
+    TraceMemoryBudget(system, false, size, result);
     if (MemTrace()) {
         static u32 logs{};
         if (result.IsError() || logs++ < 400) {

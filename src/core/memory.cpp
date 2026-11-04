@@ -26,6 +26,7 @@
 #include "common/page_table.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
+#include "common/shader_memory_trace.h"
 #include "common/swap.h"
 #include "core/core.h"
 #include "core/device_memory.h"
@@ -357,12 +358,16 @@ struct Memory::Impl {
             LOG_ERROR(HW_Memory, "Unmapped @ {:#016x} (start address = {:#016x}, size = {})", GetInteger(current_vaddr), GetInteger(addr), size);
         },
         [&](const std::size_t offset, const std::size_t copy_amount, u8* const ptr) {
+            Common::ShaderMemoryTrace::Observe("cpu-block-write", ptr,
+                                              {static_cast<const u8*>(buffer) + offset, copy_amount});
             std::memcpy(ptr, reinterpret_cast<u8 const*>(buffer) + offset, copy_amount);
         },
         [&](const Common::ProcessAddress current_vaddr, const std::size_t offset, const std::size_t copy_amount, u8* const ptr) {
             if (!unsafe) {
                 HandleRasterizerWrite(GetInteger(current_vaddr), copy_amount);
             }
+            Common::ShaderMemoryTrace::Observe("cpu-cached-block-write", ptr,
+                                              {static_cast<const u8*>(buffer) + offset, copy_amount});
             std::memcpy(ptr, reinterpret_cast<u8 const*>(buffer) + offset, copy_amount);
         });
     }
@@ -374,10 +379,12 @@ struct Memory::Impl {
         },
         [=](const std::size_t offset, const std::size_t copy_amount, u8* const ptr) {
             std::memset(ptr, 0, copy_amount);
+            Common::ShaderMemoryTrace::Observe("cpu-zero", ptr, {ptr, copy_amount});
         },
         [&](const Common::ProcessAddress current_vaddr, const std::size_t offset, const std::size_t copy_amount, u8* const ptr) {
             HandleRasterizerWrite(GetInteger(current_vaddr), copy_amount);
             std::memset(ptr, 0, copy_amount);
+            Common::ShaderMemoryTrace::Observe("cpu-cached-zero", ptr, {ptr, copy_amount});
         });
     }
 
