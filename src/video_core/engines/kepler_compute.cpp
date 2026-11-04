@@ -367,12 +367,23 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
             },
             [&](u64 address, u32 payload, u32 flags) {
                 if (!memory_manager.IsFullyMappedRange(address, sizeof(payload))) return false;
+                // The fence may hold these writes until its downloads land (fence_manager.h); GPU
+                // acquires see the value they will write at once.
+                auto& waiters = Tegra::Nx2SemaphoreWaiters::Get();
+                const auto device = memory_manager.GpuToCpuAddress(address);
+                const auto gpu_view = [&] {
+                    return device ? waiters.Read(*device, memory_manager.Read<u32>(address)) : 0U;
+                };
                 if (flags & (1U << 26)) {
-                    rasterizer->SignalFence([this, address, payload] {
+                    if (device) {
+                        waiters.Hold(*device, gpu_view() + payload);
+                    }
+                    rasterizer->SignalFence([this, address, payload, device] {
                         const u32 value = memory_manager.Read<u32>(address) + payload;
                         memory_manager.Write<u32>(address, value);
-                        if (const auto device = memory_manager.GpuToCpuAddress(address)) {
+                        if (device) {
                             Tegra::Nx2SemaphoreWaiters::Get().OnWrite(*device, value);
+                            Tegra::Nx2SemaphoreWaiters::Get().Drop(*device);
                         }
                         static const u64 watch = [] {
                             const char* text = std::getenv("EDEN_NX2_SEM_WATCH");
@@ -388,11 +399,15 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                     // NVN2 tracks QMD completion with a max release (bit 19) into a word other
                     // releases also advance: a plain write would move it backwards and leave
                     // GEQ acquires waiting forever.
-                    rasterizer->SignalFence([this, address, payload] {
+                    if (device) {
+                        waiters.Hold(*device, (std::max)(gpu_view(), payload));
+                    }
+                    rasterizer->SignalFence([this, address, payload, device] {
                         const u32 value = (std::max)(memory_manager.Read<u32>(address), payload);
                         memory_manager.Write<u32>(address, value);
-                        if (const auto device = memory_manager.GpuToCpuAddress(address)) {
+                        if (device) {
                             Tegra::Nx2SemaphoreWaiters::Get().OnWrite(*device, value);
+                            Tegra::Nx2SemaphoreWaiters::Get().Drop(*device);
                         }
                     });
                 } else {

@@ -85,6 +85,13 @@ public:
     [[nodiscard]] bool BackRunning() const {
         return back_running.load(std::memory_order_acquire);
     }
+    /// The back: calls the idle hook now, before it blocks on a thread that waits for its
+    /// deferred work. Does nothing on other threads.
+    void RunIdleHook() {
+        if (on_back_thread && idle_hook != nullptr) {
+            idle_hook(idle_argument);
+        }
+    }
     /// Any thread: has the back call the idle hook soon, between entries or at once if it sleeps.
     void RequestIdleHook() {
         hook_requested.store(true, std::memory_order_seq_cst);

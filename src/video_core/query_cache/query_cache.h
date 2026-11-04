@@ -339,7 +339,26 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         }
     });
     if (is_fence) {
-        impl->rasterizer.SignalFence(std::move(operation));
+        // The fence may hold the operation until its downloads land (fence_manager.h). GPU
+        // acquires see a payload release at once; a synced query keeps its slot until then, or
+        // the next report takes it over and the operation writes that report's value.
+        const bool payload_release = counter_type == QueryType::Payload;
+        if (payload_release) {
+            Tegra::Nx2SemaphoreWaiters::Get().Hold(cpu_addr, payload);
+        }
+        impl->rasterizer.SignalFence([operation = std::move(operation), streamer, new_query_id,
+                                      cpu_addr, is_synced, payload_release] {
+            operation();
+            if (payload_release) {
+                Tegra::Nx2SemaphoreWaiters::Get().Drop(cpu_addr);
+            }
+            if (is_synced) {
+                streamer->Free(new_query_id);
+            }
+        });
+        if (is_synced) {
+            return;
+        }
     } else {
         if (!Settings::IsGPULevelHigh() && counter_type == QueryType::Payload) {
             if (has_timestamp) {
@@ -363,10 +382,6 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
             return;
         }
         impl->rasterizer.SyncOperation(std::move(operation));
-    }
-    if (is_synced) {
-        streamer->Free(new_query_id);
-        return;
     }
     auto [cont_addr, base] = gen_caching_indexing(cpu_addr);
     {

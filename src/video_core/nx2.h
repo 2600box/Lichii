@@ -329,6 +329,8 @@ inline bool Nx2SparseUnwritten(u64 gpu_address, u64 size) {
 /// Channels suspended on a semaphore acquire. A console channel polls and sees every release;
 /// Eden writes releases in bursts when fences signal and resumes waiters only between command
 /// lists, so an acquire-equal could miss its value. Writes latch the waiters they satisfy.
+/// Also the GPU's view of releases a fence holds until its downloads land (fence_manager.h):
+/// only the guest CPU must see those late, so acquires read them at once (Read).
 class Nx2SemaphoreWaiters {
 public:
     // Puller GpuSemaphoreOperation values.
@@ -346,6 +348,49 @@ public:
         std::erase_if(waiters, [owner](const Waiter& w) { return w.owner == owner; });
         waiters.push_back({owner, device_address, value, operation, false});
         count.store(waiters.size(), std::memory_order_release);
+    }
+
+    /// A release of `value` to the u32 at `device_address` whose write may run later: acquires
+    /// see it from now until Drop.
+    void Hold(u64 device_address, u32 value) {
+        std::scoped_lock lk{mutex};
+        Latch(device_address, value);
+        auto& release = held[device_address];
+        release.value = value;
+        ++release.count;
+        held_count.store(held.size(), std::memory_order_release);
+    }
+
+    /// The write of a release passed to Hold ran (or was dropped). Writes run in release order,
+    /// so once the address has none left, memory holds the newest.
+    void Drop(u64 device_address) {
+        std::scoped_lock lk{mutex};
+        const auto it = held.find(device_address);
+        if (it != held.end() && --it->second.count == 0) {
+            held.erase(it);
+        }
+        held_count.store(held.size(), std::memory_order_release);
+    }
+
+    /// A new emulation session: a stopped one leaves its waiters and the releases its fences
+    /// still held.
+    void Reset() {
+        std::scoped_lock lk{mutex};
+        waiters.clear();
+        held.clear();
+        count.store(0, std::memory_order_release);
+        held_count.store(0, std::memory_order_release);
+    }
+
+    /// The u32 at `device_address` as GPU acquires see it: the newest held release, else
+    /// `memory`.
+    [[nodiscard]] u32 Read(u64 device_address, u32 memory) {
+        if (held_count.load(std::memory_order_acquire) == 0) {
+            return memory;
+        }
+        std::scoped_lock lk{mutex};
+        const auto it = held.find(device_address);
+        return it != held.end() ? it->second.value : memory;
     }
 
     void Remove(const void* owner) {
@@ -372,6 +417,16 @@ public:
             return;
         }
         std::scoped_lock lk{mutex};
+        Latch(device_address, value);
+    }
+
+private:
+    struct HeldRelease {
+        u32 value;
+        u32 count;
+    };
+
+    void Latch(u64 device_address, u32 value) {
         for (auto& w : waiters) {
             if (w.address == device_address && !w.latched && Matches(w, value)) {
                 w.latched = true;
@@ -379,7 +434,6 @@ public:
         }
     }
 
-private:
     struct Waiter {
         const void* owner;
         u64 address;
@@ -404,6 +458,8 @@ private:
     std::mutex mutex;
     std::vector<Waiter> waiters;
     std::atomic<size_t> count{};
+    std::map<u64, HeldRelease> held;
+    std::atomic<size_t> held_count{};
 };
 
 } // namespace Tegra
