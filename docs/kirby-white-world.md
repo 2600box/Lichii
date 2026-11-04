@@ -1,0 +1,89 @@
+# Kirby Air Riders white-world investigation
+
+Program ID: `040077201BE50000`.
+
+The changes fix two reproduced shader rejection mechanisms. They do not yet establish
+which failure causes the white world. An in-game run and the rejected programs' captures
+are still required. No texture-format mapping or atomic-routing heuristic is added.
+
+## Evidence and fixes
+
+The original `0bb0445671` log rejects a geometry program at instruction `0x9130`:
+`08007950 ffff6ec0 03c3ffff 000fea00`. The engine's stage slot 4 is geometry,
+not fragment. This is an unconditional `RET.REL.NODEC R8` whose relative base is zero.
+The instruction cannot fall through into the exit handler. The same failure appears in
+two programs in the subsequent `cb5b085c34` probe, at offsets `0x9130` and `0x9180`.
+The log immediately records skipped draws into a 2048x1152 render target.
+
+The geometry envelope validator previously required an unconditional EXIT immediately
+before its handler, rejecting a valid return from a preceding subroutine. Allow the
+verified return encoding, retain the lowerer's return-link checks, recognize the end
+of the main body, and keep lowering through the handler after the subroutine returns.
+Call-link tracking is enabled only for envelopes containing returns, so existing
+return-free envelopes keep their previous behavior. Predicate, return-base, linkage,
+handler-body, and branch-boundary checks remain in place.
+
+The original log also rejects compute instruction
+`5fdc7220 00000052 00410000 000fe200` at `0x36f0`. This is FMUL with destination
+R220 and inputs R95/R82. R220 overlaps the lowerer's uniform-register mirrors, but
+the guest-register preservation table did not include opcode `0x220`. Add its three
+register operands to that table. A regression checks both operand remapping and the
+translated result of multiplying 2 by 3 through the shadow register.
+
+## What remains unresolved
+
+The atomic shader `0x1175573eed7481a4` still fails with no routable storage buffer in
+the probe containing [Lichii #47](https://github.com/zortos293/Lichii/pull/47).
+That patch handles a whole atomic address formed from an unmapped constant-buffer
+pointer pair. The existing log does not contain this shader's pointer-expression IR
+or its specialization data, so it does not show why this case escapes that rule.
+Failed compute environments are now dumped for an exact offline replay.
+
+The original log has 58 format-zero assertions, but the probe's white menus occur
+without that assertion. Format zero is the hardware descriptor's INVALID encoding,
+and component type 2 means UNORM; these fields do not identify an omitted valid
+format. See NVIDIA's `NVC697_TEXHEAD_BL_COMPONENTS_SIZES_INVALID` in
+[clc697tex.h](https://github.com/NVIDIA/open-gpu-doc/blob/master/classes/3d/clc697tex.h).
+Full descriptor, handle, pool index, dimensions, address, and mapping traces have been
+added rather than assigning a guessed format.
+
+Upstream nx2, PR/issue searches, and relevant texture/shader diffs were checked.
+Upstream does not contain the fork's `geometry_exit.h` or `register_pressure.h` helpers.
+The X8Z24 fix from Eglantine #295 and the texture-header-offset fix are already present;
+neither describes this format-zero entry. The subsequent upstream sync was merged
+through origin/nx2, including #47, #48, #49 and #50.
+
+## Verification
+
+- Clang/Ninja shader build, 187 Ampere tests with 8,101,938 assertions passed.
+- All three standalone shader-sweep suites passed, including a synthetic geometry
+  CALL/RET/exit-handler program that emits a vertex and passes `spirv-val`.
+- The latest provided Kirby v48 cache has 1,038 validated compiler cases and 94 cases
+  missing captured context. Cached programs are already lowered; they cannot recover
+  native programs rejected before caching.
+- The four runtime translation units affected by diagnostics compile with clang.
+  The generated GNU-only `-mtls-dialect=gnu2` flag was omitted for clang 18.
+- All 48 additional geometry captures still fail at their original setup-liveness
+  checks, not the RET/handler boundary: Raiders has 6 BRA, 2 predicate-logic and 2
+  predicated EXIT cases; Duskbloods has 11 ALD, 16 texture, 9 uniform-add and 2
+  floating-compare cases. No unrelated setup-liveness change is included.
+
+## Next in-game capture
+
+Set `EDEN_NX2_SHADER_DUMP` to an existing writable directory and
+`EDEN_NX2_RENDER_TRACE=1`. Use log filter
+`*:Info HW.GPU:Debug Render.Vulkan:Debug Shader:Debug`.
+
+Besides native shader binaries, the dump directory now receives
+`failed-compute-1175573eed7481a4-v49.env` if that compute pipeline fails and its
+environment can be serialized. Replay it with:
+
+```sh
+build/shader-sweep/shader-sweep \
+  --environment failed-compute-1175573eed7481a4-v49.env --cache-version 49 \
+  --output shader.spv
+```
+
+Send the log, dump directory, and screenshots from both a menu and a race. Check whether
+the geometry rejections disappear, whether another rejection replaces them, and whether
+the 3D world returns independently of the atomic error.

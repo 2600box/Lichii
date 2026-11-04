@@ -15,6 +15,7 @@ struct GeometryExitEnvelope {
     };
     std::vector<Exit> exits;
     u32 handler{};
+    bool has_returns{};
     u32 error_offset{};
     std::string_view error;
 
@@ -31,6 +32,7 @@ GeometryExitEnvelope AnalyzeGeometryExit(const Code& code) {
     const auto fail = [&](size_t index, std::string_view reason) {
         result.exits.clear();
         result.handler = 0;
+        result.has_returns = false;
         result.error_offset = static_cast<u32>(index * 16);
         result.error = reason;
         return result;
@@ -85,7 +87,10 @@ GeometryExitEnvelope AnalyzeGeometryExit(const Code& code) {
             result.exits.push_back({static_cast<u32>(index * 16), bits(index, 12, 4)});
             continue;
         }
-        if (is_return(index)) continue;
+        if (is_return(index)) {
+            result.has_returns = true;
+            continue;
+        }
         if (family < 0x140 || family >= 0x160 || opcode == 0x941 || opcode == 0x942 ||
             opcode == 0x948)
             continue;
