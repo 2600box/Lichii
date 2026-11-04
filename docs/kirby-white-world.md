@@ -2,9 +2,9 @@
 
 Program ID: `040077201BE50000`.
 
-The changes fix two reproduced shader rejection mechanisms. They do not yet establish
-which failure causes the white world. An in-game run and the rejected programs' captures
-are still required. No texture-format mapping or atomic-routing heuristic is added.
+The changes fix three reproduced shader rejection mechanisms. They do not yet establish
+which failure causes the white world, so an in-game run is still required. No
+texture-format mapping is added.
 
 ## Evidence and fixes
 
@@ -30,14 +30,27 @@ the guest-register preservation table did not include opcode `0x220`. Add its th
 register operands to that table. A regression checks both operand remapping and the
 translated result of multiplying 2 by 3 through the shadow register.
 
-## What remains unresolved
+## Atomics behind unmapped pointers with a carried offset
 
-The atomic shader `0x1175573eed7481a4` still fails with no routable storage buffer in
-the probe containing [Lichii #47](https://github.com/zortos293/Lichii/pull/47).
-That patch handles a whole atomic address formed from an unmapped constant-buffer
-pointer pair. The existing log does not contain this shader's pointer-expression IR
-or its specialization data, so it does not show why this case escapes that rule.
-Failed compute environments are now dumped for an exact offline replay.
+In the `kirby-white3` run with render tracing, every traced draw (1,078 draws) is
+configured. The only rejected GPU work is compute shader `0x1175573eed7481a4` (pipeline
+`0xced45eff3d2d0513`, program `0x11c7811e00`). It fails with `Global atomic add with no
+routable storage buffer`, and both of its dispatches at about 31 seconds are dropped.
+
+The program has 70 `ATOMG.E.ADD` instructions. In the IR, 65 of them add an immediate
+`0x1c` (and `+8`) to the 64-bit pointer at `c0[0x40]` in 32-bit halves. The carry
+is computed as `low < pointer_low` and is added to the high word. The other 5 add a
+thread-dependent 64-bit offset to the pointer at `c1[0x0]`; their carry is the add's
+carry flag. Both pointers are classified unmapped when the pipeline is built.
+[Lichii #47](https://github.com/zortos293/Lichii/pull/47) keeps the buffer only for a
+pointer that is the atomic's bare address, so neither form matches. Offline, mapping
+only `c0[0x40]` routes the 65; mapping only `c1[0x0]` routes the 5.
+
+`CollectAtomicPointers` now also accepts a pointer when the high half of the atomic's
+address sums the pointer's high word with a carry select whose condition reads the
+pointer's low word. A 32-bit scalar added to a pointer carries nothing, so #47's case
+of an atomic offset by `c0[0x40]` stays global. Upstream `nx2` still has the
+throwing stub and no open or closed PR changes this routing.
 
 The original log has 58 format-zero assertions, but the probe's white menus occur
 without that assertion. Format zero is the hardware descriptor's INVALID encoding,
@@ -55,11 +68,17 @@ through origin/nx2, including #47, #48, #49 and #50.
 
 ## Verification
 
-- Clang/Ninja shader build, 187 Ampere tests with 8,101,938 assertions passed.
+- Clang/Ninja shader build: all 199 Ampere and `[storage_buffer]` test cases pass
+  (8,102,012 assertions). The new carry test fails without the routing change.
+- The failing compute dump, compiled offline with no pointer mapped, emits 70
+  `OpAtomicIAdd` on two storage buffers (`c0[0x40]`, `c1[0x0]`), with no global atomic
+  left. The module passes `spirv-val --target-env vulkan1.2 --scalar-block-layout`.
+- A sweep of the `kirby-white3` dumps plus the v48 cache (1,231 jobs) emits SPIR-V
+  for all 1,038 modules, byte-identical to the output before the routing change.
 - All three standalone shader-sweep suites passed, including a synthetic geometry
   CALL/RET/exit-handler program that emits a vertex and passes `spirv-val`.
-- The latest provided Kirby v48 cache has 1,038 validated compiler cases and 94 cases
-  missing captured context. Cached programs are already lowered; they cannot recover
+- The Kirby v48 cache has 1,038 validated compiler cases and 94 cases missing
+  captured context. Cached programs are already lowered; they cannot recover
   native programs rejected before caching.
 - The four runtime translation units affected by diagnostics compile with clang.
   The generated GNU-only `-mtls-dialect=gnu2` flag was omitted for clang 18.
@@ -85,5 +104,4 @@ build/shader-sweep/shader-sweep \
 ```
 
 Send the log, dump directory, and screenshots from both a menu and a race. Check whether
-the geometry rejections disappear, whether another rejection replaces them, and whether
-the 3D world returns independently of the atomic error.
+the compute rejection is gone and whether the 3D world returns with it.
