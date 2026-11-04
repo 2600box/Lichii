@@ -25,6 +25,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/query_cache/frame_trace.h"
@@ -55,6 +56,7 @@ Maxwell3D::Maxwell3D(MemoryManager& memory_manager_)
 {
     dirty.flags.flip();
     InitializeRegisterDefaults();
+    reports_fast_draw_breaks = true;
     execution_mask.reset();
     for (size_t i = 0; i < execution_mask.size(); i++)
         execution_mask[i] = IsMethodExecutable(u32(i));
@@ -359,12 +361,31 @@ void Maxwell3D::ProcessDirtyRegisters(u32 method, u32 argument) {
     if (draw_manager.HasDeferredDraw() && !DrawManager::IsInstanceLoopMethod(method)) [[unlikely]] {
         draw_manager.DrawDeferred(*this, true);
     }
+    if (VideoCommon::Nx2FastDraw::g_enabled && regs.reg_array[method] != argument &&
+        !IsFastDrawParameter(method)) [[unlikely]] {
+        VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Register, method);
+    }
     regs.reg_array[method] = argument;
     for (auto const& table : dirty.tables)
         dirty.flags[table[method]] = true;
 }
 
+bool Maxwell3D::IsFastDrawParameter(u32 method) {
+    switch (method) {
+    case MAXWELL3D_REG_INDEX(const_buffer.size):
+    case MAXWELL3D_REG_INDEX(const_buffer.address_high):
+    case MAXWELL3D_REG_INDEX(const_buffer.address_low):
+    case MAXWELL3D_REG_INDEX(const_buffer.offset):
+        return true;
+    default:
+        return DrawManager::IsInstanceLoopMethod(method);
+    }
+}
+
 void Maxwell3D::ProcessMethodCall(u32 method, u32 argument, u32 nonshadow_argument, bool is_last_call) {
+    if (!DrawManager::IsInstanceLoopMethod(method)) {
+        VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Method, method);
+    }
     if (GetNativeMacroEngine().native_turing && method == MAXWELL3D_REG_INDEX(clear_surface)) {
         LOG_DEBUG(HW_GPU, "Native GPU surface clear: value={:#x}", argument);
     }
@@ -741,10 +762,12 @@ void Maxwell3D::CallMultiMethod(Core::System& system, u32 method, const u32* bas
     case MAXWELL3D_REG_INDEX(const_buffer.buffer) + 13:
     case MAXWELL3D_REG_INDEX(const_buffer.buffer) + 14:
     case MAXWELL3D_REG_INDEX(const_buffer.buffer) + 15:
+        VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::ConstantData);
         ProcessCBMultiData(base_start, amount);
         break;
     case MAXWELL3D_REG_INDEX(inline_data): {
         ASSERT(methods_pending == amount);
+        VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::InlineData);
         upload_state.ProcessData(base_start, amount);
         return;
     }
@@ -1368,7 +1391,8 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
     fs.parameters.clear();
     if (fs.draw_pending) {
         fs.draw_pending = false;
-        split.Defer([this, system_ptr = &system] { FinishFrontMacro(*system_ptr); });
+        split.Defer([this, system_ptr = &system] { FinishFrontMacro(*system_ptr); },
+                    VideoCommon::GpuSplit::FastDrawNeutral);
     }
     if (FrontVerifyEnabled() && (++fs.calls & 4095) == 0) [[unlikely]] {
         FrontVerify(split, fs);
