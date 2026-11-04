@@ -152,7 +152,15 @@ public:
         // Allocate backing file map
         backing_handle = pfn_CreateFileMapping2(INVALID_HANDLE_VALUE, nullptr, FILE_MAP_WRITE | FILE_MAP_READ, PAGE_READWRITE, SEC_COMMIT, backing_size, nullptr, nullptr, 0);
         if (!backing_handle) {
-            LOG_CRITICAL(HW_Memory, "Failed to allocate {} MiB of backing memory", backing_size >> 20);
+            const DWORD error = GetLastError();
+            MEMORYSTATUSEX status;
+            status.dwLength = sizeof(status);
+            GlobalMemoryStatusEx(&status);
+            LOG_CRITICAL(HW_Memory,
+                         "Failed to allocate {} MiB of backing memory (error {}): commit limit "
+                         "{} MiB, available {} MiB, physical memory {} MiB",
+                         backing_size >> 20, error, status.ullTotalPageFile >> 20,
+                         status.ullAvailPageFile >> 20, status.ullTotalPhys >> 20);
             return false;
         }
         // Allocate a virtual memory for the backing file map as placeholder
@@ -272,7 +280,7 @@ private:
                 LOG_CRITICAL(HW_Memory, "Failed to free backing memory");
             }
         }
-        if (!CloseHandle(backing_handle)) {
+        if (backing_handle && !CloseHandle(backing_handle)) {
             LOG_CRITICAL(HW_Memory, "Failed to free backing memory file handle");
         }
     }
