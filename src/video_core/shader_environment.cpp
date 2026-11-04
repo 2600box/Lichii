@@ -26,6 +26,7 @@
 #include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/settings.h"
+#include "common/shader_memory_trace.h"
 #include <ranges>
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/exception.h"
@@ -386,8 +387,8 @@ public:
     using Instruction = Shader::Ampere::Instruction;
     static constexpr GPUVAddr PageSize = 0x1000;
 
-    explicit NativeInstructionReader(Tegra::MemoryManager& gpu_memory_)
-        : gpu_memory{gpu_memory_} {}
+    explicit NativeInstructionReader(Tegra::MemoryManager& gpu_memory_, GPUVAddr code_start_)
+        : gpu_memory{gpu_memory_}, code_start{code_start_} {}
 
     /// Copies the instruction at `address` into `out`, loading its page first if needed.
     /// Returns false when the instruction is not inside a fully mapped page.
@@ -415,12 +416,40 @@ private:
         page_begin = address;
         page_end = address;
         if (length >= sizeof(Instruction) && gpu_memory.IsFullyMappedRange(address, length)) {
+            if (Common::ShaderMemoryTrace::Enabled()) {
+                std::array<u8, PageSize> before;
+                gpu_memory.ReadBlockUnsafe(address, before.data(), length);
+                if (address == code_start) {
+                    trace_reference = Common::ShaderMemoryTrace::MatchesPrefix(
+                        std::span{before}.first(length));
+                    if (trace_reference) {
+                        static u32 matches{};
+                        if (matches++ < 16) {
+                            LOG_INFO(Shader, "shader memory trace: matched program gpu={:#x} host={}",
+                                     code_start, static_cast<void*>(gpu_memory.GetPointer<u8>(address)));
+                        }
+                    }
+                }
+                if (trace_reference) {
+                    Common::ShaderMemoryTrace::TrackPage(gpu_memory.GetPointer<u8>(address),
+                                                        address - code_start, length);
+                }
+                Common::ShaderMemoryTrace::Observe("shader-before-flush", gpu_memory.GetPointer<u8>(address),
+                                                  std::span{before}.first(length));
+            }
             gpu_memory.ReadBlock(address, page.data(), length);
+            if (Common::ShaderMemoryTrace::Enabled()) {
+                Common::ShaderMemoryTrace::Observe(
+                    "shader-after-flush", gpu_memory.GetPointer<u8>(address),
+                    {reinterpret_cast<const u8*>(page.data()), static_cast<size_t>(length)});
+            }
             page_end = next_page;
         }
     }
 
     Tegra::MemoryManager& gpu_memory;
+    GPUVAddr code_start;
+    bool trace_reference{};
     std::array<Instruction, PageSize / sizeof(Instruction)> page;
     GPUVAddr page_begin{};
     GPUVAddr page_end{};
@@ -457,7 +486,7 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
     constexpr u32 maximum_instructions = Shader::Ampere::ProgramCaptureState::MaximumInstructions;
     std::vector<Instruction> native;
     Shader::Ampere::ProgramCaptureState capture;
-    NativeInstructionReader reader{*gpu_memory};
+    NativeInstructionReader reader{*gpu_memory, program_base + native_header_size};
     for (u32 index = 0; index < maximum_instructions; ++index) {
         const GPUVAddr address = program_base + native_header_size + index * sizeof(Instruction);
         Instruction instruction;
@@ -672,7 +701,7 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
                 std::vector<Shader::Ampere::Instruction> instructions;
                 Shader::Ampere::ProgramCaptureState capture;
                 auto status = Shader::Ampere::ProgramCaptureState::Result::Continue;
-                NativeInstructionReader reader{*gpu_memory};
+                NativeInstructionReader reader{*gpu_memory, program_base + header.size()};
                 for (u32 index = 0; index < MaxCaptureInstructions; ++index) {
                     const GPUVAddr address = program_base + header.size() + index * 16;
                     Shader::Ampere::Instruction instruction;

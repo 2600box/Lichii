@@ -17,6 +17,7 @@
 #include "video_core/nx2.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/invalidation_accumulator.h"
+#include "common/shader_memory_trace.h"
 #include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_base.h"
@@ -509,6 +510,8 @@ void MemoryManager::WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffe
             rasterizer->InvalidateRegion(dev_addr_base, copy_amount, which);
         }
         if (u8* physical = memory.GetPointer<u8>(dev_addr_base)) [[likely]] {
+            Common::ShaderMemoryTrace::Observe("gpu-write", physical,
+                                              {static_cast<const u8*>(src_buffer), copy_amount});
             std::memcpy(physical, src_buffer, copy_amount);
         }
         src_buffer = static_cast<const u8*>(src_buffer) + copy_amount;
@@ -521,6 +524,8 @@ void MemoryManager::WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffe
         u8* const physical = IsBigPageContinuous(page_index) ? memory.GetPointer<u8>(dev_addr_base)
                                                              : nullptr;
         if (physical != nullptr) [[likely]] {
+            Common::ShaderMemoryTrace::Observe("gpu-big-write", physical,
+                                              {static_cast<const u8*>(src_buffer), copy_amount});
             std::memcpy(physical, src_buffer, copy_amount);
         } else {
             memory.WriteBlockUnsafe(dev_addr_base, src_buffer, copy_amount);

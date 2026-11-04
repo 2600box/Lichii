@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cctype>
+#include <cstdlib>
 #include "core/core.h"
 #include "core/debugger/debugger.h"
 #include "core/hle/kernel/k_process.h"
@@ -52,6 +53,13 @@ void Break(Core::System& system, BreakReason reason, u64 info1, u64 info2) {
     };
     switch (break_reason) {
     case BreakReason::Panic:
+        if (std::getenv("EDEN_NX2_MEM_TRACE")) {
+            auto& process = GetCurrentProcess(system.Kernel());
+            LOG_INFO(Kernel_SVC, "mem trace panic: program={:#x} used={:#x} total={:#x}",
+                     process.GetProgramId(),
+                     process.GetUsedNonSystemUserPhysicalMemorySize(system.Kernel()),
+                     process.GetTotalNonSystemUserPhysicalMemorySize(system.Kernel()));
+        }
         LOG_CRITICAL(Debug_Emulated, "Userspace PANIC! info1={:#016x}, info2={:#016x}", info1,
                      info2);
         handle_debug_buffer(info1, info2);
