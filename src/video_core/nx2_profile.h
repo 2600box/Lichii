@@ -56,6 +56,12 @@ enum class Zone : u32 {
     WriterWait,
     ListSubmitWait,
     ListGpuWait,
+    BackCall,     ///< Split GPU thread: work the front deferred to the back (GpuSplit::Defer)
+    ConsumeSink,  ///< Split GPU thread: register writes held in a sink, run before the next method
+    IdleHook,     ///< Split GPU thread: the back submits deferred work before it waits
+    UpdateGeometryBuffers, ///< Index, vertex and transform feedback buffers looked up
+    UpdateStageBuffers,    ///< Uniform, storage and texture buffers looked up for each stage
+    BindGeometryBuffers,   ///< Index, vertex, transform feedback and indirect buffers bound
     Count,
 };
 
@@ -67,7 +73,8 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "descriptor acquire", "bind stage buffers", "push descriptors", "render targets",
     "configure draw", "dynamic state", "draw record", "texture upload", "fence",
     "fence skipped", "method", "split drain", "split wait",
-    "writer wait", "list submit wait", "list GPU wait",
+    "writer wait", "list submit wait", "list GPU wait", "back call", "consume sink",
+    "idle hook", "update geometry buffers", "update stage buffers", "bind geometry buffers",
 };
 
 // Read once at startup: Enabled() runs several times per method write (no guard to check).
@@ -86,7 +93,7 @@ inline u64 Now() {
 struct ThreadData {
     std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ns{};
     std::array<u64, static_cast<size_t>(Zone::Count)> count{};
-    std::array<u64, 8> counters{}; ///< See Counter
+    std::array<u64, 9> counters{}; ///< See Counter
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_ns{};
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_count{};
     u64 child_ns{};    ///< Time of the zones nested in the current one
@@ -139,6 +146,7 @@ enum class Counter : u32 {
     SameValueWrites, ///< Of MethodWrites: the register already held the value
     AcquireChecks,  ///< Semaphore acquires evaluated
     AcquireWaits,   ///< Of AcquireChecks: not met yet (the channel waits)
+    SunkMethods,    ///< Split back: register writes held in an engine's method sink
 };
 
 /// Device pages (4 KiB) the native MME has DMA-read since start (GPU thread only; filled only
@@ -210,6 +218,12 @@ inline void Report(const char* thread_name = "GPU thread") {
     line += fmt::format(" | acquires {:.0f} ({:.0f} waited)",
                         static_cast<double>(data.counters[6]) * 1e9 / window,
                         static_cast<double>(data.counters[7]) * 1e9 / window);
+    if (const u64 draws = data.count[static_cast<size_t>(Zone::Draw)]; draws != 0) {
+        line += fmt::format(" | per draw: {:.1f} methods called, {:.1f} held in a sink",
+                            static_cast<double>(data.count[static_cast<size_t>(Zone::Method)]) /
+                                static_cast<double>(draws),
+                            static_cast<double>(data.counters[8]) / static_cast<double>(draws));
+    }
     std::string drains;
     for (size_t i = 0; i < data.drain_count.size(); ++i) {
         if (data.drain_count[i] != 0) {
