@@ -45,6 +45,14 @@ void Pause() {
 
 [[maybe_unused]] std::atomic<u32> g_back_thread_id{};
 
+void ReplaySink(Tegra::Engines::EngineInterface& engine, Core::System& system) {
+    if (engine.method_sink.empty()) {
+        return;
+    }
+    Nx2Profile::Scope scope{Nx2Profile::Zone::ConsumeSink};
+    engine.ConsumeSink(system);
+}
+
 } // Anonymous namespace
 
 void GpuSplit::CheckOwner(const char* where) {
@@ -306,13 +314,14 @@ size_t GpuSplit::Execute(const u64* entry) {
         auto* const engine = back_engine;
         if ((head & Direct) != 0) {
             Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
-            engine->ConsumeSink(*system);
+            ReplaySink(*engine, *system);
             engine->CallMethod(*system, method, argument, true);
         } else if (!engine->execution_mask[method]) {
             engine->method_sink.emplace_back(method, argument);
+            Nx2Profile::Add(Nx2Profile::Counter::SunkMethods, 1);
         } else {
             Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
-            engine->ConsumeSink(*system);
+            ReplaySink(*engine, *system);
             if ((head & HasSegment) != 0) {
                 engine->current_dma_segment = entry[1];
             }
@@ -326,7 +335,7 @@ size_t GpuSplit::Execute(const u64* entry) {
         const size_t data = (head & HasSegment) != 0 ? 3 : 2;
         auto* const engine = back_engine;
         Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
-        engine->ConsumeSink(*system);
+        ReplaySink(*engine, *system);
         if ((head & HasSegment) != 0) {
             engine->current_dma_segment = entry[2];
         }
@@ -336,6 +345,7 @@ size_t GpuSplit::Execute(const u64* entry) {
     }
     case Kind::Call: {
         const size_t payload = static_cast<size_t>((head >> 8) & 0xffffff);
+        Nx2Profile::Scope scope{Nx2Profile::Zone::BackCall};
         reinterpret_cast<void (*)(const u64*)>(entry[1])(entry + 2);
         return 2 + payload;
     }
@@ -369,6 +379,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             }
             if (available == read_position && idle_hook != nullptr) {
                 hook_requested.store(false, std::memory_order_seq_cst);
+                Nx2Profile::Scope hook_scope{Nx2Profile::Zone::IdleHook};
                 idle_hook(idle_argument);
                 available = published.load(std::memory_order_acquire);
             }
@@ -395,6 +406,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             if (hook_requested.load(std::memory_order_relaxed) &&
                 idle_hook != nullptr) [[unlikely]] {
                 hook_requested.store(false, std::memory_order_seq_cst);
+                Nx2Profile::Scope hook_scope{Nx2Profile::Zone::IdleHook};
                 idle_hook(idle_argument);
             }
             // Hand ring space back now and then while working through a long batch, and at once

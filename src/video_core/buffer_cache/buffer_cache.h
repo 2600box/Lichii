@@ -1532,15 +1532,21 @@ template <class P>
 void BufferCache<P>::DoUpdateGraphicsBuffers(bool is_indexed) {
     graphics_segments.clear();
     BufferOperations([&]() {
-        if (is_indexed) {
-            UpdateIndexBuffer();
+        {
+            Nx2Profile::Scope scope{Nx2Profile::Zone::UpdateGeometryBuffers};
+            if (is_indexed) {
+                UpdateIndexBuffer();
+            }
+            UpdateVertexBuffers();
+            UpdateTransformFeedbackBuffers();
         }
-        UpdateVertexBuffers();
-        UpdateTransformFeedbackBuffers();
-        for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
-            UpdateUniformBuffers(stage);
-            UpdateStorageBuffers(stage);
-            UpdateTextureBuffers(stage);
+        {
+            Nx2Profile::Scope scope{Nx2Profile::Zone::UpdateStageBuffers};
+            for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+                UpdateUniformBuffers(stage);
+                UpdateStorageBuffers(stage);
+                UpdateTextureBuffers(stage);
+            }
         }
         if (current_draw_indirect) {
             UpdateDrawIndirect();
