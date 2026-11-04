@@ -36,7 +36,6 @@
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "common/settings.h"
 #include "shader_recompiler/exception.h"
-#include "video_core/nx2_experiment.h"
 #include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_profile.h"
 
@@ -343,36 +342,38 @@ GraphicsPipeline::GraphicsPipeline(
         return info.stores_global_memory || any_written(info.storage_buffers_descriptors) ||
                any_written(info.image_descriptors) || any_written(info.image_buffer_descriptors);
     });
-    texture_memo_eligible = std::ranges::all_of(stage_infos, [](const Shader::Info& info) {
-        return info.texture_buffer_descriptors.empty() && info.image_buffer_descriptors.empty() &&
-               info.image_descriptors.empty() &&
-               std::ranges::all_of(info.texture_descriptors, [](const auto& desc) {
-                   return desc.handle_program == ~0U && !desc.has_secondary;
-               });
+    writes_images = std::ranges::any_of(stage_infos, [&](const Shader::Info& info) {
+        return any_written(info.image_descriptors) || any_written(info.image_buffer_descriptors);
     });
     const auto block = [&](DeltaBlocker blocker) {
         if (delta_blocker == DeltaBlocker::None) {
             delta_blocker = blocker;
         }
     };
-    if (writes_storage) {
-        block(DeltaBlocker::WritesStorage);
+    if (writes_images) {
+        block(DeltaBlocker::WritesImages);
     }
     if (IsMeshPipeline()) {
         block(DeltaBlocker::Mesh);
     }
     for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
         const Shader::Info& info = stage_infos[stage];
-        if (!info.storage_buffers_descriptors.empty()) {
-            block(DeltaBlocker::StorageBuffers);
-        }
-        if (!info.texture_buffer_descriptors.empty()) {
-            block(DeltaBlocker::TextureBuffers);
-        }
-        if (!info.image_buffer_descriptors.empty()) {
-            block(DeltaBlocker::ImageBuffers);
-        }
         u32& handles = handle_constant_buffers[stage];
+        for (const auto& desc : info.texture_buffer_descriptors) {
+            if (desc.handle_program != ~0U) {
+                block(DeltaBlocker::ComputedHandles);
+            }
+            handles |= 1U << desc.cbuf_index;
+            if (desc.has_secondary) {
+                handles |= 1U << desc.secondary_cbuf_index;
+            }
+        }
+        for (const auto& desc : info.image_buffer_descriptors) {
+            if (desc.handle_program != ~0U) {
+                block(DeltaBlocker::ComputedHandles);
+            }
+            handles |= 1U << desc.cbuf_index;
+        }
         for (const auto& desc : info.texture_descriptors) {
             if (desc.handle_program != ~0U) {
                 block(DeltaBlocker::ComputedHandles);
@@ -554,58 +555,6 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
 
     const auto& regs{maxwell3d->regs};
     const bool via_header_index{regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding};
-
-    namespace Experiment = VideoCommon::Nx2Experiment;
-    const bool use_memo{Experiment::On(Experiment::TextureMemo) && texture_memo_eligible &&
-                        !RecordingSampledTextures()};
-    const bool verify_memo{use_memo && Experiment::On(Experiment::TextureMemoVerify)};
-    boost::container::small_vector<GPUVAddr, 32> handle_addresses;
-    boost::container::small_vector<VideoCommon::TextureHandleRead, 32> handle_reads;
-    boost::container::small_vector<VideoCommon::ImageViewInOut, 32> memo_views;
-    boost::container::small_vector<VideoCommon::SamplerId, 32> memo_samplers;
-    bool memo_hit{};
-    if (use_memo) {
-        const auto collect_addresses{[&](size_t stage) LAMBDA_FORCEINLINE {
-            const auto& cbufs{maxwell3d->state.shader_stages[stage].const_buffers};
-            for (const auto& desc : stage_infos[stage].texture_descriptors) {
-                ASSERT(cbufs[desc.cbuf_index].enabled);
-                for (u32 index = 0; index < desc.count; ++index) {
-                    handle_addresses.push_back(cbufs[desc.cbuf_index].address + desc.cbuf_offset +
-                                               (index << desc.size_shift));
-                }
-            }
-        }};
-        if constexpr (Spec::enabled_stages[0]) {
-            collect_addresses(0);
-        }
-        if constexpr (Spec::enabled_stages[1]) {
-            collect_addresses(1);
-        }
-        if constexpr (Spec::enabled_stages[2]) {
-            collect_addresses(2);
-        }
-        if constexpr (Spec::enabled_stages[3]) {
-            collect_addresses(3);
-        }
-        if constexpr (Spec::enabled_stages[4]) {
-            collect_addresses(4);
-        }
-        views.resize(num_image_elements);
-        samplers.resize(num_textures);
-        memo_hit = texture_cache.ResolveMemoizedTextures(
-            texture_memo, std::span(handle_addresses.data(), handle_addresses.size()),
-            std::span(views.data(), views.size()), std::span(samplers.data(), samplers.size()));
-        if (memo_hit && verify_memo) {
-            memo_views.assign(views.begin(), views.end());
-            memo_samplers.assign(samplers.begin(), samplers.end());
-        }
-        if (!memo_hit || verify_memo) {
-            views.clear();
-            samplers.clear();
-        }
-    }
-    const bool resolve_in_full{!memo_hit || verify_memo};
-
     const auto config_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
         const Shader::Info& info{stage_infos[stage]};
         buffer_cache.UnbindGraphicsStorageBuffers(stage);
@@ -673,22 +622,13 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                 add_image(desc, false);
             }
         }
-        if (resolve_in_full) {
-            for (const auto& desc : info.texture_descriptors) {
-                for (u32 index = 0; index < desc.count; ++index) {
-                    const auto handle{VideoCommon::HandleIsStoragePointer(info, desc, index)
-                                          ? VideoCommon::NULL_TEXTURE_HANDLE
-                                          : read_handle(desc, index)};
-                    views.push_back({handle.first});
+        for (const auto& desc : info.texture_descriptors) {
+            for (u32 index = 0; index < desc.count; ++index) {
+                const auto handle{read_handle(desc, index)};
+                views.push_back({handle.first});
 
-                    VideoCommon::SamplerId sampler{texture_cache.GetSamplerId(handle.second, false)};
-                    samplers.push_back(sampler);
-                    if (use_memo) {
-                        handle_reads.push_back(
-                            {handle_addresses[handle_reads.size()],
-                             via_header_index ? handle.first : handle.first | (handle.second << 20)});
-                    }
-                }
+                VideoCommon::SamplerId sampler{texture_cache.GetSamplerId(handle.second, false)};
+                samplers.push_back(sampler);
             }
         }
         if constexpr (Spec::has_images) {
@@ -719,38 +659,10 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     }
     ASSERT(views.size() == num_image_elements);
     ASSERT(samplers.size() == num_textures);
-    if (resolve_in_full) {
+    {
         Profile::Scope scope{Profile::Zone::FillImageViews};
         texture_cache.FillImageViews(std::span(views.data(), views.size()), false,
                                      Spec::has_images);
-    }
-    if (use_memo) {
-        if (!memo_hit) {
-            Experiment::Count(Experiment::g_memo_misses);
-            // A pipeline whose draws keep changing textures stops paying for a memo nobody uses.
-            if (++texture_memo.misses <= 8 || (texture_memo.misses & 15) == 0) {
-                texture_cache.MemoizeTextures(texture_memo,
-                                              std::span(handle_reads.data(), handle_reads.size()),
-                                              std::span(views.data(), views.size()),
-                                              std::span(samplers.data(), samplers.size()));
-            }
-        } else {
-            texture_memo.misses = 0;
-            Experiment::Count(Experiment::g_memo_hits);
-        }
-        if (memo_hit && verify_memo) {
-            const bool same =
-                std::ranges::equal(views, memo_views,
-                                   [](const auto& lhs, const auto& rhs) {
-                                       return lhs.index == rhs.index && lhs.id == rhs.id;
-                                   }) &&
-                std::ranges::equal(samplers, memo_samplers);
-            if (!same) {
-                Experiment::Count(Experiment::g_memo_mismatches);
-                LOG_ERROR(Render_Vulkan, "texture-memo: pipeline {:016x} resolved other views or samplers than its memo",
-                          key.Hash());
-            }
-        }
     }
     if (RecordingSampledTextures()) {
         sampled_images.clear();
@@ -877,9 +789,6 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     {
         Profile::Scope scope{Profile::Zone::UpdateBuffers};
         buffer_cache.UpdateGraphicsBuffers(is_indexed);
-    }
-    {
-        Profile::Scope scope{Profile::Zone::BindGeometryBuffers};
         buffer_cache.BindHostGeometryBuffers(is_indexed);
     }
 
@@ -967,8 +876,24 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
 GraphicsPipeline::DeltaResult GraphicsPipeline::ConfigureDelta() {
     namespace Profile = VideoCommon::Nx2Profile;
     {
+        Profile::Scope scope{Profile::Zone::ReadHandles};
+        for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+            const auto& descriptors = stage_infos[stage].storage_buffers_descriptors;
+            if (!configured_stages[stage] || descriptors.empty()) {
+                continue;
+            }
+            buffer_cache.UnbindGraphicsStorageBuffers(stage);
+            size_t ssbo_index{};
+            for (const auto& desc : descriptors) {
+                buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
+                                                       desc.cbuf_offset, desc.is_written);
+                ++ssbo_index;
+            }
+        }
+    }
+    {
         Profile::Scope scope{Profile::Zone::UpdateBuffers};
-        if (!buffer_cache.UpdateGraphicsUniformBuffers()) {
+        if (!buffer_cache.UpdateGraphicsStageBuffers()) {
             return DeltaResult::NeedsFull;
         }
     }

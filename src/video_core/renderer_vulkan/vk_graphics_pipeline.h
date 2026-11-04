@@ -259,6 +259,11 @@ public:
         return writes_storage;
     }
 
+    /// Writes storage images or image buffers (their images are marked modified when resolved).
+    [[nodiscard]] bool WritesImages() const noexcept {
+        return writes_images;
+    }
+
     [[nodiscard]] bool IsBuilt() const noexcept {
         return build->IsBuilt();
     }
@@ -273,8 +278,8 @@ public:
     }
 
     /// EDEN_NX2_FAST_DRAW=2 (nx2_fast_draw.h): whether draws can keep this pipeline's resolved
-    /// image views and samplers after light changes. Storage, texture and image buffers and
-    /// handles computed at draw time are resolved from constant buffers on every draw.
+    /// image views and samplers after light changes. Handles computed at draw time are resolved
+    /// on every draw.
     [[nodiscard]] bool TakesDeltaDraws() const noexcept {
         return delta_blocker == DeltaBlocker::None && delta_views_valid;
     }
@@ -282,11 +287,8 @@ public:
     /// Why TakesDeltaDraws is false (diagnostics).
     enum class DeltaBlocker : u8 {
         None,
-        WritesStorage,
+        WritesImages,
         Mesh,
-        StorageBuffers,
-        TextureBuffers,
-        ImageBuffers,
         ComputedHandles,
         NotConfigured,
         Count,
@@ -303,8 +305,9 @@ public:
     }
 
     enum class DeltaResult { Configured, Failed, NeedsFull };
-    /// Binds the constant buffers again and records the draw's descriptors with the image views
-    /// and samplers the last full Configure resolved.
+    /// Binds the constant and storage buffers again (storage buffer addresses are read from
+    /// constant buffers) and records the draw's descriptors with the image views, samplers and
+    /// texture buffers the last full Configure resolved.
     DeltaResult ConfigureDelta();
 
     /// EDEN_NX2_FAST_DRAW_VERIFY: the next Configure compares what it resolves with the views
@@ -367,10 +370,7 @@ private:
     bool fragment_has_color0_output{};
     u32 color_output_mask{};
     bool writes_storage{};
-    /// Every texture is sampled with a handle read from a constant buffer: ConfigureImpl can
-    /// resolve them from texture_memo.
-    bool texture_memo_eligible{};
-    VideoCommon::SampledTextureMemo texture_memo;
+    bool writes_images{};
 
     DeltaBlocker delta_blocker{};
     bool delta_views_valid{};
