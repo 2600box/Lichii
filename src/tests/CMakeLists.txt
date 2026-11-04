@@ -68,6 +68,7 @@ add_executable(tests
     video_core/storage_binding_capacity.cpp
     video_core/native_indirect_reset.cpp
     video_core/gpu_command_safety.cpp
+    video_core/syncpoint_actions.cpp
     video_core/ampere_matrix.cpp
     video_core/spirv_software_matrix.cpp
     video_core/spirv_builtin_capabilities.cpp
