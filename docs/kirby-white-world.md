@@ -120,3 +120,56 @@ build/shader-sweep/shader-sweep \
 
 Send the log, dump directory, and screenshots from both a menu and a race. Check whether
 the compute rejection is gone and whether the 3D world returns with it.
+
+## Frame dump
+
+The logs show every shader building, so the next step needs pixels. `EDEN_NX2_FRAME_DUMP` reads
+back one whole frame inside the emulator. No capture tool is needed.
+
+| Variable | Value |
+|---|---|
+| `EDEN_NX2_FRAME_DUMP` | Directory for the dump. It is created if missing. When unset, the dump code stays inactive. |
+| `EDEN_NX2_FRAME_DUMP_AT` | Which frame to capture: seconds after boot (`45`) or a frame number with an `f` suffix (`2700f`). Default `60`. |
+
+Example for the character select screen:
+
+```
+EDEN_NX2_FRAME_DUMP=C:\lx\dump EDEN_NX2_FRAME_DUMP_AT=45
+```
+
+Open character select, then wait past the trigger time. The log shows `Frame dump: capturing frame
+...` and then `Frame dump done: N images ...`. The frame stalls for a few seconds while the files
+are written.
+
+For that one frame the dump writes:
+
+- the color targets of every pass when the pass ends. A pass is a run of draws and clears to the
+  same framebuffer, and it also ends before each compute dispatch and before presentation;
+- every storage image that each compute dispatch writes, read after the dispatch;
+- the image the frame presents (`AccelerateDisplay`).
+
+Each image produces `<name>.raw.zst`, which holds the exact texels with tightly packed rows. For
+the common color formats it also produces `<name>.png`. Each image gets one line in
+`manifest.jsonl` with these fields:
+
+- pass or dispatch index;
+- the draw range;
+- the shader hashes (the same hashes the shader dumps use);
+- format, size and mip/layer;
+- render-target GPU address;
+- whether the image is rescaled;
+- per-channel min, max and mean, and NaN and Inf counts.
+
+The file names carry the same tags. The PNG previews encode float targets to sRGB and clamp them
+to [0,1], and they show NaN or Inf pixels as magenta. MSAA targets are listed but not read back.
+Writing stops at about 500 MiB.
+
+Build the contact sheet with:
+
+```
+python3 -I tools/nx2/frame_dump_index.py <dump dir>
+```
+
+This writes `<dump dir>/index.html`: one card per image, in capture order. Badges mark constant
+images, values above 1 and NaN/Inf. The first pass whose output turns white or constant is the
+pass to look at.
