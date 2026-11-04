@@ -185,6 +185,26 @@ build is at 124.556 seconds; the log continues to 157.936 seconds. Profile anoth
 `EDEN_NX2_GPU_PROFILE=1 EDEN_DKB_FRAME_TRACE=1`; exclude the deliberate frame-dump stall from
 performance measurements.
 
+### Sustained GPU stalls
+
+The next capture contains multi-second GPU work after the frame dump. Renderer frame 5221
+records 3,809.697 ms of submission execution across a 3,835.030 ms span. Frame 5231 records
+5,823.947 ms across 7,608.752 ms. These timestamps establish expensive submitted GPU work,
+but do not identify the shader responsible. The captured present image is a sky transition,
+so it cannot verify the remaining black characters or broken shadows.
+
+For another performance capture, keep the shader cache and enable
+`EDEN_NX2_GPU_PROFILE=1 EDEN_DKB_FRAME_TRACE=1`. Do not enable a frame dump in the measured
+interval. The profile adds `writer wait`, `list submit wait` and `list GPU wait` zones to
+separate front command-list readback waits from command parsing. Existing GPU timestamp
+samples also report up to four submissions taking at least 10 ms as `DKB gpu_submission`.
+Each line includes the submission tick, draw and dispatch attempts, and up to 32 distinct
+stage/hash pairs. Stages 0 through 5 match the graphics pipeline key; stage 6 is compute.
+`untracked_uses` counts shader uses omitted after the list fills. Attempts can include work
+skipped because its pipeline was not bound. Transfer and emulator-internal work are not
+attributed to guest shader hashes. The duration belongs to the whole submission, not to
+each listed shader. This adds no GPU timestamp queries beyond the existing frame trace.
+
 ## Frame dump
 
 The logs show every shader building, so the next step needs pixels. `EDEN_NX2_FRAME_DUMP` reads
