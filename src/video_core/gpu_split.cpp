@@ -137,6 +137,7 @@ void GpuSplit::Stop() {
     ring.reset();
     write_position = 0;
     last_writer_position = 0;
+    last_sync_position = 0;
     published_local = 0;
     consumed_cache = 0;
     publish_every = PublishEvery;
@@ -216,7 +217,14 @@ void GpuSplit::Drain() {
 }
 
 bool GpuSplit::WaitForWriters() {
-    const u64 target = std::min(last_writer_position, write_position);
+    return WaitFor(std::min(last_writer_position, write_position));
+}
+
+bool GpuSplit::WaitForSync() {
+    return WaitFor(std::min(last_sync_position, write_position));
+}
+
+bool GpuSplit::WaitFor(u64 target) {
     consumed_cache = consumed.load(std::memory_order_acquire);
     if (consumed_cache >= target) {
         return false;

@@ -139,6 +139,15 @@ public:
     /// Waits until the back executed the compute and copy work sent so far (not what came after).
     /// Returns whether any of it was still queued.
     bool WaitForWriters();
+    /// A host-level wait was just sent (a syncpoint acquire, a host WFI, a GP entry with its sync
+    /// bit; semaphore acquires drain): the guest's GPU work before it is complete before the
+    /// commands after it are fetched.
+    void NoteSync() {
+        last_sync_position = write_position;
+    }
+    /// Waits until the back executed the work sent before the last NoteSync. Returns whether any
+    /// of it was still queued.
+    bool WaitForSync();
 
 private:
     enum class Kind : u64 {
@@ -185,6 +194,7 @@ private:
         }
     }
     void SwitchEngine(Tegra::Engines::EngineInterface* engine);
+    bool WaitFor(u64 target);
 
     void BackLoop(std::stop_token stop_token);
     size_t Execute(const u64* entry);
@@ -197,6 +207,7 @@ private:
     // Front side.
     u64 write_position{};
     u64 last_writer_position{};
+    u64 last_sync_position{};
     u64 published_local{};
     u64 consumed_cache{};
     /// Words between publishes: small right after a drain, while the back has nothing to do.
@@ -217,7 +228,7 @@ private:
     // always touched together by both threads, so they share a block.
     alignas(128) std::atomic<u64> published{};
     alignas(128) std::atomic<u64> consumed{};
-    /// A position the front waits for (WaitForWriters): the back stores `consumed` once past it.
+    /// A position the front waits for (WaitFor): the back stores `consumed` once past it.
     alignas(128) std::atomic<u64> wait_target{~u64{0}};
     alignas(128) std::atomic<bool> back_waiting{};
     std::atomic<u32> wake{};
