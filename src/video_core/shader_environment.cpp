@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <fstream>
 #include <memory>
 #include <optional>
@@ -490,14 +491,17 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
                                        : Shader::Ampere::TessellationStage::None;
     auto lowered = Shader::Ampere::LowerToMaxwell(native, geometry_stage, true, verified_traps,
                                                  tessellation_stage);
-    // EDEN_NX2_REJECT=<hex address>,...: treat these programs as rejected (to find which newly
-    // lowered program changes a game's behaviour without rebuilding).
+    // EDEN_NX2_REJECT=<hex address or 16-digit program key>,...: treat these programs as rejected
+    // (to find which newly lowered program changes a game's behaviour without rebuilding). The key
+    // is the dump file name's prefix and, unlike the address, stays the same across sessions.
     if (static const std::string reject_list = [] {
             const char* text = std::getenv("EDEN_NX2_REJECT");
             return text ? "," + std::string{text} + "," : std::string{};
         }();
         !reject_list.empty() &&
-        reject_list.find(fmt::format(",{:x},", program_base)) != std::string::npos) {
+        (reject_list.find(fmt::format(",{:x},", program_base)) != std::string::npos ||
+         reject_list.find(fmt::format(",{:016x},", Shader::Ampere::NativeProgramKey(native))) !=
+             std::string::npos)) {
         throw Shader::RuntimeError("Native shader at {:#x} rejected by EDEN_NX2_REJECT", program_base);
     }
     // EDEN_NX2_SHADER_DUMP=<dir>: keep every captured native program (named by its key) so the
@@ -632,7 +636,18 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
                          (program == Maxwell::ShaderType::VertexB ||
                           program == Maxwell::ShaderType::Tessellation)};
     if (native) {
+        // EDEN_NX2_TESS_DISABLE=1: reject native tessellation programs again, dropping their draws
+        // (the behaviour before tessellation lowering), to bisect tessellation-only regressions.
+        static const bool tessellation_disabled = [] {
+            const char* value = std::getenv("EDEN_NX2_TESS_DISABLE");
+            const bool disabled = value && std::string_view{value} != "0";
+            if (disabled) {
+                LOG_WARNING(Shader, "Native tessellation programs rejected by EDEN_NX2_TESS_DISABLE");
+            }
+            return disabled;
+        }();
         const bool tessellation =
+            !tessellation_disabled &&
             (program == Maxwell::ShaderType::TessellationInit ||
              program == Maxwell::ShaderType::Tessellation) &&
             sph.common0.shader_type == static_cast<u32>(program);

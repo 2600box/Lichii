@@ -7,7 +7,9 @@
 #include <algorithm>
 #include <cstring>
 #include <iostream>
+#include <optional>
 #include <span>
+#include <string_view>
 
 #include <boost/container/small_vector.hpp>
 #include <boost/container/static_vector.hpp>
@@ -878,9 +880,34 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
             ? VK_TRUE
             : VK_FALSE),
     };
+    // EDEN_NX2_TESS_DOMAIN_ORIGIN=lower|upper: state the tessellation domain origin explicitly
+    // (upper is Vulkan's default and matches the guest's winding; lower flips it), to bisect.
+    static const std::optional<VkTessellationDomainOrigin> domain_origin =
+        []() -> std::optional<VkTessellationDomainOrigin> {
+        const char* value = std::getenv("EDEN_NX2_TESS_DOMAIN_ORIGIN");
+        if (!value) {
+            return std::nullopt;
+        }
+        const std::string_view text{value};
+        if (text != "lower" && text != "upper") {
+            LOG_WARNING(Render_Vulkan, "Ignoring EDEN_NX2_TESS_DOMAIN_ORIGIN={}", text);
+            return std::nullopt;
+        }
+        LOG_WARNING(Render_Vulkan, "Tessellation domain origin forced to {}-left", text);
+        return text == "lower" ? VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT
+                               : VK_TESSELLATION_DOMAIN_ORIGIN_UPPER_LEFT;
+    }();
+    const VkPipelineTessellationDomainOriginStateCreateInfo domain_origin_ci{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO,
+        .pNext = nullptr,
+        .domainOrigin = domain_origin.value_or(VK_TESSELLATION_DOMAIN_ORIGIN_UPPER_LEFT),
+    };
+    const bool explicit_domain_origin =
+        domain_origin && (device.ApiVersion() >= VK_API_VERSION_1_1 ||
+                          device.IsKhrMaintenance2Supported());
     const VkPipelineTessellationStateCreateInfo tessellation_ci{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO,
-        .pNext = nullptr,
+        .pNext = explicit_domain_origin ? &domain_origin_ci : nullptr,
         .flags = 0,
         .patchControlPoints = key.state.patch_control_points_minus_one.Value() + 1,
     };
