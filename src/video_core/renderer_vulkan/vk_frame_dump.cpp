@@ -505,6 +505,29 @@ void FrameDump::NoteLaunch(u64 shader_hash, const std::array<u32, 3>& grid,
     Enqueue({.tags = tags + "}"});
 }
 
+std::optional<u32> FrameDump::BeginProbe() {
+    if (!probe_pool || probes.size() >= MAX_PROBES) {
+        return std::nullopt;
+    }
+    const u32 query = static_cast<u32>(probes.size());
+    probes.push_back({.draw = draws - 1});
+    scheduler.Record([pool = *probe_pool, query](vk::CommandBuffer cmdbuf) {
+        cmdbuf.BeginQuery(pool, query, 0);
+    });
+    return query;
+}
+
+void FrameDump::EndProbe(u32 query, bool mesh, bool indirect, u32 elements, u32 instances) {
+    scheduler.Record([pool = *probe_pool, query](vk::CommandBuffer cmdbuf) {
+        cmdbuf.EndQuery(pool, query);
+    });
+    Probe& probe = probes[query];
+    probe.mesh = mesh;
+    probe.indirect = indirect;
+    probe.elements = elements;
+    probe.instances = instances;
+}
+
 void FrameDump::NoteSkipped(bool compute, u64 program, GPUVAddr rt0, std::string_view reason) {
     std::string text{reason};
     std::ranges::replace(text, '"', '\'');
@@ -855,6 +878,24 @@ void FrameDump::TickFrame() {
     if (capturing) {
         EndPass();
         Drain();
+        if (!probes.empty()) {
+            scheduler.Finish();
+            std::vector<u64> samples(probes.size());
+            const VkResult result = device.GetLogical().GetQueryResults(
+                *probe_pool, 0, static_cast<u32>(probes.size()), samples.size() * sizeof(u64),
+                samples.data(), sizeof(u64), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+            for (size_t index = 0; result == VK_SUCCESS && index < probes.size(); ++index) {
+                const Probe& probe = probes[index];
+                Enqueue({.tags = fmt::format(
+                             R"({{"kind":"draw","draw":{},"samples":{},"mesh":{},"indirect":{},"elements":{},"instances":{}}})",
+                             probe.draw, samples[index], probe.mesh, probe.indirect,
+                             probe.elements, probe.instances)});
+            }
+            if (result != VK_SUCCESS) {
+                LOG_ERROR(Render_Vulkan, "Frame dump: reading the draw probes failed ({})",
+                          static_cast<int>(result));
+            }
+        }
         Enqueue({.tags = fmt::format(R"("passes":{},"draws":{},"dispatches":{})", pass_index,
                                      draws, dispatches),
                  .summary = true,
@@ -881,6 +922,20 @@ void FrameDump::TickFrame() {
     manifest << fmt::format(R"({{"kind":"frame","frame":{},"seconds":{:.3f}}})", frame, elapsed)
              << '\n';
     writer = std::thread{[this] { WriterLoop(); }};
+    if (sampled) {
+        probe_pool = device.GetLogical().CreateQueryPool({
+            .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .queryType = VK_QUERY_TYPE_OCCLUSION,
+            .queryCount = MAX_PROBES,
+            .pipelineStatistics = 0,
+        });
+        scheduler.RequestOutsideRenderPassOperationContext();
+        scheduler.Record([pool = *probe_pool](vk::CommandBuffer cmdbuf) {
+            cmdbuf.ResetQueryPool(pool, 0, MAX_PROBES);
+        });
+    }
     capturing = true;
     LOG_INFO(Render_Vulkan, "Frame dump: capturing frame {} ({:.1f} s after boot) into {}", frame,
              elapsed, directory.string());

@@ -478,11 +478,22 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     query_cache.NotifySegment(true);
     HandleTransformFeedback();
     query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, maxwell3d->regs.zpass_pixel_count_enable);
+    const std::optional<u32> probe =
+        frame_dump.CapturingSampled() && !maxwell3d->regs.zpass_pixel_count_enable
+            ? frame_dump.BeginProbe()
+            : std::nullopt;
     {
         Profile::Scope scope{Profile::Zone::DrawRecord};
         scheduler.TraceGraphicsPipeline(pipeline->ShaderHashes());
         trace_draw_hashes = {pipeline->ShaderHashes()[1], pipeline->ShaderHashes()[5]};
         draw_func();
+    }
+    if (probe) {
+        const auto& draw_state = maxwell3d->draw_manager.draw_state;
+        frame_dump.EndProbe(*probe, mesh_draw, is_indirect,
+                            is_indexed ? draw_state.index_buffer.count
+                                       : draw_state.vertex_buffer.count,
+                            draw_state.instance_count);
     }
     submitted = true;
     static u32 native_capture_count{};
