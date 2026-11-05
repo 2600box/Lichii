@@ -1313,7 +1313,7 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
     // the memory tracker, leaving stale host contents, so upload such a bank again once per frame.
     if (has_host_buffer && (*channel_state->uniform_buffer_sizes)[stage][index] == 0x10000 &&
         size != 0 && gpu_memory != nullptr && gpu_memory->UsesNativeTiling() &&
-        (!Nx2Perf::Enabled() || Nx2Perf::Verify() ||
+        (!Nx2Perf::On(Nx2Perf::Opt::BankCheck) || Nx2Perf::Verify() ||
          !native_indirect_uniforms_this_frame.contains(device_addr)) &&
         !memory_tracker.IsRegionGpuModified(device_addr, size) &&
         native_indirect_uniforms_this_frame.insert(device_addr).second) {
@@ -2386,8 +2386,8 @@ template <class P>
 bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 size) {
     // An upload over a clean word of the tracker (word_manager.h) finds and changes nothing:
     // walk only the dirty ones. Verify walks every word and checks the clean words.
-    const bool skip_clean = Nx2Perf::Enabled() && !Nx2Perf::Verify();
-    if (Nx2Perf::Enabled() && Nx2Perf::Verify()) {
+    const bool skip_clean = Nx2Perf::On(Nx2Perf::Opt::CleanWords) && !Nx2Perf::Verify();
+    if (Nx2Perf::On(Nx2Perf::Opt::CleanWords) && Nx2Perf::Verify()) {
         static std::atomic<u32> logged{};
         if (!memory_tracker.CleanWordsHold(device_addr, size) &&
             logged.fetch_add(1, std::memory_order_relaxed) < 64) {

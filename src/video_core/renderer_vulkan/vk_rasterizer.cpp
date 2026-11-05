@@ -1518,7 +1518,7 @@ void RasterizerVulkan::SubmitNx2ListCopies() {
     // Submitted at once: ReadGpuWrittenCommands waits on these copies, so they can't sit out
     // the longer DeferFlush interval (#161).
     if (buffer_cache.Nx2CopyListPages(scheduler.CurrentTick()) &&
-        (VideoCommon::Nx2Perf::Enabled() || !scheduler.DeferFlush())) {
+        (VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::FenceFlush) || !scheduler.DeferFlush())) {
         scheduler.Flush();
     }
 }
@@ -1791,7 +1791,7 @@ void RasterizerVulkan::WaitForIdle() {
 void RasterizerVulkan::FragmentBarrier() {
     // The next draw breaks the render pass only if it reads what this one wrote (#161): Ocarina
     // ended ~5,900 render passes a second here.
-    if (device.IsMoltenVK() || VideoCommon::Nx2Perf::Enabled()) {
+    if (device.IsMoltenVK() || VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::FragmentBarrier)) {
         scheduler.DeferFragmentBarrier();
         return;
     }
@@ -2211,7 +2211,7 @@ void RasterizerVulkan::FlushWork() {
     const bool native = gpu_memory->UsesNativeTiling();
     // The 128-draw native budget is tuned for MoltenVK; desktop Vulkan takes the legacy 4096 (#161).
     const u32 default_native_budget =
-        VideoCommon::Nx2Perf::Enabled() && !device.IsMoltenVK() ? 4096U
+        (VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::SubmitBudget) && !device.IsMoltenVK()) ? 4096U
                                                                 : SubmissionPolicy::DefaultNativeBudget;
     u32 budget = default_native_budget;
     if (native && !android) {

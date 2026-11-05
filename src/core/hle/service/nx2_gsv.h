@@ -1767,7 +1767,7 @@ private:
         if (frames_ahead == -1 && app_program_id == DonkeyKongBananzaProgramId) {
             frames_ahead = 0;
         } else if (frames_ahead == -1 && app_program_id == OcarinaOfTimeProgramId &&
-                   VideoCommon::Nx2Perf::FramesAhead()) {
+                   VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::FramesAhead)) {
             frames_ahead = 1;
         }
         const auto entered = std::chrono::steady_clock::now();
