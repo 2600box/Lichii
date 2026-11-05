@@ -24,6 +24,7 @@
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_perf.h"
 #include "video_core/query_cache/bank_base.h"
 #include "video_core/query_cache/frame_trace.h"
 #include "video_core/query_cache/query_base.h"
@@ -68,7 +69,11 @@ public:
         if (pending_sync.empty()) {
             return;
         }
-        std::vector<SyncValuesStruct> sync_values;
+        std::vector<SyncValuesStruct> local_values;
+        auto& sync_values = Nx2Perf::On(Nx2Perf::Opt::QueryUploadScratch) && !Nx2Perf::Verify()
+                                ? sync_values_stash
+                                : local_values;
+        sync_values.clear();
         sync_values.reserve(pending_sync.size());
         for (size_t pending_id : pending_sync) {
             auto& query = slot_queries[pending_id];
@@ -91,6 +96,7 @@ public:
 private:
     RuntimeType& runtime;
     std::deque<size_t> pending_sync;
+    std::vector<SyncValuesStruct> sync_values_stash;
 };
 
 template <typename Traits>
@@ -283,9 +289,8 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
     u8* pointer = impl->device_memory.template GetPointer<u8>(cpu_addr);
     u8* pointer_timestamp = impl->device_memory.template GetPointer<u8>(cpu_addr + 8);
     bool is_synced = (Settings::IsGPUFenceBehaviorDefault() ? !Settings::IsGPULevelHigh() : !Settings::IsGPUFenceBehaviorBalanced() && !Settings::IsGPUFenceBehaviorAccurate()) && is_fence;
-    std::function<void()> operation([this, is_synced, streamer, query_base = query, query_location,
-                                     pointer, pointer_timestamp, cpu_addr, addr,
-                                     asid = gpu_memory->GetID(), counter_type] {
+    auto callback = [this, is_synced, streamer, query_base = query, query_location, pointer,
+                     pointer_timestamp, cpu_addr, addr, asid = gpu_memory->GetID(), counter_type] {
         if (True(query_base->flags & QueryFlagBits::IsInvalidated)) {
             if (const u64 trace = QueryTrace::Sample(QueryTrace::Event::Discard)) {
                 LOG_INFO(HW_GPU,
@@ -337,7 +342,11 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         if (!is_synced) [[likely]] {
             impl->pending_unregister.push_back(query_location);
         }
-    });
+    };
+    std::function<void()> operation =
+        Nx2Perf::On(Nx2Perf::Opt::ImmediateCallbacks) && !Nx2Perf::Verify() && is_synced
+            ? std::function<void()>{std::ref(callback)}
+            : std::function<void()>{std::move(callback)};
     if (is_fence) {
         impl->rasterizer.SignalFence(std::move(operation));
     } else {
