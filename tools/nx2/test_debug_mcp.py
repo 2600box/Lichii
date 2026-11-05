@@ -39,6 +39,10 @@ class FakeEmulator:
             return {"result": {"width": 1280, "height": 720, "png_base64": PNG}}
         if method == "capture_frame":
             return {"result": {"directory": self.capture_dir, "entries_total": 1}}
+        if method == "read_memory":
+            return {"result": {"address": request["params"]["address"], "hex": "0000803f"}}
+        if method == "read_gpu_memory":
+            return {"error": "GPU address 0x5000 is not mapped"}
         return {"error": f"unknown method \"{method}\""}
 
     def serve(self):
@@ -91,7 +95,8 @@ class AdapterTest(unittest.TestCase):
         names = [tool["name"] for tool in self.adapter.handle({"id": 2, "method": "tools/list"})
                  ["result"]["tools"]]
         self.assertEqual(names, ["status", "screenshot", "log_tail", "log_filter", "capture_frame",
-                                 "capture_image", "reject_shaders"])
+                                 "capture_image", "reject_shaders", "read_memory",
+                                 "search_memory", "read_gpu_memory"])
         self.assertEqual(self.adapter.handle({"id": 3, "method": "bogus"})["error"]["code"], -32601)
 
     def test_status_is_forwarded(self):
@@ -99,6 +104,16 @@ class AdapterTest(unittest.TestCase):
         self.assertFalse(result["isError"])
         self.assertEqual(json.loads(result["content"][0]["text"])["title"], "Test")
         self.assertEqual(self.fake.requests[-1]["params"], {"fps_window_ms": 0})
+
+    def test_memory_reads_are_forwarded(self):
+        arguments = {"address": "0x8000001000", "size": 4, "as": "hex"}
+        result = self.call("read_memory", arguments)
+        self.assertFalse(result["isError"])
+        self.assertEqual(json.loads(result["content"][0]["text"])["hex"], "0000803f")
+        self.assertEqual(self.fake.requests[-1]["params"], arguments)
+        unmapped = self.call("read_gpu_memory", {"gpu_address": "0x5000", "size": 4})
+        self.assertTrue(unmapped["isError"])
+        self.assertIn("0x5000 is not mapped", unmapped["content"][0]["text"])
 
     def test_screenshot_becomes_image_content(self):
         result = self.call("screenshot")
