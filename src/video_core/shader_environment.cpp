@@ -643,7 +643,7 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
     if (static const std::string reject_hashes = [] {
             const char* text = std::getenv("EDEN_NX2_REJECT_HASH");
             std::string list = text ? "," + std::string{text} + "," : std::string{};
-            std::ranges::transform(list, list.begin(), [](unsigned char c) { return std::tolower(c); });
+            std::ranges::transform(list, list.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             return list;
         }();
         !reject_hashes.empty()) {
