@@ -75,13 +75,17 @@ TOOLS = [
         "name": "capture_frame",
         "description": "EDEN_NX2_FRAME_DUMP for the next frame, now: every pass colour target, "
                        "dispatch storage image and the present source as PNG and .raw.zst, plus "
-                       "manifest.jsonl. 'sampled' also reads back every sampled texture. Returns "
+                       "manifest.jsonl. 'sampled' also reads back every sampled texture with its "
+                       "sampler state; 'buffers' records every draw's and dispatch's uniform and "
+                       "storage buffers (kind: buffer, buffer_<hash>.bin.zst) and dispatch group "
+                       "counts (kind: launch). Returns "
                        "the directory, summary, entry counts and the first manifest entries. "
                        "'index' builds index.html with frame_dump_index.py.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "sampled": {"type": "boolean"},
+                "buffers": {"type": "boolean"},
                 "timeout_s": {"type": "integer", "minimum": 1, "maximum": 600},
                 "manifest_lines": {"type": "integer", "minimum": 0, "maximum": 5000},
                 "index": {"type": "boolean"},
@@ -111,6 +115,59 @@ TOOLS = [
                 "reject": {"type": "boolean"},
                 "timeout_s": {"type": "integer", "minimum": 0, "maximum": 60},
             },
+        },
+    },
+    {
+        "name": "read_memory",
+        "description": "Reads up to 64 KiB of the game's guest virtual memory, read only and "
+                       "while it runs. 'as' formats it: hex (default), u32, u64 (hex strings) or "
+                       "f32. An unmapped page fails with the first unmapped address. Addresses "
+                       "are hex strings ('0x8012345000') or numbers.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "address": {"type": ["string", "integer"]},
+                "size": {"type": "integer", "minimum": 1, "maximum": 65536},
+                "as": {"type": "string", "enum": ["hex", "u32", "u64", "f32"]},
+            },
+            "required": ["address", "size"],
+        },
+    },
+    {
+        "name": "search_memory",
+        "description": "Finds a byte pattern (hex pairs in memory order: little endian, so 1.0f "
+                       "is '0000803f') in the mapped guest memory of the heap region (default) or "
+                       "the whole address space, optionally narrowed by start and end. Returns up "
+                       "to max_hits (at most 256) addresses; it stops after budget_ms and then "
+                       "returns 'next', the start for the following call.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string"},
+                "start": {"type": ["string", "integer"]},
+                "end": {"type": ["string", "integer"]},
+                "max_hits": {"type": "integer", "minimum": 1, "maximum": 256},
+                "regions": {"type": "string", "enum": ["heap", "all"]},
+                "budget_ms": {"type": "integer", "minimum": 1, "maximum": 10000},
+            },
+            "required": ["pattern"],
+        },
+    },
+    {
+        "name": "read_gpu_memory",
+        "description": "Reads up to 64 KiB of GPU virtual memory (e.g. query report and semaphore "
+                       "buffers the game reads back) at the next frame end, as the GPU sees it, "
+                       "without flushing GPU caches. Tries the bound channel's address space "
+                       "first; 'as' as for read_memory.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "gpu_address": {"type": ["string", "integer"]},
+                "size": {"type": "integer", "minimum": 1, "maximum": 65536},
+                "as": {"type": "string", "enum": ["hex", "u32", "u64", "f32"]},
+                "timeout_s": {"type": "integer", "minimum": 1, "maximum": 60},
+            },
+            "required": ["gpu_address", "size"],
         },
     },
 ]

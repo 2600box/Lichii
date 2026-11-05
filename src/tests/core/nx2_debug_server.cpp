@@ -2,13 +2,23 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <array>
+#include <cstring>
+#include <limits>
 #include <thread>
 
 #include <boost/asio.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include "common/page_table.h"
+#include "common/scope_exit.h"
+#include "core/core.h"
 #include "core/debugger/nx2_debug_server.h"
 #include "core/debugger/nx2_debug_tools.h"
+#include "core/device_memory.h"
+#include "core/hle/kernel/k_process.h"
+#include "core/hle/kernel/kernel.h"
+#include "core/memory.h"
+#include "tests/core/system_test_context.h"
 #include "video_core/nx2_debug_control.h"
 
 namespace {
@@ -23,6 +33,39 @@ Handlers EchoHandlers() {
         {"fail", [](const json&) -> json { throw std::runtime_error{"broken"}; }},
     };
 }
+
+void MapPage(Common::PageTable& table, u64 page, u8* host, Common::PageType type) {
+    auto& entry = table.entries.GetAndFault(page);
+    entry.Store(false, Common::PageType::Memory, 1, reinterpret_cast<uintptr_t>(host) - (page << 12));
+    if (type == Common::PageType::RasterizerCachedMemory) {
+        entry.MarkRasterizerCached();
+    }
+}
+
+/// Guest pages 4, 5, 7 (rasterizer cached) and 8 over host pages 1, 0, 2 and 3 of a zeroed
+/// backing; page 6 and everything else are unmapped.
+struct GuestPages {
+    GuestPages() {
+        system.Initialize();
+        auto& table = process.GetPageTable().GetImpl();
+        table.Resize(20, 12);
+        backing = system.DeviceMemory().buffer.BackingBasePointer() + 0x10000;
+        std::memset(backing, 0, 0x4000);
+        MapPage(table, 4, backing + 0x1000, Common::PageType::Memory);
+        MapPage(table, 5, backing, Common::PageType::Memory);
+        MapPage(table, 7, backing + 0x2000, Common::PageType::RasterizerCachedMemory);
+        MapPage(table, 8, backing + 0x3000, Common::PageType::Memory);
+        process.GetMemory().SetCurrentPageTable(process);
+    }
+    ~GuestPages() {
+        system.Kernel().UnregisterKernelObject(&process);
+    }
+
+    ScopedSystemTestContext context;
+    Core::System system;
+    Kernel::KProcess process{system.Kernel()};
+    u8* backing{};
+};
 
 } // Anonymous namespace
 
@@ -118,12 +161,13 @@ TEST_CASE("Debug server answers over loopback TCP", "[core][nx2_debug_server]") 
 TEST_CASE("Debug control hands captures to the rasterizer once", "[core][nx2_debug_server]") {
     VideoCore::Nx2Debug::BeginSession();
     REQUIRE_FALSE(VideoCore::Nx2Debug::HasRequests());
-    VideoCore::Nx2Debug::RequestCapture({.id = 5, .directory = "dir", .sampled = true});
+    VideoCore::Nx2Debug::RequestCapture({.id = 5, .directory = "dir", .sampled = true, .buffers = true});
     REQUIRE(VideoCore::Nx2Debug::HasRequests());
     const auto request = VideoCore::Nx2Debug::TakeCapture();
     REQUIRE(request);
     REQUIRE(request->id == 5);
     REQUIRE(request->sampled);
+    REQUIRE(request->buffers);
     REQUIRE_FALSE(VideoCore::Nx2Debug::HasRequests());
     REQUIRE_FALSE(VideoCore::Nx2Debug::TakeCapture());
     REQUIRE_FALSE(VideoCore::Nx2Debug::WaitCapture(5, 1ms));
@@ -133,7 +177,7 @@ TEST_CASE("Debug control hands captures to the rasterizer once", "[core][nx2_deb
     REQUIRE(result);
     REQUIRE(result->error == "disk full");
 
-    VideoCore::Nx2Debug::RequestCapture({.id = 6, .directory = "dir", .sampled = false});
+    VideoCore::Nx2Debug::RequestCapture({.id = 6, .directory = "dir", .sampled = false, .buffers = false});
     VideoCore::Nx2Debug::CancelCapture(6);
     REQUIRE_FALSE(VideoCore::Nx2Debug::HasRequests());
 
@@ -166,5 +210,119 @@ TEST_CASE("Debug control counts reject generations", "[core][nx2_debug_server]")
     VideoCore::Nx2Debug::SetRejected(both, false);
     REQUIRE_FALSE(VideoCore::Nx2Debug::AnyRejected());
     REQUIRE(VideoCore::Nx2Debug::TakeRejectChange()->unrejected);
+    VideoCore::Nx2Debug::EndSession();
+}
+
+TEST_CASE("Debug memory reads guest pages and names the first unmapped byte", "[core][nx2_debug_server]") {
+    GuestPages guest;
+    for (u32 i = 0; i < 0x4000; ++i) {
+        guest.backing[i] = static_cast<u8>(i * 7 + (i >> 12));
+    }
+    auto& memory = guest.process.GetMemory();
+    std::array<u8, 0x20> out{};
+    REQUIRE_FALSE(Core::Nx2Debug::ReadGuestMemory(memory, 0x4ff0, out));
+    REQUIRE(std::memcmp(out.data(), guest.backing + 0x1ff0, 0x10) == 0);
+    REQUIRE(std::memcmp(out.data() + 0x10, guest.backing, 0x10) == 0);
+    REQUIRE_FALSE(Core::Nx2Debug::ReadGuestMemory(memory, 0x7000, out));
+    REQUIRE(std::memcmp(out.data(), guest.backing + 0x2000, out.size()) == 0);
+    REQUIRE(Core::Nx2Debug::ReadGuestMemory(memory, 0x5ff0, out) == 0x6000);
+    REQUIRE(Core::Nx2Debug::ReadGuestMemory(memory, 0x6800, out) == 0x6800);
+    REQUIRE(Core::Nx2Debug::ReadGuestMemory(memory, 0x100000, out) == 0x100000);
+    // The top 16 bits would alias page 4 through GetPointerSilent's mask.
+    REQUIRE(Core::Nx2Debug::ReadGuestMemory(memory, (1ULL << 48) | 0x4000, out) ==
+            ((1ULL << 48) | 0x4000));
+}
+
+TEST_CASE("Debug memory search spans mapped pages, stops at limits and resumes", "[core][nx2_debug_server]") {
+    GuestPages guest;
+    constexpr std::array<u8, 5> pattern{0xde, 0xad, 0xbe, 0xef, 0x11};
+    const auto plant = [&](u8* host, size_t first, size_t count) {
+        std::memcpy(host, pattern.data() + first, count);
+    };
+    plant(guest.backing + 0x1ffe, 0, 2); // 0x4ffe, continued on page 5
+    plant(guest.backing, 2, 3);
+    plant(guest.backing + 0x0ffe, 0, 2); // 0x5ffe, cut off by unmapped page 6
+    plant(guest.backing + 0x2010, 0, 5); // 0x7010
+    plant(guest.backing + 0x3000, 0, 5); // 0x8000
+    plant(guest.backing + 0x3100, 0, 5); // 0x8100
+    auto& memory = guest.process.GetMemory();
+    const auto later = std::chrono::steady_clock::now() + 60s;
+
+    const auto all = Core::Nx2Debug::SearchGuestMemory(memory, pattern, 0x1000, 0x20000, 256, later);
+    REQUIRE(all.hits == std::vector<u64>{0x4ffe, 0x7010, 0x8000, 0x8100});
+    REQUIRE(all.complete);
+    REQUIRE(all.scanned == 0x4000);
+
+    const auto first = Core::Nx2Debug::SearchGuestMemory(memory, pattern, 0x1000, 0x20000, 2, later);
+    REQUIRE(first.hits == std::vector<u64>{0x4ffe, 0x7010});
+    REQUIRE_FALSE(first.complete);
+    REQUIRE(first.next == 0x7011);
+    const auto rest = Core::Nx2Debug::SearchGuestMemory(memory, pattern, first.next, 0x20000, 2, later);
+    REQUIRE(rest.hits == std::vector<u64>{0x8000, 0x8100});
+
+    const auto inside = Core::Nx2Debug::SearchGuestMemory(memory, pattern, 0x4fff, 0x8004, 256, later);
+    REQUIRE(inside.hits == std::vector<u64>{0x7010});
+
+    const auto expired = Core::Nx2Debug::SearchGuestMemory(memory, pattern, 0x4000, 0x9000, 256,
+                                                           std::chrono::steady_clock::now());
+    REQUIRE(expired.hits.empty());
+    REQUIRE_FALSE(expired.complete);
+    REQUIRE(expired.next == 0x4000);
+}
+
+TEST_CASE("Debug memory patterns are hex byte pairs", "[core][nx2_debug_server]") {
+    const std::vector<u8> one{0x00, 0x00, 0x80, 0x3f};
+    REQUIRE(Core::Nx2Debug::ParseHexBytes("0000803f") == one);
+    REQUIRE(Core::Nx2Debug::ParseHexBytes("0x00 00 80 3F") == one);
+    for (const char* bad : {"", "0x", "abc", "zz", "0x-1"}) {
+        CAPTURE(bad);
+        REQUIRE_THROWS_AS(Core::Nx2Debug::ParseHexBytes(bad), std::runtime_error);
+    }
+}
+
+TEST_CASE("Debug memory formats as hex, words and floats", "[core][nx2_debug_server]") {
+    std::array<u8, 16> bytes{};
+    const std::array<float, 4> floats{1.0f, std::numeric_limits<float>::quiet_NaN(),
+                                      -std::numeric_limits<float>::infinity(), -2.5f};
+    std::memcpy(bytes.data(), floats.data(), bytes.size());
+    REQUIRE(Core::Nx2Debug::FormatMemory(std::span{bytes}.first(4), "hex") ==
+            json{{"hex", "0000803f"}});
+    REQUIRE(Core::Nx2Debug::FormatMemory(bytes, "f32") ==
+            json{{"f32", {1.0, "nan", "-inf", -2.5}}});
+    REQUIRE(Core::Nx2Debug::FormatMemory(std::span{bytes}.first(4), "u32") ==
+            json{{"u32", {0x3f800000u}}});
+    REQUIRE(Core::Nx2Debug::FormatMemory(std::span{bytes}.first(8), "u64") ==
+            json{{"u64", {"0x7fc000003f800000"}}});
+    REQUIRE_THROWS_AS(Core::Nx2Debug::FormatMemory(std::span{bytes}.first(12), "u64"),
+                      std::runtime_error);
+    REQUIRE_THROWS_AS(Core::Nx2Debug::FormatMemory(bytes, "f16"), std::runtime_error);
+}
+
+TEST_CASE("Debug control hands GPU reads to the rasterizer once", "[core][nx2_debug_server]") {
+    VideoCore::Nx2Debug::BeginSession();
+    VideoCore::Nx2Debug::RequestGpuRead({.id = 3, .gpu_address = 0x1000, .size = 8});
+    REQUIRE(VideoCore::Nx2Debug::HasRequests());
+    const auto request = VideoCore::Nx2Debug::TakeGpuRead();
+    REQUIRE(request);
+    REQUIRE(request->gpu_address == 0x1000);
+    REQUIRE(request->size == 8);
+    REQUIRE_FALSE(VideoCore::Nx2Debug::HasRequests());
+    REQUIRE_FALSE(VideoCore::Nx2Debug::TakeGpuRead());
+    std::thread rasterizer{[] {
+        VideoCore::Nx2Debug::GpuReadResult result{};
+        result.bytes = {1, 2, 3};
+        result.address_space = 9;
+        VideoCore::Nx2Debug::FinishGpuRead(3, std::move(result));
+    }};
+    const auto result = VideoCore::Nx2Debug::WaitGpuRead(3, 10s);
+    rasterizer.join();
+    REQUIRE(result);
+    REQUIRE(result->bytes == std::vector<u8>{1, 2, 3});
+    REQUIRE(result->address_space == 9);
+
+    VideoCore::Nx2Debug::RequestGpuRead({.id = 4, .gpu_address = 0, .size = 4});
+    VideoCore::Nx2Debug::CancelGpuRead(4);
+    REQUIRE_FALSE(VideoCore::Nx2Debug::HasRequests());
+    REQUIRE_FALSE(VideoCore::Nx2Debug::WaitGpuRead(4, 1ms));
     VideoCore::Nx2Debug::EndSession();
 }

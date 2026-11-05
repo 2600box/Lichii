@@ -49,13 +49,13 @@ $PY -I C:/lx/src/tools/nx2/debug_mcp.py --server 127.0.0.1:6545 --call '{"method
 $PY -I C:/lx/src/tools/nx2/debug_mcp.py --server 127.0.0.1:6545 --call '{"method":"screenshot"}' --out C:/Users/Zortos/.capy/work/lichii-debug/shot.png
 ```
 
-Methods: `status`, `screenshot`, `log_tail` (`after`, `contains`), `log_filter`, `capture_frame` (the frame dump below, taken now; `sampled`, `index`), `capture_image`, `reject_shaders` (`EDEN_NX2_REJECT_HASH` at runtime; `"reject": false` restores). Without `--call` the script is a stdio MCP server. See `docs/nx2/debug-mcp.md`.
+Methods: `status`, `screenshot`, `log_tail` (`after`, `contains`), `log_filter`, `capture_frame` (the frame dump below, taken now; `sampled`, `buffers`, `index`), `capture_image`, `reject_shaders` (`EDEN_NX2_REJECT_HASH` at runtime; `"reject": false` restores), `read_memory` (guest memory, up to 64 KiB; `as`: `hex`, `u32`, `u64`, `f32`), `search_memory` (a hex byte pattern in the heap, or `"regions": "all"`; resume from `next`), `read_gpu_memory` (GPU virtual memory, at the next frame end). Without `--call` the script is a stdio MCP server. See `docs/nx2/debug-mcp.md`.
 
 - Try a live experiment (screenshot, `reject_shaders` A/B, `capture_frame`, `log_tail`) before asking the owner for a new build or shortcut.
 - Use full 16-hex-digit hashes; shorter ones are refused.
 - Restore every hash you reject before you finish.
 - Never start or stop the emulator. If nothing listens, ask the owner to launch the game.
-- Keep sessions light while the owner plays: one request at a time, no capture loops, `sampled` only when you need pass inputs.
+- Keep sessions light while the owner plays: one request at a time, no capture or search loops, `sampled` only when you need pass inputs, `buffers` only when you need constant buffers.
 
 ## Debugging tools
 
@@ -63,7 +63,7 @@ Use these before guessing. All are off unless the variable is set; pass them as 
 
 | Symptom | Tool | Output |
 |---|---|---|
-| Wrong image (white, black, missing objects, smearing) | `EDEN_NX2_FRAME_DUMP=<dir>` with `EDEN_NX2_FRAME_DUMP_AT=<seconds>`, `<frame>f` or `file` (captures once `<dir>/capture.now` exists; default 60); add `EDEN_NX2_FRAME_DUMP_SAMPLED=1` for pass inputs | One frame's pass colour targets, dispatch storage images (3D included) and present source; with `_SAMPLED`, every texture each pass samples and each compute shader samples before its first dispatch (`kind: sampled`, with stage (5 = compute), TIC index, 3D and depth included) as `.png` and `.raw.zst`, plus `manifest.jsonl` with shader hashes, formats, addresses and per-channel stats. `python3 -I tools/nx2/frame_dump_index.py <dir>` builds `index.html`. Find the first pass whose output is wrong, then inspect its shaders. |
+| Wrong image (white, black, missing objects, smearing) | `EDEN_NX2_FRAME_DUMP=<dir>` with `EDEN_NX2_FRAME_DUMP_AT=<seconds>`, `<frame>f` or `file` (captures once `<dir>/capture.now` exists; default 60); add `EDEN_NX2_FRAME_DUMP_SAMPLED=1` for pass inputs | One frame's pass colour targets, dispatch storage images (3D included) and present source; with `_SAMPLED`, every texture each pass samples and each compute shader samples before its first dispatch (`kind: sampled`, with stage (5 = compute), TIC index, host sampler state and raw TSC words, 3D and depth included), the uniform and storage buffers of every draw and dispatch once per shader and binding (`kind: buffer`, bytes in `buffer_<hash>.bin.zst`, from the host buffer when the GPU wrote the range) and each dispatch's group counts (`kind: launch`), as `.png` and `.raw.zst`, plus `manifest.jsonl` with shader hashes, formats, addresses and per-channel stats. `python3 -I tools/nx2/frame_dump_index.py <dir>` builds `index.html`. Find the first pass whose output is wrong, then inspect its shaders. |
 | Rejected or miscompiled shaders | `EDEN_NX2_SHADER_DUMP=<dir>` | Native programs with `.header.bin` sidecars and `failed-compute-*.env` for failed compute pipelines. Replay offline with `tools/nx2/shader_sweep.py` (see `tools/nx2/shader-sweep.md`). |
 | A newly lowered program changes the image | `EDEN_NX2_REJECT_HASH=<hash>,...` (native program keys from shader dump file names, or shader hashes from the frame dump) | Those programs are rejected as if unsupported; the log shows `rejected by EDEN_NX2_REJECT_HASH` per hit. Bisect by halving the list. The key covers the captured code, so recompute it when the capture rules change. |
 | Draw and render-state questions | `EDEN_NX2_RENDER_TRACE=1`, filter `*:Info HW.GPU:Debug Render.Vulkan:Debug Shader:Debug` | Per-draw state, rejected stages and zero-format texture descriptors. |
