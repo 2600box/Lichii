@@ -18,6 +18,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <fmt/format.h>
+
 #include <windows.h>
 #include <tlhelp32.h>
 #include <dbghelp.h>
@@ -206,11 +208,6 @@ std::string Report(const std::vector<Target>& targets, const std::vector<Sample>
                    const char* path) {
     Symbolizer symbolizer;
     std::string text;
-    const auto append = [&text](const char* format, auto... args) {
-        char line[512];
-        const int length = std::snprintf(line, sizeof(line), format, args...);
-        text.append(line, static_cast<size_t>((std::clamp)(length, 0, int{sizeof(line)} - 1)));
-    };
     for (unsigned thread = 0; thread < targets.size(); ++thread) {
         std::map<std::string, unsigned> self;
         std::map<std::string, unsigned> inclusive;
@@ -241,18 +238,18 @@ std::string Report(const std::vector<Target>& targets, const std::vector<Sample>
                 sorted.emplace_back(count, name);
             }
             std::sort(sorted.rbegin(), sorted.rend());
-            append("-- %s\n", title);
+            text += fmt::format("-- {}\n", title);
             for (size_t i = 0; i < (std::min)(limit, sorted.size()); ++i) {
-                append("%6u %5.1f%% %s\n", sorted[i].first,
+                text += fmt::format("{:6} {:5.1f}% {}\n", sorted[i].first,
                              100.0 * sorted[i].first / (std::max)(total, 1U),
                              sorted[i].second.c_str());
             }
         };
-        append("=== thread \"%s\": %u samples\n", targets[thread].name.c_str(), total);
+        text += fmt::format("=== thread \"{}\": {} samples\n", targets[thread].name, total);
         print("self (where the thread is)", self, 60);
         print("self <- caller", self_caller, 50);
         print("inclusive (on the stack)", inclusive, 90);
-        append("\n");
+        text += "\n";
     }
     if (std::FILE* const file = std::fopen(path, "w")) {
         std::fwrite(text.data(), 1, text.size(), file);
