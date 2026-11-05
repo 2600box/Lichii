@@ -1188,14 +1188,11 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
         memory_manager.ReadBlockUnsafe(source, diag_before.data(), read_bytes);
     }
     split.Drain(VideoCommon::DrainSite::MacroDmaRead);
-    if (VideoCommon::QueryDma::TraceEnabled()) {
+    if (VideoCommon::QueryDma::TraceEnabled() || VideoCommon::QueryDma::SyncEnabled()) {
         split.Run(
             [this, macro, method, source, read_bytes] {
-                if (VideoCommon::QueryDma::HasPendingQueries(memory_manager, *rasterizer, source,
-                                                             read_bytes)) {
-                    VideoCommon::QueryDma::Trace(memory_manager, *rasterizer, macro, method,
-                                                 source, read_bytes);
-                }
+                VideoCommon::QueryDma::BeforeRead(memory_manager, *rasterizer, macro, method,
+                                                  source, read_bytes);
             },
             VideoCommon::DrainSite::MacroDmaFlush);
     }

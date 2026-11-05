@@ -25,6 +25,16 @@ inline bool TraceEnabled() {
     return enabled;
 }
 
+/// EXPERIMENT EDEN_NX2_QUERY_DMA_SYNC=1 (not for nx2): before such a read, wait for the host GPU
+/// and the fence that writes the results, as High accuracy does.
+inline bool SyncEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_QUERY_DMA_SYNC");
+        return value != nullptr && value[0] != '0';
+    }();
+    return enabled;
+}
+
 /// Whether [source, source + size) holds reports still waiting for host query results. Runs
 /// where the rasterizer's caches are owned (the back of a split GPU thread).
 inline bool HasPendingQueries(const Tegra::MemoryManager& memory,
@@ -68,6 +78,24 @@ inline void Trace(const Tegra::MemoryManager& memory, VideoCore::RasterizerInter
         memory.ReadBlockUnsafe(source, landed.data(), bytes);
         LOG_INFO(HW_GPU, "Query DMA read #{} landed words={:08x}", read, fmt::join(landed, ","));
     });
+}
+
+/// Traces and, with EDEN_NX2_QUERY_DMA_SYNC, waits for the pending reports a read covers.
+inline void BeforeRead(const Tegra::MemoryManager& memory,
+                       VideoCore::RasterizerInterface& rasterizer, u32 macro, u32 method,
+                       GPUVAddr source, size_t size) {
+    if (!TraceEnabled() && !SyncEnabled()) {
+        return;
+    }
+    if (!HasPendingQueries(memory, rasterizer, source, size)) {
+        return;
+    }
+    if (TraceEnabled()) {
+        Trace(memory, rasterizer, macro, method, source, size);
+    }
+    if (SyncEnabled()) {
+        rasterizer.WaitForQueries();
+    }
 }
 
 } // namespace VideoCommon::QueryDma

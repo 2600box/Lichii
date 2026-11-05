@@ -128,6 +128,9 @@ public:
         return false;
     }
 
+    /// Flushes commands and blocks until a new fence has popped, which writes pending reports.
+    virtual void WaitForQueries() {}
+
     /// Notify rasterizer that any caches of the specified region should be invalidated
     virtual void InvalidateRegion(DAddr addr, u64 size,
                                   VideoCommon::CacheType which = VideoCommon::CacheType::All) = 0;

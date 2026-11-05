@@ -136,6 +136,27 @@ public:
         SignalFence(std::move(func));
     }
 
+    /// Signals a fence and blocks until it has popped, with the operations queued before it
+    /// (the query writes among them), at any accuracy: WaitPendingFences returns at once when
+    /// fences aren't delayed, because SignalFence then runs its function immediately.
+    void SignalAndWait() {
+        std::mutex wait_mutex;
+        std::condition_variable wait_cv;
+        bool finished{};
+        SyncOperation([&] {
+            std::scoped_lock lk(wait_mutex);
+            finished = true;
+            wait_cv.notify_all();
+        });
+        SignalFence([] {});
+        rasterizer.FlushCommands();
+        if constexpr (!can_async_check) {
+            TryReleasePendingFences<true>();
+        }
+        std::unique_lock lk(wait_mutex);
+        wait_cv.wait(lk, [&finished] { return finished; });
+    }
+
     void WaitPendingFences([[maybe_unused]] bool force) {
         if constexpr (!can_async_check) {
             TryReleasePendingFences<true>();
