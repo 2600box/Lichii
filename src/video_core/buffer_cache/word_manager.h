@@ -293,7 +293,7 @@ struct WordManager {
         if (ranges.empty())
             return;
         std::sort(ranges.begin(), ranges.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
-        if (Nx2Perf::Enabled() && !Nx2Perf::Verify()) {
+        if (Nx2Perf::On(Nx2Perf::Opt::SortedPageBatches) && !Nx2Perf::Verify()) {
             CoalesceInPlace(ranges);
             tracker->UpdatePagesCachedBatch(
                 std::span<const std::pair<VAddr, size_t>>(ranges.data(), ranges.size()), delta);
@@ -315,7 +315,7 @@ struct WordManager {
             }
         }
         coalesced.emplace_back(cur_addr, cur_size);
-        if (Nx2Perf::Enabled()) {
+        if (Nx2Perf::On(Nx2Perf::Opt::SortedPageBatches)) {
             CoalesceInPlace(ranges);
             static std::atomic<u32> logged{};
             if (!std::ranges::equal(ranges, coalesced) &&

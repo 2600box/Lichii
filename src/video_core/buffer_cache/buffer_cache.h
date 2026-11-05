@@ -183,7 +183,7 @@ void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu
     Nx2NoteListHostWrite(device_addr, size);
     // The written range lies within its pages: when they hold no GPU-written data, both lookups
     // below find nothing, so one lookup answers them.
-    if (Nx2Perf::Enabled() && keep_page_gpu_data) {
+    if (Nx2Perf::On(Nx2Perf::Opt::WriteIntersections) && keep_page_gpu_data) {
         const DAddr page_begin = Common::AlignDown(device_addr, DEVICE_PAGESIZE);
         const DAddr page_end = Common::AlignUp(device_addr + size, DEVICE_PAGESIZE);
         if (!gpu_modified_ranges.Intersects(page_begin, page_end - page_begin)) {
