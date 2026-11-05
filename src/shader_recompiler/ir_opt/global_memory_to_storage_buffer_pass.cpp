@@ -65,6 +65,7 @@ struct StorageInfo {
     StorageBufferSet set;
     StorageInstVector to_replace;
     StorageWritesSet writes;
+    StorageWritesSet rebased_writes;
     /// Constant buffer words that step strided iterators, see CollectIteratorWords
     StorageBufferSet iterator_words;
     /// Constant buffer pointers a global atomic uses as its address, see CollectAtomicPointers
@@ -1414,6 +1415,7 @@ void CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info, 
     // Collect storage buffer and the instruction
     if (IsGlobalMemoryWrite(inst)) {
         info.writes.insert(*storage_buffer);
+        info.rebased_writes.insert(*storage_buffer);
     }
     info.set.insert(*storage_buffer);
     info.to_replace.push_back(StorageInst{
@@ -1579,6 +1581,7 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
             .count = 1,
             .is_written = info.writes.contains(storage_buffer),
             .indirect_offset = storage_buffer.indirect,
+            .rebased_writes = info.rebased_writes.contains(storage_buffer),
         });
     }
     for (const StorageInst& storage_inst : info.to_replace) {
@@ -1605,6 +1608,7 @@ void JoinStorageInfo(Info& base, Info& source) {
         })};
         if (it != descriptors.end()) {
             it->is_written |= desc.is_written;
+            it->rebased_writes |= desc.rebased_writes;
             continue;
         }
         descriptors.push_back(desc);

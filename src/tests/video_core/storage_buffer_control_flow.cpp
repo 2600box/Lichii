@@ -341,3 +341,22 @@ TEST_CASE("Unrelated native predicates retain every candidate pointer",
         }
     }
 }
+
+TEST_CASE("Native stores the backend selects at run time are not rebased writes",
+          "[shader][storage_buffer_control_flow]") {
+    ConditionalPointer selected;
+    selected.native = true;
+    REQUIRE(selected.Run(false, false, false) == std::vector<u32>{0x160, 0x168});
+    REQUIRE(selected.program.info.native_global_bounds);
+    for (const auto& descriptor : selected.program.info.storage_buffers_descriptors) {
+        CHECK(descriptor.is_written);
+        CHECK_FALSE(descriptor.rebased_writes);
+    }
+
+    ConditionalPointer rebased;
+    rebased.native = GENERATE(false, true);
+    REQUIRE(rebased.Run(true, false, false) == std::vector<u32>{0x168});
+    const auto& descriptor = rebased.program.info.storage_buffers_descriptors.front();
+    CHECK(descriptor.is_written);
+    CHECK(descriptor.rebased_writes);
+}
