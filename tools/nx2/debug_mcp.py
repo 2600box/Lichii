@@ -4,6 +4,8 @@
 
 Run Lichii with EDEN_NX2_DEBUG_SERVER=127.0.0.1:6545, then register this script as a stdio MCP
 server for the agent:  python3 -I tools/nx2/debug_mcp.py [--server 127.0.0.1:6545]
+or run one request from a shell:
+  python3 -I tools/nx2/debug_mcp.py --call '{"method":"screenshot","params":{}}' --out shot.png
 
 Standard library only. Each tool call is forwarded as one JSON line to the emulator, which may
 be restarted between calls: the adapter reconnects on demand.
@@ -181,7 +183,8 @@ class Adapter:
         self.emulator = emulator
         self.captures = set()
 
-    def call_tool(self, name, arguments):
+    def run(self, name, arguments):
+        """Runs one tool; returns its result and the PNG it produced, if any."""
         if name not in TOOL_NAMES:
             raise EmulatorError(f"unknown tool {name}")
         if name == "capture_image":
@@ -192,15 +195,20 @@ class Adapter:
         result = self.emulator.call(name, params, timeout)
         if name == "screenshot":
             png = result.pop("png_base64", None)
-            content = [text(result)]
-            if png:
-                content.insert(0, {"type": "image", "data": png, "mimeType": "image/png"})
-            return content
+            return result, base64.b64decode(png) if png else None
         if name == "capture_frame":
             self.captures.add(os.path.realpath(result["directory"]))
             if index:
                 result["index"] = self.build_index(result["directory"])
-        return [text(result)]
+        return result, None
+
+    def call_tool(self, name, arguments):
+        result, png = self.run(name, arguments)
+        content = [text(result)]
+        if png is not None:
+            content.insert(0, {"type": "image", "data": base64.b64encode(png).decode(),
+                               "mimeType": "image/png"})
+        return content
 
     def build_index(self, directory):
         script = os.path.join(HERE, "frame_dump_index.py")
@@ -218,8 +226,7 @@ class Adapter:
         if os.path.dirname(path) != directory or not os.path.isfile(path):
             raise EmulatorError(f"no image {arguments['name']}.png in {directory}")
         with open(path, "rb") as file:
-            data = base64.b64encode(file.read()).decode()
-        return [{"type": "image", "data": data, "mimeType": "image/png"}, text(path)]
+            return {"path": path}, file.read()
 
     def handle(self, message):
         """Returns the response to one JSON-RPC message, or None for a notification."""
@@ -267,12 +274,38 @@ def serve(adapter, stdin, stdout):
             stdout.flush()
 
 
+def call_once(adapter, request_text, out, stdout):
+    """--call: one request, its JSON result on stdout, its PNG (if any) saved to `out`."""
+    try:
+        request = json.loads(request_text)
+        result, png = adapter.run(request["method"], request.get("params") or {})
+    except (EmulatorError, KeyError, ValueError, TypeError, AttributeError) as error:
+        message = f"missing {error} in the request" if isinstance(error, KeyError) else str(error)
+        stdout.write(json.dumps({"error": message}) + "\n")
+        return 1
+    if png is not None:
+        if out:
+            with open(out, "wb") as file:
+                file.write(png)
+            result["png"] = os.path.abspath(out).replace("\\", "/")
+        else:
+            result["png"] = "not saved: pass --out <path>"
+    stdout.write(json.dumps(result, indent=1) + "\n")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--server", default=os.environ.get("LICHII_DEBUG_SERVER", DEFAULT_SERVER),
                         help=f"host:port of EDEN_NX2_DEBUG_SERVER (default {DEFAULT_SERVER})")
+    parser.add_argument("--call", metavar="JSON",
+                        help='run one request and exit, e.g. \'{"method":"screenshot","params":{}}\'')
+    parser.add_argument("--out", metavar="PNG", help="with --call: where to save the PNG")
     args = parser.parse_args()
-    serve(Adapter(Emulator(args.server)), sys.stdin, sys.stdout)
+    adapter = Adapter(Emulator(args.server))
+    if args.call is not None:
+        sys.exit(call_once(adapter, args.call, args.out, sys.stdout))
+    serve(adapter, sys.stdin, sys.stdout)
 
 
 if __name__ == "__main__":

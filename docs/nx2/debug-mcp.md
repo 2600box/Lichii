@@ -166,15 +166,20 @@ default. The service turns it on at boot. A call without `after` returns the new
 it with `SetGlobalFilter` (`logging.cpp:449`), the call the Qt settings dialog makes. Lines
 already filtered out were never formatted, so the new filter applies only to later lines.
 
-**`capture_frame`** `{sampled?, timeout_s?, manifest_lines?, index?}`. It reuses
-`FrameDump` unchanged except for a new `FrameDump::Arm` (`vk_frame_dump.cpp:227`). Arm points
-the next capture at a fresh directory and resets the per-capture counters. `EDEN_NX2_FRAME_DUMP`
-is not needed. The dump's own `TickFrame` (`vk_frame_dump.cpp:703`) then starts the capture
-exactly as `capture.now` would. The writer thread reports completion after it writes the
-manifest summary (`WriterLoop`, `vk_frame_dump.cpp:578`). The tool returns the directory, the
-frame and summary lines, counts per entry kind, the first entries, and the
-`frame_dump_index.py` command. With `index: true`, the adapter runs that command itself. The
-adapter-only `capture_image {directory, name}` returns one pass PNG as image content.
+**`capture_frame`** `{sampled?, timeout_s?, manifest_lines?, index?}`. It reuses `FrameDump`.
+`FrameDump::Arm` (`vk_frame_dump.cpp:222`) points the next capture at a fresh directory and resets
+the per-capture counters, so `EDEN_NX2_FRAME_DUMP` is not needed. When to capture is decided by
+`FrameDumpSchedule`, which has no Vulkan state and is unit-tested. It handles both the env
+triggers and the debug server's requests. It also sets `RecordingSampledTextures`, which the
+graphics and compute pipelines check before they keep the textures each draw and dispatch
+samples. The pipelines used to read `EDEN_NX2_FRAME_DUMP_SAMPLED` once at startup, so a sampled
+request at runtime found no sampled textures to read back. Now the pipelines keep them only during
+a sampled capture, under either trigger. `FrameDump::TickFrame` (`vk_frame_dump.cpp:693`) starts
+the capture exactly as `capture.now` would. The writer thread reports completion after it writes
+the manifest summary (`WriterLoop`, `vk_frame_dump.cpp:568`). The tool returns the directory, the
+frame and summary lines, counts per entry kind, the first entries, and the `frame_dump_index.py`
+command. With `index: true`, the adapter runs that command itself. The adapter-only
+`capture_image {directory, name}` returns one pass PNG as image content.
 
 **`reject_shaders`** `{hashes?, reject?, timeout_s?}`. This is `EDEN_NX2_REJECT_HASH` at
 runtime: the same keys (native program key or shader hash) and the same effect. Pipeline
@@ -275,17 +280,26 @@ once (`EDEN_NX2_KEY_RECORD` already records keys in `eden-cli`) and replayed aft
    so dumps land next to the build.
 2. The owner launches the game from the shortcut. The log shows
    `Debug server listening on 127.0.0.1:6545, dump dir ...`.
-3. The agent registers the adapter as a stdio MCP server, or drives it by hand:
+3. The agent runs the adapter with native Windows Python. The MSYS `python` in Git Bash rejects
+   `C:/` paths, so call the Windows interpreter by its full path. From bash, `--call` runs one
+   request, prints its JSON result, and saves any PNG to `--out`:
 
    ```
-   python -I C:/lx/src/tools/nx2/debug_mcp.py --server 127.0.0.1:6545
+   PY=/c/Users/Zortos/AppData/Local/Programs/Python/Python314/python.exe
+   $PY -I C:/lx/src/tools/nx2/debug_mcp.py --server 127.0.0.1:6545 --call '{"method":"status"}'
+   $PY -I C:/lx/src/tools/nx2/debug_mcp.py --server 127.0.0.1:6545 \
+       --call '{"method":"screenshot","params":{"height":1080}}' --out C:/lx/shot.png
+   $PY -I C:/lx/src/tools/nx2/debug_mcp.py --server 127.0.0.1:6545 \
+       --call '{"method":"reject_shaders","params":{"hashes":["3ddfb1d7621c4755"]}}'
    ```
 
-   Without an MCP client, the socket can be used directly from bash:
+   The request is `{"method": <tool>, "params": {...}}`, the same format the socket uses. Adapter-only
+   tools work too (`capture_image`, and `index` on `capture_frame`). On failure, `--call` prints
+   `{"error": ...}` and exits with status 1. Without `--call`, the script is a stdio MCP server for
+   an MCP client.
 
-   ```
-   python -c "import socket; s = socket.create_connection(('127.0.0.1', 6545)); s.sendall(b'{\"id\":1,\"method\":\"status\"}\n'); print(s.makefile().readline())"
-   ```
+   Hashes must be all 16 hex digits. A shorter hash is refused rather than zero-padded, because a
+   padded hash matches nothing. Returned paths use forward slashes.
 
 The adapter reconnects after the game restarts. A boot through a guest relaunch stops and starts
 the server again on the same port.

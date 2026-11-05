@@ -5,6 +5,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include "common/common_types.h"
 
@@ -33,6 +34,9 @@ private:
     std::shared_ptr<ToolState> state;
     std::unique_ptr<Server> server;
 };
+
+/// A reject_shaders hash: exactly 16 hex digits, optionally after 0x. Throws std::runtime_error.
+[[nodiscard]] u64 ParseShaderHash(std::string_view text);
 
 /// The service when EDEN_NX2_DEBUG_SERVER is set and it can listen, otherwise null.
 [[nodiscard]] std::unique_ptr<Service> MaybeStartService(System& system, std::string title,

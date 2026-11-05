@@ -15,7 +15,8 @@ import unittest
 import debug_mcp
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PNG = base64.b64encode(b"\x89PNG fake").decode()
+PNG_BYTES = b"\x89PNG fake"
+PNG = base64.b64encode(PNG_BYTES).decode()
 
 
 class FakeEmulator:
@@ -158,6 +159,49 @@ class AdapterTest(unittest.TestCase):
         reply = json.loads(done.stdout)
         self.assertEqual(reply["id"], 5)
         self.assertFalse(reply["result"]["isError"])
+
+
+    def test_call_once_saves_the_screenshot(self):
+        out = os.path.join(self.temp.name, "shot.png")
+        stdout = io.StringIO()
+        code = debug_mcp.call_once(self.adapter, '{"method":"screenshot","params":{"height":360}}',
+                                   out, stdout)
+        self.assertEqual(code, 0)
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(result["width"], 1280)
+        self.assertNotIn("png_base64", result)
+        self.assertEqual(result["png"], os.path.abspath(out).replace("\\", "/"))
+        with open(out, "rb") as file:
+            self.assertEqual(file.read(), PNG_BYTES)
+        self.assertEqual(self.fake.requests[-1]["params"], {"height": 360})
+
+    def test_call_once_without_out_says_where_the_png_went(self):
+        stdout = io.StringIO()
+        self.assertEqual(debug_mcp.call_once(self.adapter, '{"method":"screenshot"}', None, stdout), 0)
+        self.assertIn("--out", json.loads(stdout.getvalue())["png"])
+
+    def test_call_once_reports_errors_as_json(self):
+        for request in ('{"method":"log_filter","params":{"filter":"*:Debug"}}', '{"params":{}}',
+                        'not json', '{"method":"bogus"}', '[1]'):
+            stdout = io.StringIO()
+            self.assertEqual(debug_mcp.call_once(self.adapter, request, None, stdout), 1, request)
+            self.assertIn("error", json.loads(stdout.getvalue()), request)
+
+    def test_call_runs_from_the_command_line(self):
+        out = os.path.join(self.temp.name, "cli.png")
+        script = os.path.join(HERE, "debug_mcp.py")
+        server = f"127.0.0.1:{self.fake.port}"
+        done = subprocess.run([sys.executable, "-I", script, "--server", server, "--call",
+                               '{"method":"screenshot"}', "--out", out],
+                              capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout)["height"], 720)
+        self.assertTrue(os.path.isfile(out))
+        failed = subprocess.run([sys.executable, "-I", script, "--server", server, "--call",
+                                 '{"method":"log_filter","params":{"filter":"x"}}'],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(failed.returncode, 1)
+        self.assertIn("unknown method", json.loads(failed.stdout)["error"])
 
 
 if __name__ == "__main__":

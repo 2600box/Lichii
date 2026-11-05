@@ -8,6 +8,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "core/debugger/nx2_debug_server.h"
+#include "core/debugger/nx2_debug_tools.h"
 #include "video_core/nx2_debug_control.h"
 
 namespace {
@@ -63,6 +64,21 @@ TEST_CASE("Debug server requests map to handlers", "[core][nx2_debug_server]") {
     const json bad_params =
         json::parse(Core::Nx2Debug::HandleRequest(handlers, R"({"id":3,"method":"echo","params":[1]})"));
     REQUIRE(bad_params.contains("error"));
+}
+
+TEST_CASE("Debug server shader hashes need all 16 hex digits", "[core][nx2_debug_server]") {
+    REQUIRE(Core::Nx2Debug::ParseShaderHash("00000000621c4755") == 0x621c4755);
+    REQUIRE(Core::Nx2Debug::ParseShaderHash("3DDFB1D7621C4755") == 0x3ddfb1d7621c4755);
+    REQUIRE(Core::Nx2Debug::ParseShaderHash("0x3ddfb1d7621c4755") == 0x3ddfb1d7621c4755);
+    for (const char* bad : {"621c4755", "3ddfb1d7", "0x621c4755", "", "0x", "3ddfb1d7621c47551",
+                            "3ddfb1d7621c475g", "-ddfb1d7621c4755", " 3ddfb1d7621c475"}) {
+        try {
+            (void)Core::Nx2Debug::ParseShaderHash(bad);
+            FAIL("accepted " << bad);
+        } catch (const std::runtime_error& error) {
+            REQUIRE(std::string_view{error.what()}.find("16 hex digits") != std::string_view::npos);
+        }
+    }
 }
 
 TEST_CASE("Debug server base64 pads like RFC 4648", "[core][nx2_debug_server]") {

@@ -66,19 +66,6 @@ json HexList(const std::vector<u64>& values) {
     return list;
 }
 
-u64 ParseHash(std::string_view text) {
-    if (text.starts_with("0x") || text.starts_with("0X")) {
-        text.remove_prefix(2);
-    }
-    u64 value = 0;
-    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value, 16);
-    if (text.empty() || text.size() > 16 || error != std::errc{} ||
-        end != text.data() + text.size()) {
-        throw std::runtime_error{fmt::format("bad hash \"{}\": want up to 16 hex digits", text)};
-    }
-    return value;
-}
-
 template <typename T>
 T Param(const json& params, const char* name, T fallback, T low, T high) {
     const T value = params.value(name, fallback);
@@ -132,7 +119,7 @@ json Status(ToolState& state, const json& params) {
         {"fps", seconds > 0.0 ? static_cast<double>(after - before) / seconds : 0.0},
         {"uptime_s", std::chrono::duration<double>(std::chrono::steady_clock::now() - state.start)
                          .count()},
-        {"dump_dir", state.dump_directory.string()},
+        {"dump_dir", state.dump_directory.generic_string()},
         {"log_filter", state.log_filter},
         {"rejected", HexList(VideoCore::Nx2Debug::RejectedHashes())},
     };
@@ -180,9 +167,9 @@ json Screenshot(ToolState& state, const json& params) {
         std::ofstream file{path, std::ios::binary};
         file.write(reinterpret_cast<const char*>(png.data()), static_cast<std::streamsize>(png.size()));
         if (!file) {
-            throw std::runtime_error{fmt::format("cannot write {}", path.string())};
+            throw std::runtime_error{fmt::format("cannot write {}", path.generic_string())};
         }
-        result["path"] = path.string();
+        result["path"] = path.generic_string();
     }
     if (params.value("inline", true)) {
         result["png_base64"] = Base64(png);
@@ -246,7 +233,7 @@ json CaptureFrame(ToolState& state, const json& params) {
         throw std::runtime_error{fmt::format(
             "the capture did not finish within {} s (paused or loading?); if it started, its "
             "files are still being written to {}",
-            timeout, directory.string())};
+            timeout, directory.generic_string())};
     }
     if (!finished->error.empty()) {
         throw std::runtime_error{finished->error};
@@ -276,7 +263,7 @@ json CaptureFrame(ToolState& state, const json& params) {
         }
     }
     return {
-        {"directory", directory.string()},
+        {"directory", directory.generic_string()},
         {"sampled", sampled},
         {"frame", std::move(frame)},
         {"summary", std::move(summary)},
@@ -284,7 +271,7 @@ json CaptureFrame(ToolState& state, const json& params) {
         {"entries_total", total},
         {"entries", std::move(entries)},
         {"index_command",
-         fmt::format("python3 -I tools/nx2/frame_dump_index.py \"{}\"", directory.string())},
+         fmt::format("python3 -I tools/nx2/frame_dump_index.py \"{}\"", directory.generic_string())},
     };
 }
 
@@ -294,7 +281,7 @@ json RejectShaders(ToolState&, const json& params) {
     }
     std::vector<u64> hashes;
     for (const json& hash : params.value("hashes", json::array())) {
-        hashes.push_back(ParseHash(hash.get<std::string>()));
+        hashes.push_back(ParseShaderHash(hash.get<std::string>()));
     }
     const bool reject = params.value("reject", true);
     const u64 generation = VideoCore::Nx2Debug::SetRejected(hashes, reject);
@@ -324,6 +311,21 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
 
 } // Anonymous namespace
 
+u64 ParseShaderHash(std::string_view text) {
+    const std::string_view digits =
+        text.starts_with("0x") || text.starts_with("0X") ? text.substr(2) : text;
+    u64 value = 0;
+    const auto [end, error] =
+        std::from_chars(digits.data(), digits.data() + digits.size(), value, 16);
+    if (digits.size() != 16 || error != std::errc{} || end != digits.data() + digits.size()) {
+        throw std::runtime_error{fmt::format(
+            "bad hash \"{}\": want all 16 hex digits of a native program key (shader dump file "
+            "name) or shader hash (frame dump \"shaders\"); a shorter one would match nothing",
+            text)};
+    }
+    return value;
+}
+
 Service::Service(System& system, std::string title, u64 program_id, const Endpoint& endpoint,
                  std::string dump_directory)
     : state{std::make_shared<ToolState>(system, std::move(title), program_id,
@@ -337,7 +339,7 @@ Service::Service(System& system, std::string title, u64 program_id, const Endpoi
         throw;
     }
     LOG_INFO(Debug, "Debug server listening on {}:{}, dump dir {}", endpoint.host, server->Port(),
-             state->dump_directory.string());
+             state->dump_directory.generic_string());
 }
 
 Service::~Service() {
@@ -360,7 +362,7 @@ std::unique_ptr<Service> MaybeStartService(System& system, std::string title, u6
     const char* const directory = std::getenv("EDEN_NX2_DEBUG_DIR");
     std::string dump_directory = directory != nullptr && *directory != '\0'
         ? std::string{directory}
-        : (Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "debug-server").string();
+        : (Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) / "debug-server").generic_string();
     try {
         return std::make_unique<Service>(system, std::move(title), program_id, *endpoint,
                                          std::move(dump_directory));

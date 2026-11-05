@@ -39,13 +39,30 @@ Lichii is a fork of [Eglantine](https://github.com/Djihads80/Eglantine). Do not 
 3. If nx2 is behind `upstream/nx2`, merge upstream first. Port an existing upstream fix before writing a new one, and cite its PR or commit.
 4. Write a new fix only when nothing upstream addresses the root cause the log shows.
 
+## Live debug server
+
+Every debug package on the PC launches with `EDEN_NX2_DEBUG_SERVER=127.0.0.1:6545` (in the env argument of `build-fix.sh`; `EDEN_NX2_DEBUG_DIR=<dir>` moves its dumps). Ask the running game from bash on the PC with native Windows Python; MSYS `python` rejects `C:/` paths.
+
+```sh
+PY=/c/Users/Zortos/AppData/Local/Programs/Python/Python314/python.exe
+$PY -I C:/lx/src/tools/nx2/debug_mcp.py --server 127.0.0.1:6545 --call '{"method":"status"}'
+$PY -I C:/lx/src/tools/nx2/debug_mcp.py --server 127.0.0.1:6545 --call '{"method":"screenshot"}' --out C:/Users/Zortos/.capy/work/lichii-debug/shot.png
+```
+
+Methods: `status`, `screenshot`, `log_tail` (`after`, `contains`), `log_filter`, `capture_frame` (the frame dump below, taken now; `sampled`, `index`), `capture_image`, `reject_shaders` (`EDEN_NX2_REJECT_HASH` at runtime; `"reject": false` restores). Without `--call` the script is a stdio MCP server. See `docs/nx2/debug-mcp.md`.
+
+- Try a live experiment (screenshot, `reject_shaders` A/B, `capture_frame`, `log_tail`) before asking the owner for a new build or shortcut.
+- Use full 16-hex-digit hashes; shorter ones are refused.
+- Restore every hash you reject before you finish.
+- Never start or stop the emulator. If nothing listens, ask the owner to launch the game.
+- Keep sessions light while the owner plays: one request at a time, no capture loops, `sampled` only when you need pass inputs.
+
 ## Debugging tools
 
 Use these before guessing. All are off unless the variable is set; pass them as the env argument of `build-fix.sh`. Read them from the log at `*:Info` unless noted.
 
 | Symptom | Tool | Output |
 |---|---|---|
-| Any question about a running game, without a relaunch | `EDEN_NX2_DEBUG_SERVER=127.0.0.1:6545` (optional `EDEN_NX2_DEBUG_DIR=<dir>`), then `python -I tools/nx2/debug_mcp.py` on the PC as a stdio MCP server | Live `status`, `screenshot`, `log_tail`/`log_filter`, `capture_frame` (the frame dump below, now) and `reject_shaders` (`EDEN_NX2_REJECT_HASH` at runtime). See `docs/nx2/debug-mcp.md`. |
 | Wrong image (white, black, missing objects, smearing) | `EDEN_NX2_FRAME_DUMP=<dir>` with `EDEN_NX2_FRAME_DUMP_AT=<seconds>`, `<frame>f` or `file` (captures once `<dir>/capture.now` exists; default 60); add `EDEN_NX2_FRAME_DUMP_SAMPLED=1` for pass inputs | One frame's pass colour targets, dispatch storage images (3D included) and present source; with `_SAMPLED`, every texture each pass samples and each compute shader samples before its first dispatch (`kind: sampled`, with stage (5 = compute), TIC index, 3D and depth included) as `.png` and `.raw.zst`, plus `manifest.jsonl` with shader hashes, formats, addresses and per-channel stats. `python3 -I tools/nx2/frame_dump_index.py <dir>` builds `index.html`. Find the first pass whose output is wrong, then inspect its shaders. |
 | Rejected or miscompiled shaders | `EDEN_NX2_SHADER_DUMP=<dir>` | Native programs with `.header.bin` sidecars and `failed-compute-*.env` for failed compute pipelines. Replay offline with `tools/nx2/shader_sweep.py` (see `tools/nx2/shader-sweep.md`). |
 | A newly lowered program changes the image | `EDEN_NX2_REJECT_HASH=<hash>,...` (native program keys from shader dump file names, or shader hashes from the frame dump) | Those programs are rejected as if unsupported; the log shows `rejected by EDEN_NX2_REJECT_HASH` per hit. Bisect by halving the list. The key covers the captured code, so recompute it when the capture rules change. |
