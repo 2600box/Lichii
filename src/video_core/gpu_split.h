@@ -223,7 +223,8 @@ private:
     bool WaitFor(u64 target, DrainSite site);
 
     void BackLoop(std::stop_token stop_token);
-    size_t Execute(const u64* entry);
+    /// Runs the entry at `entry` (of the `words` published before the ring's end), returns its size.
+    size_t Execute(const u64* entry, size_t words);
 
     Core::System* system{};
     bool active{};
