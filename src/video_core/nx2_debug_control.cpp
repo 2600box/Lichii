@@ -9,6 +9,7 @@
 #include <unordered_map>
 
 #include "video_core/nx2_debug_control.h"
+#include "video_core/nx2_flash_trigger.h"
 
 namespace VideoCore::Nx2Debug {
 namespace {
@@ -39,6 +40,7 @@ void UpdatePending() {
 } // Anonymous namespace
 
 void BeginSession() {
+    ResetFlash();
     std::scoped_lock lock{state.mutex};
     state.captures.clear();
     state.finished.clear();
@@ -54,6 +56,7 @@ void BeginSession() {
 }
 
 void EndSession() {
+    ResetFlash();
     {
         std::scoped_lock lock{state.mutex};
         state.open = false;
@@ -105,6 +108,9 @@ std::optional<CaptureRequest> TakeCapture() {
 }
 
 void FinishCapture(u64 id, CaptureResult result) {
+    if (FinishFlashCapture(id, result.error)) {
+        return;
+    }
     {
         std::scoped_lock lock{state.mutex};
         if (!state.open) {
