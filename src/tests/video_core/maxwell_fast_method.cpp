@@ -778,3 +778,23 @@ TEST_CASE("Split restart resets writer positions without replaying old releases"
         REQUIRE(Access::End(split) == 0);
     }
 }
+
+TEST_CASE("Maxwell3D takes its macros back from the split's front once the split stops",
+          "[video_core][gpu_split_dependencies]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    Fixture f;
+    VideoCommon::GpuSplit split;
+    Access::Initialize(split, f.system);
+    auto& engine = f.fast;
+    constexpr u32 StartAddressPointer = MAXWELL3D_REG_INDEX(load_mme.start_address_ptr);
+    constexpr u32 StartAddress = MAXWELL3D_REG_INDEX(load_mme.start_address);
+    const u32 state = f.state_methods.front();
+    // The front takes the macros over and tracks a state write in its shadow RAM copy.
+    engine.FrontCallMethod(f.system, split, state, 0x1234, true);
+    REQUIRE(engine.shadow_state.reg_array[state] != 0x1234);
+    // The split stopped: the next engine method runs on this thread, not the split's back.
+    engine.CallMethod(f.system, StartAddressPointer, 0, true);
+    engine.CallMethod(f.system, StartAddress, 0x40, true);
+    CHECK(engine.shadow_state.reg_array[state] == 0x1234);
+    CHECK(engine.GetNativeMacroPositions()[0] == 0x40);
+}
