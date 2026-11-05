@@ -14,10 +14,12 @@
 #include "common/settings.h"
 #include "common/stb.h"
 #include "common/zstd_compression.h"
+#include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/vk_frame_dump.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/texture_cache/formatter.h"
+#include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 
 namespace Vulkan {
@@ -177,13 +179,16 @@ std::string JsonArray(std::span<T> values) {
 
 } // Anonymous namespace
 
-FrameDump::FrameDump(MemoryAllocator& memory_allocator_, Scheduler& scheduler_)
-    : memory_allocator{memory_allocator_}, scheduler{scheduler_} {
+FrameDump::FrameDump(const Device& device_, MemoryAllocator& memory_allocator_,
+                     Scheduler& scheduler_)
+    : device{device_}, memory_allocator{memory_allocator_}, scheduler{scheduler_} {
     const char* const dir = std::getenv("EDEN_NX2_FRAME_DUMP");
     if (!dir || *dir == '\0') {
         return;
     }
     enabled = true;
+    const char* const sampled_value = std::getenv("EDEN_NX2_FRAME_DUMP_SAMPLED");
+    sampled = sampled_value && *sampled_value != '\0' && *sampled_value != '0';
     directory = dir;
     start = std::chrono::steady_clock::now();
     const char* const at = std::getenv("EDEN_NX2_FRAME_DUMP_AT");
@@ -203,17 +208,39 @@ FrameDump::FrameDump(MemoryAllocator& memory_allocator_, Scheduler& scheduler_)
 
 FrameDump::~FrameDump() = default;
 
-std::optional<FrameDump::Target> FrameDump::MakeTarget(ImageView& view, u32 slot) {
+std::optional<FrameDump::Target> FrameDump::MakeTarget(ImageView& view, u32 slot) const {
     using namespace VideoCore::Surface;
     const Image* const image = view.BackingImage();
     if (!image) {
         return std::nullopt;
     }
     const auto& info = image->info;
-    if (info.type == VideoCommon::ImageType::e3D || info.type == VideoCommon::ImageType::Buffer ||
-        GetFormatType(info.format) != SurfaceType::ColorTexture ||
+    const SurfaceType type = GetFormatType(info.format);
+    if (info.type == VideoCommon::ImageType::Buffer ||
+        (type != SurfaceType::ColorTexture && type != SurfaceType::Depth &&
+         type != SurfaceType::DepthStencil) ||
         DefaultBlockWidth(info.format) != 1 || DefaultBlockHeight(info.format) != 1) {
         return std::nullopt;
+    }
+    DepthEncoding depth_encoding = DepthEncoding::None;
+    if (type != SurfaceType::ColorTexture) {
+        // The depth aspect copies in the host format's layout, which may differ from the guest's.
+        switch (MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, info.format).format) {
+        case VK_FORMAT_D16_UNORM:
+        case VK_FORMAT_D16_UNORM_S8_UINT:
+            depth_encoding = DepthEncoding::Unorm16;
+            break;
+        case VK_FORMAT_X8_D24_UNORM_PACK32:
+        case VK_FORMAT_D24_UNORM_S8_UINT:
+            depth_encoding = DepthEncoding::Unorm24;
+            break;
+        case VK_FORMAT_D32_SFLOAT:
+        case VK_FORMAT_D32_SFLOAT_S8_UINT:
+            depth_encoding = DepthEncoding::Float32;
+            break;
+        default:
+            return std::nullopt;
+        }
     }
     const bool rescaled = image->IsRescaled();
     const auto& resolution = Settings::values.resolution_info;
@@ -227,12 +254,43 @@ std::optional<FrameDump::Target> FrameDump::MakeTarget(ImageView& view, u32 slot
                                                                            : info.format,
         .width = std::max(1U, width >> level),
         .height = std::max(1U, height >> level),
+        .depth = info.type == VideoCommon::ImageType::e3D ? std::max(1U, info.size.depth >> level)
+                                                          : 1U,
         .level = view.range.base.level,
-        .layer = view.range.base.layer,
+        .layer = info.type == VideoCommon::ImageType::e3D ? 0 : view.range.base.layer,
         .gpu_addr = image->gpu_addr,
         .rescaled = rescaled,
         .msaa = info.num_samples > 1,
+        .depth_encoding = depth_encoding,
     };
+}
+
+u32 FrameDump::TexelBytes(const Target& target) {
+    switch (target.depth_encoding) {
+    case DepthEncoding::None:
+        return VideoCore::Surface::BytesPerBlock(target.format);
+    case DepthEncoding::Unorm16:
+        return 2;
+    default:
+        return 4;
+    }
+}
+
+int FrameDump::Decode(const Target& target, const u8* pixel, std::array<float, 4>& out) {
+    switch (target.depth_encoding) {
+    case DepthEncoding::None:
+        return DecodePixel(target.format, pixel, out);
+    case DepthEncoding::Unorm16:
+        out = {Unorm16(Load<u16>(pixel, 0)), 0.0f, 0.0f, 1.0f};
+        return 1;
+    case DepthEncoding::Unorm24:
+        out = {static_cast<float>(Load<u32>(pixel, 0) & 0xffffff) / 16777215.0f, 0.0f, 0.0f, 1.0f};
+        return 1;
+    case DepthEncoding::Float32:
+        out = {Load<float>(pixel, 0), 0.0f, 0.0f, 1.0f};
+        return 1;
+    }
+    return 0;
 }
 
 bool FrameDump::BeginPass(const void* framebuffer, std::span<ImageView* const> colors) {
@@ -251,7 +309,44 @@ bool FrameDump::BeginPass(const void* framebuffer, std::span<ImageView* const> c
         }
     }
     pass_hashes.clear();
+    pass_sampled.clear();
     pass_first_draw = draws;
+    return recorded;
+}
+
+bool FrameDump::NoteSampled(std::span<const Sampled> textures) {
+    bool recorded = false;
+    for (const Sampled& texture : textures) {
+        const Image* const image = texture.view ? texture.view->BackingImage() : nullptr;
+        if (!image) {
+            continue;
+        }
+        const std::pair<GPUVAddr, u32> key{
+            image->gpu_addr, (static_cast<u32>(texture.view->format) << 16) |
+                                 (static_cast<u32>(texture.view->range.base.level) << 8) |
+                                 static_cast<u32>(texture.view->range.base.layer)};
+        if (std::ranges::find(pass_sampled, key) != pass_sampled.end()) {
+            continue;
+        }
+        const u32 index = static_cast<u32>(pass_sampled.size());
+        pass_sampled.push_back(key);
+        const std::string tags = fmt::format(
+            R"("kind":"sampled","pass":{},"draw":{},"stage":{},"tic":{},"index":{})", pass_index,
+            draws - 1, texture.stage, texture.tic, index);
+        const std::string name =
+            fmt::format("{:04}_pass{:03}_tex{:02}_s{}_tic{}", sequence++, pass_index, index,
+                        texture.stage, texture.tic);
+        if (const auto target = MakeTarget(*texture.view, index)) {
+            recorded |= Record(*target, name, tags);
+            continue;
+        }
+        const auto& info = image->info;
+        manifest << fmt::format(
+                        R"({{"name":"{}",{},"format":"{}","width":{},"height":{},"depth":{},"type":{},"gpu_addr":"{:#x}","skipped":"format"}})",
+                        name, tags, info.format, info.size.width, info.size.height,
+                        info.size.depth, static_cast<u32>(info.type), image->gpu_addr)
+                 << '\n';
+    }
     return recorded;
 }
 
@@ -311,14 +406,15 @@ void FrameDump::CapturePresent(ImageView& view) {
 }
 
 bool FrameDump::Record(const Target& target, std::string name, std::string tags) {
-    name += fmt::format("_{}_{}x{}_{:x}", target.format, target.width, target.height,
-                        target.gpu_addr);
+    name += target.depth > 1 ? fmt::format("_{}_{}x{}x{}_{:x}", target.format, target.width,
+                                           target.height, target.depth, target.gpu_addr)
+                             : fmt::format("_{}_{}x{}_{:x}", target.format, target.width,
+                                           target.height, target.gpu_addr);
     if (target.msaa) {
         manifest << fmt::format(R"({{"name":"{}",{},"skipped":"msaa"}})", name, tags) << '\n';
         return false;
     }
-    const size_t size = size_t{target.width} * target.height *
-                        VideoCore::Surface::BytesPerBlock(target.format);
+    const size_t size = size_t{target.width} * target.height * target.depth * TexelBytes(target);
     if (written_bytes + pending_bytes + size > SIZE_CAP) {
         truncated = true;
         return false;
@@ -336,13 +432,15 @@ bool FrameDump::Record(const Target& target, std::string name, std::string tags)
         .bufferRowLength = 0,
         .bufferImageHeight = 0,
         .imageSubresource{
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .aspectMask = target.depth_encoding == DepthEncoding::None
+                              ? VkImageAspectFlags{VK_IMAGE_ASPECT_COLOR_BIT}
+                              : VkImageAspectFlags{VK_IMAGE_ASPECT_DEPTH_BIT},
             .mipLevel = static_cast<u32>(target.level),
             .baseArrayLayer = static_cast<u32>(target.layer),
             .layerCount = 1,
         },
         .imageOffset{0, 0, 0},
-        .imageExtent{target.width, target.height, 1},
+        .imageExtent{target.width, target.height, target.depth},
     };
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([image = target.image, destination = *buffer, copy](vk::CommandBuffer cmdbuf) {
@@ -390,15 +488,15 @@ void FrameDump::Drain() {
 
 void FrameDump::Write(const Readback& readback, std::span<const u8> mapped) {
     const Target& target = readback.target;
-    const u32 bytes_per_pixel = VideoCore::Surface::BytesPerBlock(target.format);
-    const size_t pixels = size_t{target.width} * target.height;
+    const u32 bytes_per_pixel = TexelBytes(target);
+    const size_t pixels = size_t{target.width} * target.height * target.depth;
     const auto data = mapped.first(pixels * bytes_per_pixel);
     WriteFile(readback.name + ".raw.zst",
               Common::Compression::CompressDataZSTDDefault(data.data(), data.size()));
     ++images;
 
     std::array<float, 4> pixel;
-    const int channels = DecodePixel(target.format, data.data(), pixel);
+    const int channels = Decode(target, data.data(), pixel);
     std::string stats;
     std::string png{"null"};
     if (channels != 0) {
@@ -408,10 +506,10 @@ void FrameDump::Write(const Readback& readback, std::span<const u8> mapped) {
         std::array<double, 4> sum{};
         std::array<u64, 4> nans{};
         std::array<u64, 4> infs{};
-        const bool encode = IsFloat(target.format);
+        const bool encode = target.depth_encoding == DepthEncoding::None && IsFloat(target.format);
         std::vector<u8> rgb(pixels * 3);
         for (size_t index = 0; index < pixels; ++index) {
-            DecodePixel(target.format, data.data() + index * bytes_per_pixel, pixel);
+            Decode(target, data.data() + index * bytes_per_pixel, pixel);
             bool finite = true;
             for (int c = 0; c < channels; ++c) {
                 const double value = pixel[c];
@@ -456,7 +554,7 @@ void FrameDump::Write(const Readback& readback, std::span<const u8> mapped) {
                 const auto* const begin = static_cast<const u8*>(bytes);
                 out->insert(out->end(), begin, begin + size);
             },
-            &encoded, static_cast<int>(target.width), static_cast<int>(target.height), 3,
+            &encoded, static_cast<int>(target.width), static_cast<int>(target.height * target.depth), 3,
             rgb.data(), static_cast<int>(target.width * 3));
         if (ok != 0) {
             WriteFile(readback.name + ".png", encoded);
@@ -464,10 +562,10 @@ void FrameDump::Write(const Readback& readback, std::span<const u8> mapped) {
         }
     }
     manifest << fmt::format(
-                    R"({{"name":"{}",{},"format":"{}","width":{},"height":{},"level":{},"layer":{},"gpu_addr":"{:#x}","rescaled":{},"raw":"{}.raw.zst","png":{}{}}})",
+                    R"({{"name":"{}",{},"format":"{}","width":{},"height":{},"depth":{},"level":{},"layer":{},"gpu_addr":"{:#x}","rescaled":{},"depth_encoding":{},"raw":"{}.raw.zst","png":{}{}}})",
                     readback.name, readback.tags, target.format, target.width, target.height,
-                    target.level, target.layer, target.gpu_addr, target.rescaled, readback.name,
-                    png, stats)
+                    target.depth, target.level, target.layer, target.gpu_addr, target.rescaled,
+                    static_cast<u32>(target.depth_encoding), readback.name, png, stats)
              << '\n';
 }
 
