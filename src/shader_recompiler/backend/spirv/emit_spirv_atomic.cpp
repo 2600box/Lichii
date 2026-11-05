@@ -482,8 +482,16 @@ Id EmitGlobalAtomicExchange32(EmitContext&) {
     throw NotImplementedException("SPIR-V Instruction");
 }
 
-Id EmitGlobalAtomicCompareExchange32(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction");
+Id EmitGlobalAtomicCompareExchange32(EmitContext& ctx, const IR::Value& address, Id comparator,
+                                     Id value) {
+    if (!ctx.profile.support_int64) {
+        throw NotImplementedException("Global atomic addressing requires 64-bit integers");
+    }
+    if (!Sirit::ValidId(ctx.atomic_cas_global_func_u32)) {
+        throw NotImplementedException("Global atomic compare-exchange with no routable storage buffer");
+    }
+    return ctx.OpFunctionCall(ctx.U32[1], ctx.atomic_cas_global_func_u32, ctx.Def(address),
+                              comparator, value);
 }
 
 Id EmitGlobalAtomicIAdd64(EmitContext&) {
