@@ -11,6 +11,7 @@
 
 #include "common/common_types.h"
 #include "video_core/gpu_split.h"
+#include "video_core/host_gpu_profile.h"
 #include "common/logging.h"
 #include "common/cpu_features.h"
 #include "common/thread_cpu_clock.h"
@@ -175,6 +176,7 @@ inline void Report(const char* thread_name = "GPU thread") {
         data.window_start = now;
         data.cpu_start_ns = Common::CurrentThreadCpuTimeNs();
         data.child_ns = 0;
+        HostGpuProfile::accounting.TakeSamples();
         return;
     }
     const u64 window = now - data.window_start;
@@ -229,6 +231,13 @@ inline void Report(const char* thread_name = "GPU thread") {
     } else {
         line += fmt::format(" | host_cpu_busy_ms_per_s=unavailable window_wall_ms={:.3f}",
                             static_cast<double>(window) / 1e6);
+    }
+    const auto host_samples = HostGpuProfile::accounting.TakeSamples();
+    for (size_t i = 0; i < host_samples.size(); ++i) {
+        const auto& sample = host_samples[i];
+        line += fmt::format(" | host {} {:.3f} ms ({:.0f}/s)", HostGpuProfile::names[i],
+                            static_cast<double>(sample.nanoseconds) * 1000.0 / window,
+                            static_cast<double>(sample.calls) * 1e9 / window);
     }
     LOG_INFO(HW_GPU, "{} per second:{}", thread_name, line);
     data = {};

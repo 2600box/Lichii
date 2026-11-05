@@ -77,6 +77,7 @@ void MasterSemaphore::Refresh() {
 }
 
 void MasterSemaphore::Wait(u64 tick) {
+    const VideoCommon::HostGpuProfile::Scope profile{VideoCommon::HostGpuProfile::Phase::Wait};
     if (!semaphore) {
         // Fast check: already reached the requested tick?
         if (gpu_tick.load(std::memory_order_acquire) >= tick) {

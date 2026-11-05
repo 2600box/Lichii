@@ -19,6 +19,7 @@
 #include <string>
 
 #include "common/common_types.h"
+#include "video_core/host_gpu_profile.h"
 #include "video_core/vulkan_common/vulkan.h"
 
 #ifdef _MSC_VER
@@ -865,12 +866,16 @@ public:
 
     VkResult Submit(Span<VkSubmitInfo> submit_infos,
                     VkFence fence = VK_NULL_HANDLE) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Submit};
         return dld->vkQueueSubmit(queue, submit_infos.size(), submit_infos.data(), fence);
     }
 
     /// Submits using VK_KHR_synchronization2 / Vulkan 1.3 vkQueueSubmit2.
     VkResult Submit2(Span<VkSubmitInfo2> submit_infos,
                      VkFence fence = VK_NULL_HANDLE) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Submit};
         return dld->vkQueueSubmit2(queue, submit_infos.size(), submit_infos.data(), fence);
     }
 
@@ -1251,41 +1256,59 @@ public:
         return handle;
     }
     void Begin(const VkCommandBufferBeginInfo& begin_info) const {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         Check(dld->vkBeginCommandBuffer(handle, &begin_info));
     }
 
     void End() const {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         Check(dld->vkEndCommandBuffer(handle));
     }
 
     void BeginRenderPass(const VkRenderPassBeginInfo& renderpass_bi,
                          VkSubpassContents contents) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBeginRenderPass(handle, &renderpass_bi, contents);
     }
 
     void EndRenderPass() const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdEndRenderPass(handle);
     }
 
     void BeginQuery(VkQueryPool query_pool, u32 query, VkQueryControlFlags flags) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBeginQuery(handle, query_pool, query, flags);
     }
 
     void EndQuery(VkQueryPool query_pool, u32 query) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdEndQuery(handle, query_pool, query);
     }
 
     void ResetQueryPool(VkQueryPool query_pool, u32 first, u32 count) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdResetQueryPool(handle, query_pool, first, count);
     }
 
     void WriteTimestamp(VkPipelineStageFlagBits stage, VkQueryPool query_pool,
                         u32 query) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdWriteTimestamp(handle, stage, query_pool, query);
     }
 
     void BindDescriptorSets(VkPipelineBindPoint bind_point, VkPipelineLayout layout, u32 first,
                             Span<VkDescriptorSet> sets, Span<u32> dynamic_offsets) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBindDescriptorSets(handle, bind_point, layout, first, sets.size(), sets.data(),
                                      dynamic_offsets.size(), dynamic_offsets.data());
     }
@@ -1293,20 +1316,28 @@ public:
     void PushDescriptorSetWithTemplateKHR(VkDescriptorUpdateTemplate update_template,
                                           VkPipelineLayout layout, u32 set,
                                           const void* data) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdPushDescriptorSetWithTemplateKHR(handle, update_template, layout, set, data);
     }
 
     void BindPipeline(VkPipelineBindPoint bind_point, VkPipeline pipeline) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBindPipeline(handle, bind_point, pipeline);
     }
 
     void BindIndexBuffer(VkBuffer buffer, VkDeviceSize offset,
                          VkIndexType index_type) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBindIndexBuffer(handle, buffer, offset, index_type);
     }
 
     void BindVertexBuffers(u32 first, u32 count, const VkBuffer* buffers,
                            const VkDeviceSize* offsets) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBindVertexBuffers(handle, first, count, buffers, offsets);
     }
 
@@ -1316,31 +1347,43 @@ public:
 
     void Draw(u32 vertex_count, u32 instance_count, u32 first_vertex,
               u32 first_instance) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDraw(handle, vertex_count, instance_count, first_vertex, first_instance);
     }
 
     void DrawIndexed(u32 index_count, u32 instance_count, u32 first_index, u32 vertex_offset,
                      u32 first_instance) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDrawIndexed(handle, index_count, instance_count, first_index, vertex_offset,
                               first_instance);
     }
 
     void DrawIndirect(VkBuffer src_buffer, VkDeviceSize src_offset, u32 draw_count,
                       u32 stride) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDrawIndirect(handle, src_buffer, src_offset, draw_count, stride);
     }
 
     void DrawIndexedIndirect(VkBuffer src_buffer, VkDeviceSize src_offset, u32 draw_count,
                              u32 stride) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDrawIndexedIndirect(handle, src_buffer, src_offset, draw_count, stride);
     }
 
     void DrawMeshTasksEXT(u32 group_count_x, u32 group_count_y, u32 group_count_z) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDrawMeshTasksEXT(handle, group_count_x, group_count_y, group_count_z);
     }
 
     void DrawIndirectCount(VkBuffer src_buffer, VkDeviceSize src_offset, VkBuffer count_buffer,
                            VkDeviceSize count_offset, u32 draw_count, u32 stride) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDrawIndirectCount(handle, src_buffer, src_offset, count_buffer, count_offset,
                                     draw_count, stride);
     }
@@ -1348,6 +1391,8 @@ public:
     void DrawIndexedIndirectCount(VkBuffer src_buffer, VkDeviceSize src_offset,
                                   VkBuffer count_buffer, VkDeviceSize count_offset, u32 draw_count,
                                   u32 stride) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDrawIndexedIndirectCount(handle, src_buffer, src_offset, count_buffer,
                                            count_offset, draw_count, stride);
     }
@@ -1355,39 +1400,53 @@ public:
     void DrawIndirectByteCountEXT(u32 instance_count, u32 first_instance, VkBuffer counter_buffer,
                                   VkDeviceSize counter_buffer_offset, u32 counter_offset,
                                   u32 stride) {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDrawIndirectByteCountEXT(handle, instance_count, first_instance, counter_buffer,
                                            counter_buffer_offset, counter_offset, stride);
     }
 
     void ClearAttachments(Span<VkClearAttachment> attachments,
                           Span<VkClearRect> rects) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdClearAttachments(handle, attachments.size(), attachments.data(), rects.size(),
                                    rects.data());
     }
 
     void ClearColorImage(VkImage image, VkImageLayout layout, VkClearColorValue color,
                          Span<VkImageSubresourceRange> ranges) {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdClearColorImage(handle, image, layout, &color, ranges.size(), ranges.data());
     }
 
     void BlitImage(VkImage src_image, VkImageLayout src_layout, VkImage dst_image,
                    VkImageLayout dst_layout, Span<VkImageBlit> regions,
                    VkFilter filter) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBlitImage(handle, src_image, src_layout, dst_image, dst_layout, regions.size(),
                             regions.data(), filter);
     }
 
     void ResolveImage(VkImage src_image, VkImageLayout src_layout, VkImage dst_image,
                       VkImageLayout dst_layout, Span<VkImageResolve> regions) {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdResolveImage(handle, src_image, src_layout, dst_image, dst_layout, regions.size(),
                                regions.data());
     }
 
     void Dispatch(u32 x, u32 y, u32 z) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDispatch(handle, x, y, z);
     }
 
     void DispatchIndirect(VkBuffer indirect_buffer, VkDeviceSize offset) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDispatchIndirect(handle, indirect_buffer, offset);
     }
 
@@ -1458,9 +1517,13 @@ public:
                 .imageMemoryBarrierCount = image_barriers.size(),
                 .pImageMemoryBarriers = image_barriers2.data(),
             };
+            const VideoCommon::HostGpuProfile::Scope profile{
+                VideoCommon::HostGpuProfile::Phase::Encode};
             dld->vkCmdPipelineBarrier2(handle, &dependency_info);
             return;
         }
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdPipelineBarrier(handle, src_stage_mask, dst_stage_mask, dependency_flags,
                                   memory_barriers.size(), memory_barriers.data(),
                                   buffer_barriers.size(), buffer_barriers.data(),
@@ -1491,12 +1554,16 @@ public:
     }
 
     void BindDescriptorBuffersEXT(Span<VkDescriptorBufferBindingInfoEXT> bindings) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBindDescriptorBuffersEXT(handle, bindings.size(), bindings.data());
     }
 
     void SetDescriptorBufferOffsetsEXT(VkPipelineBindPoint bind_point, VkPipelineLayout layout,
                                        u32 first_set, Span<u32> buffer_indices,
                                        Span<VkDeviceSize> offsets) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetDescriptorBufferOffsetsEXT(handle, bind_point, layout, first_set,
                                                 buffer_indices.size(), buffer_indices.data(),
                                                 offsets.data());
@@ -1504,23 +1571,31 @@ public:
 
     void CopyBufferToImage(VkBuffer src_buffer, VkImage dst_image, VkImageLayout dst_image_layout,
                            Span<VkBufferImageCopy> regions) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdCopyBufferToImage(handle, src_buffer, dst_image, dst_image_layout, regions.size(),
                                     regions.data());
     }
 
     void CopyBuffer(VkBuffer src_buffer, VkBuffer dst_buffer,
                     Span<VkBufferCopy> regions) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdCopyBuffer(handle, src_buffer, dst_buffer, regions.size(), regions.data());
     }
 
     void CopyImage(VkImage src_image, VkImageLayout src_layout, VkImage dst_image,
                    VkImageLayout dst_layout, Span<VkImageCopy> regions) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdCopyImage(handle, src_image, src_layout, dst_image, dst_layout, regions.size(),
                             regions.data());
     }
 
     void CopyImageToBuffer(VkImage src_image, VkImageLayout src_layout, VkBuffer dst_buffer,
                            Span<VkBufferImageCopy> regions) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdCopyImageToBuffer(handle, src_image, src_layout, dst_buffer, regions.size(),
                                     regions.data());
     }
@@ -1528,51 +1603,73 @@ public:
     void CopyQueryPoolResults(VkQueryPool query_pool, u32 first_query, u32 query_count,
                               VkBuffer dst_buffer, VkDeviceSize dst_offset, VkDeviceSize stride,
                               VkQueryResultFlags flags) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdCopyQueryPoolResults(handle, query_pool, first_query, query_count, dst_buffer,
                                        dst_offset, stride, flags);
     }
 
     void FillBuffer(VkBuffer dst_buffer, VkDeviceSize dst_offset, VkDeviceSize size,
                     u32 data) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdFillBuffer(handle, dst_buffer, dst_offset, size, data);
     }
 
     void PushConstants(VkPipelineLayout layout, VkShaderStageFlags flags, u32 offset, u32 size,
                        const void* values) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdPushConstants(handle, layout, flags, offset, size, values);
     }
 
     template <typename T>
         requires std::is_trivially_copyable_v<T>
     void PushConstants(VkPipelineLayout layout, VkShaderStageFlags flags, const T& data) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdPushConstants(handle, layout, flags, 0, u32(sizeof(T)), std::addressof(data));
     }
 
     void SetViewport(u32 first, Span<VkViewport> viewports) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetViewport(handle, first, viewports.size(), viewports.data());
     }
 
     void SetScissor(u32 first, Span<VkRect2D> scissors) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetScissor(handle, first, scissors.size(), scissors.data());
     }
 
     void SetBlendConstants(const float blend_constants[4]) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetBlendConstants(handle, blend_constants);
     }
 
     void SetStencilCompareMask(VkStencilFaceFlags face_mask, u32 compare_mask) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetStencilCompareMask(handle, face_mask, compare_mask);
     }
 
     void SetStencilReference(VkStencilFaceFlags face_mask, u32 reference) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetStencilReference(handle, face_mask, reference);
     }
 
     void SetStencilWriteMask(VkStencilFaceFlags face_mask, u32 write_mask) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetStencilWriteMask(handle, face_mask, write_mask);
     }
 
     void SetDepthBias(float constant_factor, float clamp, float slope_factor) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetDepthBias(handle, constant_factor, clamp, slope_factor);
     }
 
@@ -1585,14 +1682,20 @@ public:
             .depthBiasClamp = clamp,
             .depthBiasSlopeFactor = slope_factor,
         };
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetDepthBias2EXT(handle, &info);
     }
 
     void SetDepthBounds(float min_depth_bounds, float max_depth_bounds) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetDepthBounds(handle, min_depth_bounds, max_depth_bounds);
     }
 
     void SetEvent(VkEvent event, VkPipelineStageFlags stage_flags) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetEvent(handle, event, stage_flags);
     }
 
@@ -1600,6 +1703,8 @@ public:
                     VkPipelineStageFlags dst_stage_mask, Span<VkMemoryBarrier> memory_barriers,
                     Span<VkBufferMemoryBarrier> buffer_barriers,
                     Span<VkImageMemoryBarrier> image_barriers) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdWaitEvents(handle, events.size(), events.data(), src_stage_mask, dst_stage_mask,
                              memory_barriers.size(), memory_barriers.data(), buffer_barriers.size(),
                              buffer_barriers.data(), image_barriers.size(), image_barriers.data());
@@ -1608,127 +1713,185 @@ public:
     void BindVertexBuffers2EXT(u32 first_binding, u32 binding_count, const VkBuffer* buffers,
                                const VkDeviceSize* offsets, const VkDeviceSize* sizes,
                                const VkDeviceSize* strides) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBindVertexBuffers2EXT(handle, first_binding, binding_count, buffers, offsets,
                                         sizes, strides);
     }
 
     void SetCullModeEXT(VkCullModeFlags cull_mode) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetCullModeEXT(handle, cull_mode);
     }
 
     void SetDepthBoundsTestEnableEXT(bool enable) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetDepthBoundsTestEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
     }
 
     void SetDepthCompareOpEXT(VkCompareOp compare_op) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetDepthCompareOpEXT(handle, compare_op);
     }
 
     void SetDepthTestEnableEXT(bool enable) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetDepthTestEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
     }
 
     void SetDepthWriteEnableEXT(bool enable) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetDepthWriteEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
     }
 
     void SetPrimitiveRestartEnableEXT(bool enable) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetPrimitiveRestartEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
     }
 
     void SetRasterizerDiscardEnableEXT(bool enable) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetRasterizerDiscardEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
     }
 
     void SetConservativeRasterizationModeEXT(VkConservativeRasterizationModeEXT mode) const noexcept
     {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetConservativeRasterizationModeEXT(handle, mode);
     }
 
     void SetLineRasterizationModeEXT(VkLineRasterizationModeEXT mode) const noexcept
     {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetLineRasterizationModeEXT(handle, mode);
     }
 
     void SetLineStippleEnableEXT(bool enable) const noexcept
     {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetLineStippleEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
     }
 
     void SetLineStippleEXT(u32 factor, u16 pattern) const noexcept
     {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetLineStippleEXT(handle, factor, pattern);
     }
 
     void SetDepthBiasEnableEXT(bool enable) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetDepthBiasEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
     }
 
     void SetLogicOpEnableEXT(bool enable) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetLogicOpEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
     }
 
     void SetAlphaToCoverageEnableEXT(bool enable) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetAlphaToCoverageEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
     }
 
     void SetAlphaToOneEnableEXT(bool enable) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetAlphaToOneEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
     }
 
     void SetDepthClampEnableEXT(bool enable) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetDepthClampEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
     }
 
     void SetFrontFaceEXT(VkFrontFace front_face) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetFrontFaceEXT(handle, front_face);
     }
 
     void SetLogicOpEXT(VkLogicOp logic_op) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetLogicOpEXT(handle, logic_op);
     }
 
     void SetPatchControlPointsEXT(uint32_t patch_control_points) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetPatchControlPointsEXT(handle, patch_control_points);
     }
 
     void SetColorWriteMaskEXT(u32 first, Span<VkColorComponentFlags> masks) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetColorWriteMaskEXT(handle, first, masks.size(), masks.data());
     }
 
     void SetColorWriteEnableEXT(Span<VkBool32> enables) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetColorWriteEnableEXT(handle, enables.size(), enables.data());
     }
 
     void SetColorBlendEnableEXT(u32 first, Span<VkBool32> enables) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetColorBlendEnableEXT(handle, first, enables.size(), enables.data());
     }
 
     void SetColorBlendEquationEXT(u32 first,
                                   Span<VkColorBlendEquationEXT> equations) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetColorBlendEquationEXT(handle, first, equations.size(), equations.data());
     }
 
     void SetLineWidth(float line_width) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetLineWidth(handle, line_width);
     }
 
     void SetPrimitiveTopologyEXT(VkPrimitiveTopology primitive_topology) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetPrimitiveTopologyEXT(handle, primitive_topology);
     }
 
     void SetStencilOpEXT(VkStencilFaceFlags face_mask, VkStencilOp fail_op, VkStencilOp pass_op,
                          VkStencilOp depth_fail_op, VkCompareOp compare_op) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetStencilOpEXT(handle, face_mask, fail_op, pass_op, depth_fail_op, compare_op);
     }
 
     void SetStencilTestEnableEXT(bool enable) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetStencilTestEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
     }
 
     void SetVertexInputEXT(
         vk::Span<VkVertexInputBindingDescription2EXT> bindings,
         vk::Span<VkVertexInputAttributeDescription2EXT> attributes) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetVertexInputEXT(handle, bindings.size(), bindings.data(), attributes.size(),
                                     attributes.data());
     }
@@ -1736,12 +1899,16 @@ public:
     void BindTransformFeedbackBuffersEXT(u32 first, u32 count, const VkBuffer* buffers,
                                          const VkDeviceSize* offsets,
                                          const VkDeviceSize* sizes) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBindTransformFeedbackBuffersEXT(handle, first, count, buffers, offsets, sizes);
     }
 
     void BeginTransformFeedbackEXT(u32 first_counter_buffer, u32 counter_buffers_count,
                                    const VkBuffer* counter_buffers,
                                    const VkDeviceSize* counter_buffer_offsets) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBeginTransformFeedbackEXT(handle, first_counter_buffer, counter_buffers_count,
                                             counter_buffers, counter_buffer_offsets);
     }
@@ -1749,16 +1916,22 @@ public:
     void EndTransformFeedbackEXT(u32 first_counter_buffer, u32 counter_buffers_count,
                                  const VkBuffer* counter_buffers,
                                  const VkDeviceSize* counter_buffer_offsets) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdEndTransformFeedbackEXT(handle, first_counter_buffer, counter_buffers_count,
                                           counter_buffers, counter_buffer_offsets);
     }
 
     void BeginConditionalRenderingEXT(
         const VkConditionalRenderingBeginInfoEXT& info) const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBeginConditionalRenderingEXT(handle, &info);
     }
 
     void EndConditionalRenderingEXT() const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdEndConditionalRenderingEXT(handle);
     }
 
@@ -1769,10 +1942,14 @@ public:
             .pLabelName = label,
             .color{color[0], color[1], color[2], color[3]},
         };
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBeginDebugUtilsLabelEXT(handle, &label_info);
     }
 
     void EndDebugUtilsLabelEXT() const noexcept {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdEndDebugUtilsLabelEXT(handle);
     }
 

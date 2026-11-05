@@ -95,6 +95,7 @@ void ReportSubmitCounts() {
 
 void Scheduler::CommandChunk::ExecuteAll(vk::CommandBuffer cmdbuf,
                                          vk::CommandBuffer upload_cmdbuf) {
+    const VideoCommon::HostGpuProfile::Scope profile{VideoCommon::HostGpuProfile::Phase::Worker};
     auto command = first;
     while (command != nullptr) {
         auto next = command->GetNext();
@@ -258,6 +259,7 @@ void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
 }
 
 void Scheduler::WaitWorker() {
+    const VideoCommon::HostGpuProfile::Scope profile{VideoCommon::HostGpuProfile::Phase::Wait};
     DispatchWork();
 
     // Ensure the queue is drained.
@@ -499,16 +501,22 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
     }};
 
     while (!stop_token.stop_requested()) {
+        VideoCommon::Nx2Profile::Report("Vulkan worker");
         std::unique_ptr<CommandChunk> work;
 
         {
             std::unique_lock lk{queue_mutex};
 
             // Wait for work.
-            event_cv.wait(lk, stop_token, [&] {
-                worker_waiting = !TryPopQueue(work);
-                return !worker_waiting;
-            });
+            {
+                const VideoCommon::Nx2Profile::Scope idle{VideoCommon::Nx2Profile::Zone::Idle};
+                const VideoCommon::HostGpuProfile::Scope profile{
+                    VideoCommon::HostGpuProfile::Phase::Wait};
+                event_cv.wait(lk, stop_token, [&] {
+                    worker_waiting = !TryPopQueue(work);
+                    return !worker_waiting;
+                });
+            }
             worker_waiting = false;
 
             // If we've been asked to stop, we're done.
@@ -542,6 +550,7 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
 }
 
 void Scheduler::AllocateWorkerCommandBuffer() {
+    const VideoCommon::HostGpuProfile::Scope profile{VideoCommon::HostGpuProfile::Phase::Pool};
     current_cmdbuf = vk::CommandBuffer(command_pool->Commit(), device.GetDispatchLoader());
     current_cmdbuf.Begin({
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,

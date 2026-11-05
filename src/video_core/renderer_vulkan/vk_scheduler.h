@@ -165,6 +165,8 @@ public:
     template <typename T>
         requires std::is_invocable_v<T, vk::CommandBuffer, vk::CommandBuffer>
     void RecordWithUploadBuffer(T&& command) {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Enqueue};
         if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
             VideoCommon::GpuSplit::CheckOwner("Scheduler::Record");
         }
