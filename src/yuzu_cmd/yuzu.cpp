@@ -596,7 +596,8 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     Service::AM::FrontendAppletParameters load_parameters{
         .applet_id = Service::AM::AppletId::Application,
     };
-    const bool restarted = std::getenv("EDEN_CLI_RESTART_HANDOFF") != nullptr;
+    const char* const handoff_env = std::getenv("EDEN_CLI_RESTART_HANDOFF");
+    const bool restarted = handoff_env != nullptr && handoff_env[0] != '\0';
     if (restarted) {
         auto handoff = ReadRestartHandoff();
         if (!handoff) {
