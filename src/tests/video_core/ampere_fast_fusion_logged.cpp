@@ -360,6 +360,8 @@ struct HalfIR {
                 visitor.MOV_reg(word);
             else if ((word >> 48) == 0x5c28)
                 visitor.SHR_reg(word);
+            else if ((word >> 48) == 0x38f8)
+                visitor.SHF_r_imm(word);
             else if ((word >> 48) == 0x5c48)
                 visitor.SHL_reg(word);
             else if (((word >> 48) & 0xfffc) == 0x5c10)
@@ -508,6 +510,17 @@ struct HalfIR {
             return u32(a(0)) >> (a(1) & 31);
         case IR::Opcode::ShiftLeftLogical32:
             return u32(a(0)) << (a(1) & 31);
+        case IR::Opcode::CompositeConstructU32x2:
+            return u32(a(0)) | (a(1) << 32);
+        case IR::Opcode::CompositeExtractU32x2:
+            return u32(a(0) >> (a(1) * 32));
+        case IR::Opcode::PackUint2x32:
+        case IR::Opcode::UnpackUint2x32:
+            return a(0);
+        case IR::Opcode::UMin32:
+            return std::min(u32(a(0)), u32(a(1)));
+        case IR::Opcode::ShiftRightLogical64:
+            return a(0) >> (a(1) & 63);
         case IR::Opcode::IEqual:
             return a(0) == a(1);
         case IR::Opcode::INeg32:
@@ -607,6 +620,35 @@ TEST_CASE("Ocarina 64-bit right shifts include both words and clamp at 64",
                 CHECK(translation.registers[uniform ? 223 : 43] ==
                       (shift >= 64 ? 0U : u32(input >> shift)));
             }
+        }
+    }
+}
+
+TEST_CASE("Ocarina funnel shift unpacks 21-bit fields across both words",
+          "[video_core][ampere][oot]") {
+    // 1a55fa57a335b963 (vertex shader of the 128x128 environment capture and scene draws):
+    // SHF.R.U64 R14, R14, 0x15, R17
+    for (const u32 shift : {0U, 1U, 21U, 31U, 32U}) {
+        const Instruction instruction{{0x0e0e7819, shift, 0x00001211, 0x020fe200}};
+        const auto lowered = LowerToMaxwell(std::array{instruction, Exit});
+        INFO(lowered.error);
+        REQUIRE(lowered);
+        HalfIR translation{lowered.instructions};
+        for (const u64 input : {0ULL, 0x00000001ffe00000ULL, 0x8000000180000000ULL,
+                               0xfedcba9876543210ULL, 0xffffffffffffffffULL}) {
+            CAPTURE(shift, input);
+            translation.registers.fill(0xdeadbeef);
+            translation.registers[14] = u32(input);
+            translation.registers[17] = u32(input >> 32);
+            translation.values.clear();
+            for (const auto& inst : translation.block.Instructions()) {
+                if (inst.GetOpcode() == IR::Opcode::SetRegister)
+                    translation.registers.at(static_cast<size_t>(inst.Arg(0).Reg())) =
+                        u32(translation.Value(inst.Arg(1)));
+                else
+                    translation.values.emplace(&inst, translation.Evaluate(inst));
+            }
+            CHECK(translation.registers[14] == u32(input >> shift));
         }
     }
 }
