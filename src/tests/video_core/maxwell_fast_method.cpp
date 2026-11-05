@@ -5,6 +5,7 @@
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <future>
 #include <memory>
 #include <random>
 #include <vector>
@@ -29,6 +30,11 @@
 namespace VideoCommon {
 
 struct GpuSplitTestAccess {
+    static void StartBack(GpuSplit& split) {
+        split.active = true;
+        split.back_thread = std::jthread([&split](std::stop_token stop) { split.BackLoop(stop); });
+    }
+
     static void Initialize(GpuSplit& split, Core::System& system, u64 position = 0) {
         split.system = &system;
         split.ring = std::make_unique<u64[]>(GpuSplit::RingWords);
@@ -55,6 +61,56 @@ struct GpuSplitTestAccess {
 };
 
 } // namespace VideoCommon
+
+TEST_CASE("GpuSplit drain waits for an in-progress idle submission",
+          "[video_core][gpu_split_dispatch][split_correctness]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    ScopedSystemTestContext context;
+    Core::System system;
+    system.Initialize();
+    struct Hook {
+        std::promise<void> entered;
+        std::promise<void> release;
+        std::shared_future<void> released = release.get_future().share();
+        std::atomic_bool called{};
+    } hook;
+    VideoCommon::GpuSplit split;
+    Access::Initialize(split, system);
+    split.SetIdleHook([](void* argument) {
+        auto& hook = *static_cast<Hook*>(argument);
+        if (!hook.called.exchange(true)) {
+            hook.entered.set_value();
+            hook.released.wait();
+        }
+    }, &hook);
+    split.Defer([] {});
+    Access::StartBack(split);
+    split.Publish();
+    const bool entered = hook.entered.get_future().wait_for(std::chrono::seconds{5}) ==
+                         std::future_status::ready;
+    std::promise<void> started;
+    auto drained = std::async(std::launch::async, [&] {
+        started.set_value();
+        split.Drain();
+    });
+    started.get_future().wait();
+    const bool waited = drained.wait_for(std::chrono::milliseconds{20}) ==
+                        std::future_status::timeout;
+    hook.release.set_value();
+    drained.get();
+    split.Stop();
+    CHECK(entered);
+    CHECK(waited);
+
+    Access::Initialize(split, system);
+    split.SetIdleHook(nullptr, nullptr);
+    std::atomic_bool executed{};
+    split.Defer([&] { executed = true; });
+    Access::StartBack(split);
+    split.Drain();
+    split.Stop();
+    CHECK(executed.load());
+}
 
 namespace {
 
