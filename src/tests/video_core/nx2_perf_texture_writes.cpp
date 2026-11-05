@@ -2,9 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
-#include <functional>
 #include <random>
-#include <set>
 #include <span>
 #include <utility>
 #include <vector>
@@ -16,7 +14,6 @@
 #include "common/range_sets.h"
 #include "common/range_sets.inc"
 #include "core/device_memory.h"
-#include "core/gpu_dirty_memory_manager.h"
 #include "video_core/buffer_cache/memory_tracker_base.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/nx2_perf.h"
@@ -84,7 +81,7 @@ Runs OldBatchCoalesce(const Runs& ranges) {
 
 bool Separated(const Runs& runs) {
     return std::ranges::adjacent_find(runs, [](const auto& a, const auto& b) {
-               return a.first + a.second >= b.first;
+               return a.first > b.first || a.first + a.second >= b.first;
            }) == runs.end();
 }
 
@@ -126,7 +123,6 @@ Runs RandomCollected(std::mt19937_64& rng, VAddr base) {
 } // Anonymous namespace
 
 TEST_CASE("Nx2Perf texture-writes: in-place tracker merge matches the old copy", "[video_core]") {
-    REQUIRE(VideoCommon::Nx2Perf::Enabled());
     std::mt19937_64 rng{0x0400486024DEC000ULL};
     for (int step = 0; step < 100000; ++step) {
         const Runs raw = RandomCollected(rng, (rng() % 64) * VideoCommon::BYTES_PER_WORD);
@@ -139,6 +135,15 @@ TEST_CASE("Nx2Perf texture-writes: in-place tracker merge matches the old copy",
                   [](const auto& a, const auto& b) { return a.first < b.first; });
         Manager::CoalesceInPlace(ranges);
         REQUIRE(Runs(ranges.begin(), ranges.end()) == old);
+        RecordingTracker recorder;
+        Manager manager{0, recorder};
+        Manager::CollectedRanges collected(raw.begin(), raw.end());
+        const s32 delta = step % 2 == 0 ? 1 : -1;
+        manager.ApplyCollectedRanges(collected, delta);
+        REQUIRE(collected.empty());
+        REQUIRE(recorder.batches.size() == 1);
+        REQUIRE(recorder.batches.front().first == old);
+        REQUIRE(recorder.batches.front().second == delta);
         // The device manager takes these as they are: its old sort and merge leave them alone.
         REQUIRE(Separated(old));
         REQUIRE(OldBatchCoalesce(old) == old);
@@ -230,38 +235,4 @@ TEST_CASE("Nx2Perf texture-writes: device manager batch accepts tracker runs", "
     manager.UpdatePagesCachedBatch(touching, 1);
     manager.UpdatePagesCachedBatch(touching, -1);
     SUCCEED();
-}
-
-TEST_CASE("Nx2Perf texture-writes: gathers return every collected write, empty ones nothing",
-          "[video_core]") {
-    REQUIRE(VideoCommon::Nx2Perf::Enabled());
-    std::mt19937_64 rng{0x040077201BE50000ULL};
-    Core::GPUDirtyMemoryManager manager;
-    std::set<PAddr> expected;
-    std::set<PAddr> gathered;
-    std::function<void(PAddr, size_t)> callback = [&](PAddr address, size_t size) {
-        for (PAddr block = address; block < address + size; block += 64) {
-            gathered.insert(block);
-        }
-    };
-    for (int step = 0; step < 200000; ++step) {
-        if (rng() % 8 != 0) {
-            const PAddr page = (rng() % 32) * 0x800;
-            const size_t offset = rng() % 0x800;
-            const size_t size = 1 + rng() % (0x800 - offset);
-            manager.Collect(page + offset, size);
-            for (PAddr block = (page + offset) & ~PAddr{63}; block < page + offset + size;
-                 block += 64) {
-                expected.insert(block);
-            }
-            continue;
-        }
-        gathered.clear();
-        manager.Gather(callback);
-        REQUIRE(gathered == expected);
-        expected.clear();
-        gathered.clear();
-        manager.Gather(callback);
-        REQUIRE(gathered.empty());
-    }
 }

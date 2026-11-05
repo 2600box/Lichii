@@ -715,7 +715,7 @@ void DeviceMemoryManager<Traits>::UpdatePagesCachedBatch(std::span<const std::pa
     const bool separated =
         VideoCommon::Nx2Perf::Enabled() &&
         std::ranges::adjacent_find(ranges, [](const auto& a, const auto& b) {
-            return a.first + a.second >= b.first;
+            return a.first > b.first || a.first + a.second >= b.first;
         }) == ranges.end();
     if (separated && !VideoCommon::Nx2Perf::Verify()) {
         const DAddr lock_begin = ranges.front().first;

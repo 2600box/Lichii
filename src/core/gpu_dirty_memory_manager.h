@@ -12,7 +12,6 @@
 #include <vector>
 
 #include "core/device_memory_manager.h"
-#include "video_core/nx2_perf.h"
 
 namespace Core {
 
@@ -35,7 +34,6 @@ public:
                 if (IsValid(tmp.address)) {
                     std::scoped_lock lk(guard);
                     back_buffer.emplace_back(tmp);
-                    has_back.store(true, std::memory_order_release);
                     current.exchange(t, std::memory_order_relaxed);
                     return;
                 }
@@ -54,18 +52,10 @@ public:
         // FlushRegion also gathers off the GPU thread (host1x video decode reads); serialize
         // gatherers so one cannot swap or clear front_buffer while another iterates it.
         std::scoped_lock gather_lk(gather_guard);
-        // Every fence gathers: with nothing collected there is nothing to swap or walk, and the
-        // collectors' lock stays free.
-        if (VideoCommon::Nx2Perf::Enabled() && !VideoCommon::Nx2Perf::Verify() &&
-            !IsValid(current.load(std::memory_order_acquire).address) &&
-            !has_back.load(std::memory_order_acquire)) {
-            return;
-        }
         {
             std::scoped_lock lk(guard);
             TransformAddress t = current.exchange(default_transform, std::memory_order_relaxed);
             front_buffer.swap(back_buffer);
-            has_back.store(false, std::memory_order_relaxed);
             if (IsValid(t.address)) {
                 front_buffer.emplace_back(t);
             }
@@ -159,7 +149,6 @@ private:
     std::mutex gather_guard;
     std::vector<TransformAddress> back_buffer;
     std::vector<TransformAddress> front_buffer;
-    std::atomic<bool> has_back{}; ///< back_buffer holds entries (set under guard)
 };
 
 } // namespace Core
