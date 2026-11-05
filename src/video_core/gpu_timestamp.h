@@ -24,4 +24,13 @@ template <typename Timing>
     }
 }
 
+/// Experiment for EDEN_NX2_GPU_TIME_DIV: GPU durations since the last present shrink by divisor,
+/// while timestamps stay within one frame of the nanosecond clock that CPU calibrations use.
+[[nodiscard]] constexpr u64 DivideSinceAnchor(u64 now, u64 anchor, u64 divisor) {
+    if (divisor <= 1 || now <= anchor) {
+        return now;
+    }
+    return anchor + (now - anchor) / divisor;
+}
+
 } // namespace Tegra
