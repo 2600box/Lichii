@@ -224,8 +224,8 @@ void ResolvedBatch::Replay(vk::CommandBuffer cb) const {
 PassRecorder::PassRecorder(RecordBatches callback) : PassRecorder{std::move(callback), Limits{}} {}
 PassRecorder::PassRecorder(RecordBatches callback, Limits limits_)
     : record_batches{std::move(callback)}, limits{limits_} {
-    if (limits.draws_per_batch == 0)
-        throw std::invalid_argument("Zero draws per resolved batch");
+    if (limits.draws_per_batch == 0 || limits.minimum_batches == 0)
+        throw std::invalid_argument("Zero resolved batch draw count or minimum batch count");
 }
 PassRecorder::~PassRecorder() = default;
 
@@ -266,7 +266,7 @@ void PassRecorder::BeginInline() {
 }
 
 void PassRecorder::NoteFallback(InlineFallbackReason reason) {
-    if (Profile::enabled && pass_open && !fallback_reason) {
+    if (pass_open && !fallback_reason) {
         fallback_reason = reason;
     }
 }
@@ -280,11 +280,28 @@ void PassRecorder::MaterializeInline(InlineFallbackReason reason) {
         command.Replay(*primary);
     commands.clear();
     pass_bytes = 0;
+    StopRetainingInlineState(reason);
+}
+
+void PassRecorder::StopRetainingInlineState(InlineFallbackReason reason) {
+    if (limits.retain_inline_state)
+        return;
+    const auto cause = fallback_reason.value_or(reason);
+    if (cause == InlineFallbackReason::NoDraws || cause == InlineFallbackReason::SingleBatch ||
+        cause == InlineFallbackReason::EncoderUnavailable) {
+        return;
+    }
+    if (!disabled) {
+        disabled_reason = cause;
+    }
+    disabled = true;
+    state.clear();
+    state_bytes = 0;
 }
 
 void PassRecorder::DisableCapture(InlineFallbackReason reason) {
     MaterializeInline(reason);
-    if (Profile::enabled && !disabled) {
+    if (!disabled) {
         disabled_reason = reason;
     }
     disabled = true;
@@ -293,6 +310,10 @@ void PassRecorder::DisableCapture(InlineFallbackReason reason) {
 }
 
 void PassRecorder::Record(ResolvedCommand command) {
+    if (disabled) {
+        command.Replay(*primary);
+        return;
+    }
     const size_t bytes = command.ByteSize();
     if (!disabled && !command.IsDraw()) {
         if (bytes > limits.state_bytes - std::min(state_bytes, limits.state_bytes)) {
@@ -326,6 +347,25 @@ void PassRecorder::BeginPass(const VkRenderPassBeginInfo& begin, VkSubpassConten
         NoteFallback(disabled_reason);
         return;
     }
+    std::optional<InlineFallbackReason> reason;
+    if (disabled) {
+        reason = disabled_reason;
+    } else if (active_queries) {
+        reason = InlineFallbackReason::ActiveQuery;
+    } else if (transform_feedback) {
+        reason = InlineFallbackReason::TransformFeedback;
+    } else if (conditional_rendering) {
+        reason = InlineFallbackReason::Conditional;
+    } else if (size_t{begin.clearValueCount} * sizeof(VkClearValue) > limits.pass_bytes) {
+        reason = InlineFallbackReason::Budget;
+    }
+    if (reason) {
+        StopRetainingInlineState(*reason);
+        primary->BeginRenderPass(begin, contents);
+        pass_open = inline_pass = true;
+        NoteFallback(*reason);
+        return;
+    }
     pass = begin;
     pass.pClearValues = nullptr;
     clears.clear();
@@ -337,17 +377,6 @@ void PassRecorder::BeginPass(const VkRenderPassBeginInfo& begin, VkSubpassConten
     pass_bytes = clears.size() * sizeof(VkClearValue);
     pass_open = true;
     inline_pass = false;
-    if (disabled) {
-        MaterializeInline(disabled_reason);
-    } else if (active_queries) {
-        MaterializeInline(InlineFallbackReason::ActiveQuery);
-    } else if (transform_feedback) {
-        MaterializeInline(InlineFallbackReason::TransformFeedback);
-    } else if (conditional_rendering) {
-        MaterializeInline(InlineFallbackReason::Conditional);
-    } else if (pass_bytes > limits.pass_bytes) {
-        MaterializeInline(InlineFallbackReason::Budget);
-    }
 }
 
 std::optional<std::vector<ResolvedBatch>> PassRecorder::MakeBatches() {
@@ -357,10 +386,14 @@ std::optional<std::vector<ResolvedBatch>> PassRecorder::MakeBatches() {
         NoteFallback(InlineFallbackReason::NoDraws);
         return std::nullopt;
     }
+    if ((draws - 1) / limits.draws_per_batch + 1 < limits.minimum_batches) {
+        NoteFallback(InlineFallbackReason::SingleBatch);
+        return std::nullopt;
+    }
     const auto over_budget = [this]() -> std::optional<std::vector<ResolvedBatch>> {
         Profile::Add(Profile::Counter::BudgetFallbacks);
         NoteFallback(InlineFallbackReason::Budget);
-        if (Profile::enabled && !disabled) {
+        if (!disabled) {
             disabled_reason = InlineFallbackReason::Budget;
         }
         disabled = true;
@@ -460,6 +493,7 @@ void PassRecorder::EndPass() {
     }
     MaterializeInline();
     primary->EndRenderPass();
+    StopRetainingInlineState(InlineFallbackReason::EncoderUnavailable);
     Profile::Add(Profile::Counter::InlinePasses);
     if (Profile::enabled) {
         static constexpr std::array reason_counters{

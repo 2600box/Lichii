@@ -1637,7 +1637,7 @@ public:
     }
 
     void BindDescriptorBuffersEXT(Span<VkDescriptorBufferBindingInfoEXT> bindings) const {
-        if (recorder) {
+        if (recorder && recorder->CapturingState()) {
             for (const auto& item : bindings) {
                 if (item.pNext)
                     recorder->DisableCapture();
@@ -1833,7 +1833,7 @@ public:
 
     void SetDepthBias(float constant_factor, float clamp, float slope_factor,
                       VkDepthBiasRepresentationInfoEXT* extra) const {
-        if (recorder && extra && extra->pNext)
+        if (recorder && recorder->CapturingState() && extra && extra->pNext)
             recorder->DisableCapture();
         if (recorder && recorder->CapturingState()) {
             recorder->Record(ResolvedCommand{
@@ -2203,13 +2203,13 @@ public:
 
     void SetVertexInputEXT(vk::Span<VkVertexInputBindingDescription2EXT> bindings,
                            vk::Span<VkVertexInputAttributeDescription2EXT> attributes) const {
-        if (recorder) {
+        if (recorder && recorder->CapturingState()) {
             for (const auto& item : bindings) {
                 if (item.pNext)
                     recorder->DisableCapture();
             }
         }
-        if (recorder) {
+        if (recorder && recorder->CapturingState()) {
             for (const auto& item : attributes) {
                 if (item.pNext)
                     recorder->DisableCapture();
