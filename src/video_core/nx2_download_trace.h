@@ -15,8 +15,8 @@
 
 // EDEN_NX2_DOWNLOAD_TRACE: what the buffer cache copies back to guest memory at fences. Every
 // 10 s it logs the GPU writes that queued the most bytes for download (by written range), the
-// 64 KiB regions copied back the most, and each range a guest CPU read marked Preflushable
-// (which sends later GPU writes over it to a download at every fence).
+// 64 KiB regions copied back the most, and the first 2000 guest CPU reads of GPU-written ranges
+// (a Preflushable mark sends later GPU writes over the range to a download at every fence).
 namespace VideoCommon::Nx2DownloadTrace {
 
 inline const bool g_enabled = std::getenv("EDEN_NX2_DOWNLOAD_TRACE") != nullptr;
@@ -88,11 +88,11 @@ inline void Copied(u64 address, u64 size) {
     MaybeReport();
 }
 
-/// A guest CPU read marked [address, address + size) Preflushable.
-inline void Marked(u64 address, u64 size) {
+/// A guest CPU read of GPU-written [address, address + size): marked Preflushable, or flushed.
+inline void Marked(u64 address, u64 size, bool preflush) {
     if (Get().marks++ < 2000) {
-        LOG_INFO(HW_GPU, "Download trace: CPU read marks [{:#x} +{:#x}) preflushable", address,
-                 size);
+        LOG_INFO(HW_GPU, "Download trace: CPU read of GPU-written [{:#x} +{:#x}) {}", address,
+                 size, preflush ? "marked preflushable" : "flushed");
     }
 }
 
