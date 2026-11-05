@@ -517,13 +517,15 @@ std::optional<u32> FrameDump::BeginProbe() {
     return query;
 }
 
-void FrameDump::EndProbe(u32 query, bool mesh, bool indirect, u32 elements, u32 instances) {
+void FrameDump::EndProbe(u32 query, bool mesh, bool indirect, u32 first, u32 elements,
+                         u32 instances) {
     scheduler.Record([pool = *probe_pool, query](vk::CommandBuffer cmdbuf) {
         cmdbuf.EndQuery(pool, query);
     });
     Probe& probe = probes[query];
     probe.mesh = mesh;
     probe.indirect = indirect;
+    probe.first = first;
     probe.elements = elements;
     probe.instances = instances;
 }
@@ -887,8 +889,8 @@ void FrameDump::TickFrame() {
             for (size_t index = 0; result == VK_SUCCESS && index < probes.size(); ++index) {
                 const Probe& probe = probes[index];
                 Enqueue({.tags = fmt::format(
-                             R"({{"kind":"draw","draw":{},"samples":{},"mesh":{},"indirect":{},"elements":{},"instances":{}}})",
-                             probe.draw, samples[index], probe.mesh, probe.indirect,
+                             R"({{"kind":"draw","draw":{},"samples":{},"mesh":{},"indirect":{},"first":{},"elements":{},"instances":{}}})",
+                             probe.draw, samples[index], probe.mesh, probe.indirect, probe.first,
                              probe.elements, probe.instances)});
             }
             if (result != VK_SUCCESS) {

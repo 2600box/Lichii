@@ -97,7 +97,7 @@ public:
     /// Starts counting the samples the draw about to be recorded passes; returns the query to end
     /// after it. Sampled captures only, and not while the game counts samples itself.
     std::optional<u32> BeginProbe();
-    void EndProbe(u32 query, bool mesh, bool indirect, u32 elements, u32 instances);
+    void EndProbe(u32 query, bool mesh, bool indirect, u32 first, u32 elements, u32 instances);
     /// Records a draw or dispatch dropped because its program or pipeline is unavailable.
     void NoteSkipped(bool compute, u64 program, GPUVAddr rt0, std::string_view reason);
     /// Captures the current pass; returns true when copies were recorded.
@@ -183,6 +183,7 @@ private:
         u32 draw;
         bool mesh;
         bool indirect;
+        u32 first;
         u32 elements;
         u32 instances;
     };

@@ -491,6 +491,8 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     if (probe) {
         const auto& draw_state = maxwell3d->draw_manager.draw_state;
         frame_dump.EndProbe(*probe, mesh_draw, is_indirect,
+                            is_indexed ? draw_state.index_buffer.first
+                                       : draw_state.vertex_buffer.first,
                             is_indexed ? draw_state.index_buffer.count
                                        : draw_state.vertex_buffer.count,
                             draw_state.instance_count);
