@@ -39,6 +39,8 @@ class CommandPool;
 class Device;
 class Framebuffer;
 class GraphicsPipeline;
+class ParallelRecorder;
+class PassRecorder;
 class StateTracker;
 
 struct QueryCacheParams;
@@ -77,6 +79,10 @@ public:
     /// Waits for the worker thread to finish executing everything. After this function returns it's
     /// safe to touch worker resources.
     void WaitWorker();
+
+    bool UsesResolvedBatches() const {
+        return resolved_recorder != nullptr;
+    }
 
     void MarkFrameEnd(u64 frame);
     void TraceGraphicsPipeline(const std::array<u64, 6>& hashes);
@@ -165,6 +171,8 @@ public:
     template <typename T>
         requires std::is_invocable_v<T, vk::CommandBuffer, vk::CommandBuffer>
     void RecordWithUploadBuffer(T&& command) {
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Enqueue};
         if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
             VideoCommon::GpuSplit::CheckOwner("Scheduler::Record");
         }
@@ -428,6 +436,10 @@ private:
     bool fragment_barrier_pending{};
     bool render_pass_has_stores{};
     std::unique_ptr<CommandPool> command_pool;
+    std::unique_ptr<ParallelRecorder> parallel_recorder;
+    std::unique_ptr<PassRecorder> resolved_recorder;
+    u64 worker_submission_tick{1};
+    u64 last_worker_submitted_tick{};
 
     vk::QueryPool trace_query_pool;
     static constexpr u32 TraceMaxSubmissions = 512;

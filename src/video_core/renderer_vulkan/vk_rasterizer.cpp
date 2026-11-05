@@ -390,6 +390,8 @@ bool RasterizerVulkan::TryNx2IndirectReset(bool is_indexed, u32 instance_count) 
 
 template <typename Func>
 void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_indirect) {
+    const VideoCommon::HostGpuProfile::Scope host_profile{
+        VideoCommon::HostGpuProfile::Phase::Resolve};
 
     if (Common::DkbFrameTrace::Enabled()) {
         ++trace_draws;
@@ -1357,6 +1359,8 @@ void RasterizerVulkan::Clear(u32 layer_count) {
 }
 
 void RasterizerVulkan::DispatchCompute() {
+    const VideoCommon::HostGpuProfile::Scope host_profile{
+        VideoCommon::HostGpuProfile::Phase::Resolve};
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Compute};
     if (InvalidateBeforeUse()) {
         gpu.InvalidateGPUCache();
@@ -1959,6 +1963,9 @@ void RasterizerVulkan::FrameDumpPass(const Framebuffer* framebuffer) {
 }
 
 void RasterizerVulkan::TickFrame() {
+    if (scheduler.UsesResolvedBatches()) {
+        scheduler.WaitWorker();
+    }
     if (VideoCore::Nx2Debug::HasRequests()) {
         if (auto capture = VideoCore::Nx2Debug::TakeCapture()) {
             frame_dump.Arm(std::move(capture->directory), capture->sampled, capture->buffers,

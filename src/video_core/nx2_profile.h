@@ -11,6 +11,7 @@
 
 #include "common/common_types.h"
 #include "video_core/gpu_split.h"
+#include "video_core/host_gpu_profile.h"
 #include "common/logging.h"
 #include "common/cpu_features.h"
 #include "common/thread_cpu_clock.h"
@@ -56,6 +57,14 @@ enum class Zone : u32 {
     WriterWait,
     ListSubmitWait,
     ListGpuWait,
+    MethodState,
+    MethodMulti,
+    MethodSink,
+    SplitCall,
+    SplitDispatch,
+    SplitSpin,
+    SplitIdleHook,
+    SplitSleep,
     Count,
 };
 
@@ -68,6 +77,8 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "configure draw", "dynamic state", "draw record", "texture upload", "fence",
     "fence skipped", "method", "split drain", "split wait",
     "writer wait", "list submit wait", "list GPU wait",
+    "method state", "method multi", "method sink", "split call", "split dispatch",
+    "split spin", "split idle hook", "split sleep",
 };
 
 // Read once at startup: Enabled() runs several times per method write (no guard to check).
@@ -83,10 +94,25 @@ inline u64 Now() {
     return static_cast<u64>(Common::g_wall_clock.GetTimeNS().count());
 }
 
+enum class Counter : u32 {
+    DownloadBytes,
+    DownloadCopies,
+    DmaReadBytes,
+    DownloadBytesOnDmaPages,
+    MethodWrites,
+    SameValueWrites,
+    AcquireChecks,
+    AcquireWaits,
+    FastStateCalls,
+    SinkQueuedWrites,
+    SinkConsumedWrites,
+    Count,
+};
+
 struct ThreadData {
     std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ns{};
     std::array<u64, static_cast<size_t>(Zone::Count)> count{};
-    std::array<u64, 8> counters{}; ///< See Counter
+    std::array<u64, static_cast<size_t>(Counter::Count)> counters{};
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_ns{};
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_count{};
     u64 child_ns{};    ///< Time of the zones nested in the current one
@@ -129,18 +155,6 @@ private:
     u64 parent_child_ns{};
 };
 
-/// Amounts counted on the GPU thread, logged per second with the zones.
-enum class Counter : u32 {
-    DownloadBytes,  ///< Buffer data copied back from the host GPU at fences
-    DownloadCopies, ///< Buffer ranges copied back
-    DmaReadBytes,   ///< Guest memory the native MME read with DMA
-    DownloadBytesOnDmaPages, ///< Of DownloadBytes: on pages the MME has DMA-read
-    MethodWrites,   ///< 3D register writes (Maxwell3D::CallMethod below the macro range)
-    SameValueWrites, ///< Of MethodWrites: the register already held the value
-    AcquireChecks,  ///< Semaphore acquires evaluated
-    AcquireWaits,   ///< Of AcquireChecks: not met yet (the channel waits)
-};
-
 /// Device pages (4 KiB) the native MME has DMA-read since start (GPU thread only; filled only
 /// while profiling): which buffer downloads anything on the GPU thread reads back.
 inline std::unordered_set<u64>& DmaReadPages() {
@@ -175,6 +189,8 @@ inline void Report(const char* thread_name = "GPU thread") {
         data.window_start = now;
         data.cpu_start_ns = Common::CurrentThreadCpuTimeNs();
         data.child_ns = 0;
+        HostGpuProfile::accounting.TakeSamples();
+        HostGpuProfile::TakeCounters();
         return;
     }
     const u64 window = now - data.window_start;
@@ -210,6 +226,12 @@ inline void Report(const char* thread_name = "GPU thread") {
     line += fmt::format(" | acquires {:.0f} ({:.0f} waited)",
                         static_cast<double>(data.counters[6]) * 1e9 / window,
                         static_cast<double>(data.counters[7]) * 1e9 / window);
+    const auto rate = [&](Counter counter) {
+        return static_cast<double>(data.counters[static_cast<size_t>(counter)]) * 1e9 / window;
+    };
+    line += fmt::format(" | fast state calls {:.0f}/s | sink writes {:.0f}/s queued {:.0f}/s consumed",
+                        rate(Counter::FastStateCalls), rate(Counter::SinkQueuedWrites),
+                        rate(Counter::SinkConsumedWrites));
     std::string drains;
     for (size_t i = 0; i < data.drain_count.size(); ++i) {
         if (data.drain_count[i] != 0) {
@@ -229,6 +251,20 @@ inline void Report(const char* thread_name = "GPU thread") {
     } else {
         line += fmt::format(" | host_cpu_busy_ms_per_s=unavailable window_wall_ms={:.3f}",
                             static_cast<double>(window) / 1e6);
+    }
+    const auto host_samples = HostGpuProfile::accounting.TakeSamples();
+    for (size_t i = 0; i < host_samples.size(); ++i) {
+        const auto& sample = host_samples[i];
+        line += fmt::format(" | host {} {:.3f} ms ({:.0f}/s)", HostGpuProfile::names[i],
+                            static_cast<double>(sample.nanoseconds) * 1000.0 / window,
+                            static_cast<double>(sample.calls) * 1e9 / window);
+    }
+    const auto host_counters = HostGpuProfile::TakeCounters();
+    for (size_t i = 0; i < host_counters.size(); ++i) {
+        if (host_counters[i] != 0) {
+            line += fmt::format(" | host {} {:.0f}/s", HostGpuProfile::counter_names[i],
+                                static_cast<double>(host_counters[i]) * 1e9 / window);
+        }
     }
     LOG_INFO(HW_GPU, "{} per second:{}", thread_name, line);
     data = {};

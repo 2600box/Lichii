@@ -466,6 +466,25 @@ void Maxwell3D::TraceFirstMethodWrite(u32 method, u32 argument) {
     }
 }
 
+void Maxwell3D::CallStateMethod(Core::System&, u32 method, u32 method_argument) {
+    DEBUG_ASSERT(executing_macro == 0);
+    DEBUG_ASSERT(method < MacroRegistersStart && !execution_mask[method]);
+    RecordWrite(method, method_argument, 1, 1);
+    if (g_trace_first_method_writes) {
+        TraceFirstMethodWrite(method, method_argument);
+    }
+    if (VideoCommon::Nx2Profile::Enabled()) {
+        VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::MethodWrites, 1);
+        if (regs.reg_array[method] == method_argument) {
+            VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::SameValueWrites, 1);
+        }
+    }
+    const u32 argument = ProcessShadowRam(method, method_argument);
+    if (!SkipSameValueWrites() || regs.reg_array[method] != argument) {
+        ProcessDirtyRegisters(method, argument);
+    }
+}
+
 void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument, bool is_last_call) {
     // It is an error to write to a register other than the current macro's ARG register before
     // it has finished execution.

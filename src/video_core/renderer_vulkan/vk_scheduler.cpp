@@ -29,6 +29,8 @@
 #include "video_core/renderer_vulkan/vk_command_pool.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
+#include "video_core/renderer_vulkan/vk_parallel_recorder.h"
+#include "video_core/renderer_vulkan/vk_resolved_batch.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
@@ -45,6 +47,14 @@ std::atomic<u64> g_profile_finish_ns{};
 std::atomic<u64> g_profile_window_start{};
 std::mutex g_profile_end_mutex;
 std::map<std::string, u64> g_profile_ends;
+
+bool ParallelRecordEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_PARALLEL_RECORD");
+        return value && std::string_view{value} == "1";
+    }();
+    return enabled;
+}
 
 void CountRenderPassEnd(const char* file, u32 line) {
     if (!VideoCommon::Nx2Profile::Enabled()) {
@@ -95,6 +105,7 @@ void ReportSubmitCounts() {
 
 void Scheduler::CommandChunk::ExecuteAll(vk::CommandBuffer cmdbuf,
                                          vk::CommandBuffer upload_cmdbuf) {
+    const VideoCommon::HostGpuProfile::Scope profile{VideoCommon::HostGpuProfile::Phase::Worker};
     auto command = first;
     while (command != nullptr) {
         auto next = command->GetNext();
@@ -147,18 +158,46 @@ Scheduler::Scheduler(const Device& device_, StateTracker& state_tracker_)
         }
     }
 
+    if (ParallelRecordEnabled()) {
+        resolved_recorder = std::make_unique<PassRecorder>(
+            [this](std::span<const ResolvedBatch> batches) {
+                if (!parallel_recorder) {
+                    parallel_recorder = std::make_unique<ParallelRecorder>(
+                        device.GetLogical(), device.GetDispatchLoader(), device.GetGraphicsFamily());
+                }
+                master_semaphore->Refresh();
+                auto recorded =
+                    parallel_recorder->RecordPass(batches, master_semaphore->KnownGpuTick());
+                if (!recorded) {
+                    resolved_recorder->NoteFallback(InlineFallbackReason::Budget);
+                    VideoCommon::HostGpuProfile::Add(
+                        VideoCommon::HostGpuProfile::Counter::BudgetFallbacks);
+                }
+                return recorded;
+            },
+            PassRecorder::Limits{.minimum_batches = 2, .retain_inline_state = false});
+        LOG_INFO(Render_Vulkan,
+                 "Parallel record experiment: immutable batches, secondary workers started on demand");
+    }
+    worker_submission_tick = master_semaphore->CurrentTick();
     AcquireNewChunk();
     AllocateWorkerCommandBuffer();
     worker_thread = std::jthread([this](std::stop_token token) { WorkerThread(token); });
 }
 
 Scheduler::~Scheduler() {
-    if (trace_query_pool) {
+    if (trace_query_pool || resolved_recorder) {
         WaitWorker();
         worker_thread.request_stop();
         worker_thread.join();
+        if (parallel_recorder) {
+            parallel_recorder->StopAndJoin();
+        }
         if (trace_gpu_tick != 0) {
             master_semaphore->Wait(trace_gpu_tick);
+        }
+        if (resolved_recorder && last_worker_submitted_tick != 0) {
+            master_semaphore->Wait(last_worker_submitted_tick);
         }
     }
 }
@@ -258,6 +297,12 @@ void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
 }
 
 void Scheduler::WaitWorker() {
+    const VideoCommon::HostGpuProfile::Scope profile{VideoCommon::HostGpuProfile::Phase::Wait};
+    if (resolved_recorder) {
+        Record([this](vk::CommandBuffer) {
+            resolved_recorder->MaterializeInline(InlineFallbackReason::Drain);
+        });
+    }
     DispatchWork();
 
     // Ensure the queue is drained.
@@ -499,16 +544,22 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
     }};
 
     while (!stop_token.stop_requested()) {
+        VideoCommon::Nx2Profile::Report("Vulkan worker");
         std::unique_ptr<CommandChunk> work;
 
         {
             std::unique_lock lk{queue_mutex};
 
             // Wait for work.
-            event_cv.wait(lk, stop_token, [&] {
-                worker_waiting = !TryPopQueue(work);
-                return !worker_waiting;
-            });
+            {
+                const VideoCommon::Nx2Profile::Scope idle{VideoCommon::Nx2Profile::Zone::Idle};
+                const VideoCommon::HostGpuProfile::Scope profile{
+                    VideoCommon::HostGpuProfile::Phase::Wait};
+                event_cv.wait(lk, stop_token, [&] {
+                    worker_waiting = !TryPopQueue(work);
+                    return !worker_waiting;
+                });
+            }
             worker_waiting = false;
 
             // If we've been asked to stop, we're done.
@@ -542,6 +593,7 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
 }
 
 void Scheduler::AllocateWorkerCommandBuffer() {
+    const VideoCommon::HostGpuProfile::Scope profile{VideoCommon::HostGpuProfile::Phase::Pool};
     current_cmdbuf = vk::CommandBuffer(command_pool->Commit(), device.GetDispatchLoader());
     current_cmdbuf.Begin({
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -558,6 +610,10 @@ void Scheduler::AllocateWorkerCommandBuffer() {
     });
     if (trace_query_pool && !trace_gpu_failed) {
         TraceGpuSubmission();
+    }
+    if (resolved_recorder) {
+        resolved_recorder->BeginSubmission(worker_submission_tick, current_cmdbuf);
+        current_cmdbuf = resolved_recorder->CommandBuffer();
     }
 }
 
@@ -791,6 +847,10 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
         if (trace_query_pool) {
             trace_work = {};
         }
+        if (resolved_recorder) {
+            ASSERT(worker_submission_tick == signal_value);
+            resolved_recorder->EndSubmission();
+        }
         cmdbuf.End();
 
         if (on_submit) {
@@ -815,6 +875,8 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
             vk::Check(result);
             break;
         }
+        last_worker_submitted_tick = signal_value;
+        worker_submission_tick = signal_value + 1;
         if (trace_frame_end != 0) {
             if (trace_gpu_sampling) {
                 trace_gpu_pending = true;

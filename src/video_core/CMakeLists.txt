@@ -219,6 +219,10 @@ add_library(video_core STATIC
     renderer_vulkan/vk_resource_pool.h
     renderer_vulkan/vk_scheduler.cpp
     renderer_vulkan/vk_scheduler.h
+    renderer_vulkan/vk_resolved_batch.cpp
+    renderer_vulkan/vk_resolved_batch.h
+    renderer_vulkan/vk_parallel_recorder.cpp
+    renderer_vulkan/vk_parallel_recorder.h
     renderer_vulkan/vk_shader_util.cpp
     renderer_vulkan/vk_shader_util.h
     renderer_vulkan/vk_staging_buffer_pool.cpp
