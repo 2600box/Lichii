@@ -1118,9 +1118,10 @@ TEST_CASE("Ocarina indexed uniform constant loads keep their U8 and U16 widths",
     const auto guarded = LowerToMaxwell(std::array{negative, Exit});
     INFO(guarded.error);
     REQUIRE(guarded);
-    const u64 load = 0xef90000000000000ULL | 223 | (u64{231} << 8) | (u64{0xffff} << 20) | (u64{4} << 36);
-    CHECK(std::ranges::any_of(guarded.instructions,
-                              [&](u64 word) { return (word & ~0xf0000ULL) == load; }));
+    const u64 load = 0xef90000000060000ULL | 223 | (u64{231} << 8) | (u64{0xffff} << 20) | (u64{4} << 36);
+    CHECK(std::ranges::find(guarded.instructions, load) != guarded.instructions.end());
+    const u64 transfer = 0x38f0000000070000ULL | (u64{239} << 8) | (u64{1U << 6} << 20);
+    CHECK(std::ranges::find(guarded.instructions, transfer) != guarded.instructions.end());
     // An indexed load can have any immediate: the register can align it (ULDC.32 at UR15 + 0x29).
     const Instruction indexed_word{{0x0f077abb, 0x01000a40, 0x08000800, 0x000fc600}};
     const auto word = LowerToMaxwell(std::array{indexed_word, Exit});
