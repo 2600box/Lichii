@@ -527,6 +527,10 @@ private:
                                                bool native_pointer = false,
                                                bool table_pointer = false) const;
 
+    void TraceTablePointer(bool compute, size_t stage, size_t ssbo_index, u32 cbuf_index,
+                           u32 cbuf_offset, u32 indirect_offset, GPUVAddr holder,
+                           const Binding& binding);
+
     [[nodiscard]] TextureBufferBinding GetTextureBufferBinding(GPUVAddr gpu_addr, u32 size,
                                                                PixelFormat format);
 
@@ -682,6 +686,8 @@ private:
     std::vector<MultiRangeSegment> graphics_segments;
     std::vector<MultiRangeSegment> compute_segments;
     u64 frame_tick = 0;
+    /// EDEN_NX2_TABLE_POINTER_TRACE: last table entry and size bound per table pointer slot.
+    std::unordered_map<u64, std::pair<GPUVAddr, u32>> traced_table_pointers;
     u64 total_used_memory = 0;
     u64 buffer_bytes = 0; ///< The buffers' own size (total_used_memory may be the device's)
     u64 minimum_memory = 0;
