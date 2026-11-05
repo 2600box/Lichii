@@ -181,6 +181,25 @@ void BufferCache<P>::UnmapGPUMemory(size_t as_id, GPUVAddr gpu_addr, size_t size
 template <class P>
 void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu_data) {
     Nx2NoteListHostWrite(device_addr, size);
+    // The written range lies within its pages: when they hold no GPU-written data, both lookups
+    // below find nothing, so one lookup answers them.
+    if (Nx2Perf::Enabled()) {
+        const DAddr page_begin = Common::AlignDown(device_addr, DEVICE_PAGESIZE);
+        const DAddr page_end = Common::AlignUp(device_addr + size, DEVICE_PAGESIZE);
+        if (!gpu_modified_ranges.Intersects(page_begin, page_end - page_begin)) {
+            if (!Nx2Perf::Verify()) {
+                memory_tracker.MarkRegionAsCpuModified(device_addr, size);
+                MarkVertexBuffersStale(device_addr, size);
+                return;
+            }
+            static std::atomic<u32> logged{};
+            if (IsRegionGpuModified(device_addr, size) &&
+                logged.fetch_add(1, std::memory_order_relaxed) < 64) {
+                LOG_ERROR(HW_GPU, "Nx2Perf texture-writes: GPU-written data in {:#x}+{:#x} outside its pages",
+                          device_addr, size);
+            }
+        }
+    }
     if (IsRegionGpuModified(device_addr, size)) {
         ClearDownload(device_addr, size);
         gpu_modified_ranges.Subtract(device_addr, size);

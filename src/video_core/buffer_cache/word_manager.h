@@ -7,17 +7,22 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <limits>
 #include <span>
 #include <utility>
 #include <vector>
 
+#include <boost/container/small_vector.hpp>
+
 #include "common/alignment.h"
 #include "common/common_funcs.h"
 #include "common/common_types.h"
 #include "common/div_ceil.h"
+#include "common/logging.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/nx2_perf.h"
 
 namespace VideoCommon {
 
@@ -36,6 +41,9 @@ enum class Type {
 
 template <class DeviceTracker, size_t stack_words, size_t size_bytes>
 struct WordManager {
+    /// Pages whose tracking changes in one call: a few runs, kept off the heap.
+    using CollectedRanges = boost::container::small_vector<std::pair<VAddr, size_t>, 16>;
+
     static constexpr size_t num_words = Common::DivCeil(size_bytes, BYTES_PER_WORD);
     static_assert(num_words <= 64, "clean_words holds a bit per word");
 
@@ -123,7 +131,7 @@ struct WordManager {
         std::span<u64> state_words = Span(type);
         [[maybe_unused]] std::span<u64> untracked_words = Span(Type::Untracked);
         [[maybe_unused]] std::span<u64> cached_words = Span(Type::CachedCPU);
-        std::vector<std::pair<VAddr, u64>> ranges;
+        CollectedRanges ranges;
         IterateWords(dirty_addr - cpu_addr, size, [&](size_t index, u64 mask) {
             if (type == Type::CPU || type == Type::CachedCPU) {
                 CollectChangedRanges(!enable, index, untracked_words[index], mask, ranges);
@@ -171,7 +179,7 @@ struct WordManager {
             func(cpu_addr + pending_offset * BYTES_PER_PAGE,
                  (pending_pointer - pending_offset) * BYTES_PER_PAGE);
         };
-        std::vector<std::pair<VAddr, u64>> ranges;
+        CollectedRanges ranges;
         IterateWords(offset, size, [&](size_t index, u64 mask) {
             if (type == Type::GPU)
                 mask &= ~untracked_words[index];
@@ -256,7 +264,7 @@ struct WordManager {
         auto const cached_words = Span(Type::CachedCPU);
         auto const untracked_words = Span(Type::Untracked);
         auto const cpu_words = Span(Type::CPU);
-        std::vector<std::pair<VAddr, u64>> ranges;
+        CollectedRanges ranges;
         for (u64 word_index = 0; word_index < num_words; ++word_index) {
             const u64 cached_bits = cached_words[word_index];
             CollectChangedRanges(false, word_index, untracked_words[word_index], cached_bits, ranges);
@@ -276,7 +284,7 @@ struct WordManager {
     /// @param current_bits   Current state of the word
     /// @param new_bits       New state of the word
     /// @tparam add_to_tracker True when the tracker should start tracking the new pages
-    void CollectChangedRanges(bool add_to_tracker, u64 word_index, u64 current_bits, u64 new_bits, std::vector<std::pair<VAddr, u64>>& out_ranges) const {
+    void CollectChangedRanges(bool add_to_tracker, u64 word_index, u64 current_bits, u64 new_bits, CollectedRanges& out_ranges) const {
         u64 changed_bits = (add_to_tracker ? current_bits : ~current_bits) & new_bits;
         VAddr addr = cpu_addr + word_index * BYTES_PER_WORD;
         IteratePages(changed_bits, [&](size_t offset, size_t size) {
@@ -284,10 +292,17 @@ struct WordManager {
         });
     }
 
-    void ApplyCollectedRanges(std::vector<std::pair<VAddr, u64>>& ranges, int delta) const {
+    void ApplyCollectedRanges(CollectedRanges& ranges, int delta) const {
         if (ranges.empty())
             return;
         std::sort(ranges.begin(), ranges.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+        if (Nx2Perf::Enabled() && !Nx2Perf::Verify()) {
+            CoalesceInPlace(ranges);
+            tracker->UpdatePagesCachedBatch(
+                std::span<const std::pair<VAddr, size_t>>(ranges.data(), ranges.size()), delta);
+            ranges.clear();
+            return;
+        }
         // Coalesce adjacent/contiguous ranges
         std::vector<std::pair<VAddr, size_t>> coalesced;
         coalesced.reserve(ranges.size());
@@ -303,9 +318,31 @@ struct WordManager {
             }
         }
         coalesced.emplace_back(cur_addr, cur_size);
+        if (Nx2Perf::Enabled()) {
+            CoalesceInPlace(ranges);
+            static std::atomic<u32> logged{};
+            if (!std::ranges::equal(ranges, coalesced) &&
+                logged.fetch_add(1, std::memory_order_relaxed) < 64) {
+                LOG_ERROR(HW_GPU, "Nx2Perf texture-writes: tracker runs from {:#x} coalesced differently",
+                          coalesced.front().first);
+            }
+        }
         // Use batch API to reduce lock acquisitions and contention.
         tracker->UpdatePagesCachedBatch(coalesced, delta);
         ranges.clear();
+    }
+
+    /// Merges the contiguous neighbours of sorted, disjoint runs where they lie (no copy).
+    static void CoalesceInPlace(CollectedRanges& ranges) noexcept {
+        size_t last = 0;
+        for (size_t i = 1; i < ranges.size(); ++i) {
+            if (ranges[last].first + ranges[last].second == ranges[i].first) {
+                ranges[last].second += ranges[i].second;
+            } else {
+                ranges[++last] = ranges[i];
+            }
+        }
+        ranges.resize(last + 1);
     }
 
     /// @brief Notify tracker about changes in the CPU tracking state of a word in the buffer
