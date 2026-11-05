@@ -517,17 +517,12 @@ std::optional<u32> FrameDump::BeginProbe() {
     return query;
 }
 
-void FrameDump::EndProbe(u32 query, bool mesh, bool indirect, u32 first, u32 elements,
-                         u32 instances) {
+void FrameDump::EndProbe(u32 query, Probe probe) {
     scheduler.Record([pool = *probe_pool, query](vk::CommandBuffer cmdbuf) {
         cmdbuf.EndQuery(pool, query);
     });
-    Probe& probe = probes[query];
-    probe.mesh = mesh;
-    probe.indirect = indirect;
-    probe.first = first;
-    probe.elements = elements;
-    probe.instances = instances;
+    probe.draw = probes[query].draw;
+    probes[query] = probe;
 }
 
 void FrameDump::NoteSkipped(bool compute, u64 program, GPUVAddr rt0, std::string_view reason) {
@@ -889,9 +884,11 @@ void FrameDump::TickFrame() {
             for (size_t index = 0; result == VK_SUCCESS && index < probes.size(); ++index) {
                 const Probe& probe = probes[index];
                 Enqueue({.tags = fmt::format(
-                             R"({{"kind":"draw","draw":{},"samples":{},"mesh":{},"indirect":{},"first":{},"elements":{},"instances":{}}})",
+                             R"({{"kind":"draw","draw":{},"samples":{},"mesh":{},"indirect":{},"first":{},"elements":{},"instances":{},"alpha_test":{},"alpha_ref":{},"alpha_to_coverage":{},"host_alpha_to_coverage":{},"color0":{},"kill":{}}})",
                              probe.draw, samples[index], probe.mesh, probe.indirect, probe.first,
-                             probe.elements, probe.instances)});
+                             probe.elements, probe.instances, probe.alpha_test, probe.alpha_ref,
+                             probe.alpha_to_coverage, probe.host_alpha_to_coverage, probe.color0,
+                             probe.kill)});
             }
             if (result != VK_SUCCESS) {
                 LOG_ERROR(Render_Vulkan, "Frame dump: reading the draw probes failed ({})",

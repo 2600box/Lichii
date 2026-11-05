@@ -490,12 +490,29 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     }
     if (probe) {
         const auto& draw_state = maxwell3d->draw_manager.draw_state;
-        frame_dump.EndProbe(*probe, mesh_draw, is_indirect,
-                            is_indexed ? draw_state.index_buffer.first
-                                       : draw_state.vertex_buffer.first,
-                            is_indexed ? draw_state.index_buffer.count
-                                       : draw_state.vertex_buffer.count,
-                            draw_state.instance_count);
+        const auto& regs = maxwell3d->regs;
+        const bool alpha_to_coverage = regs.anti_alias_alpha_control.alpha_to_coverage != 0;
+        const bool dynamic_alpha_to_coverage =
+            device.IsExtExtendedDynamicState3EnablesSupported() &&
+            device.SupportsDynamicState3AlphaToCoverageEnable() &&
+            pipeline->UsesExtendedDynamicState();
+        frame_dump.EndProbe(
+            *probe,
+            {
+                .mesh = mesh_draw,
+                .indirect = is_indirect,
+                .first = is_indexed ? draw_state.index_buffer.first : draw_state.vertex_buffer.first,
+                .elements = is_indexed ? draw_state.index_buffer.count : draw_state.vertex_buffer.count,
+                .instances = draw_state.instance_count,
+                .alpha_test = regs.alpha_test_enabled ? static_cast<u32>(regs.alpha_test_func) : 0,
+                .alpha_ref = regs.alpha_test_ref,
+                .alpha_to_coverage = alpha_to_coverage,
+                .host_alpha_to_coverage = dynamic_alpha_to_coverage
+                                              ? alpha_to_coverage_enable
+                                              : alpha_to_coverage && pipeline->SupportsAlphaToCoverage(),
+                .color0 = pipeline->SupportsAlphaToCoverage(),
+                .kill = pipeline->FragmentCanDiscard(),
+            });
     }
     submitted = true;
     static u32 native_capture_count{};
@@ -2818,7 +2835,10 @@ void RasterizerVulkan::UpdateDepthClampEnable(Tegra::Engines::Maxwell3D::Regs& r
 }
 
 void RasterizerVulkan::UpdateAlphaToCoverageEnable(Tegra::Engines::Maxwell3D::Regs& regs) {
-    if (!state_tracker.TouchAlphaToCoverageEnable()) {
+    // The enable also depends on the pipeline writing colour 0, which the dirty flag does not
+    // track. EDEN_NX2_A2C_REFRESH=1 records it on every draw so it never outlives its pipeline.
+    static const bool refresh{std::getenv("EDEN_NX2_A2C_REFRESH") != nullptr};
+    if (!state_tracker.TouchAlphaToCoverageEnable() && !refresh) {
         return;
     }
     if (!device.SupportsDynamicState3AlphaToCoverageEnable()) {
@@ -2827,6 +2847,7 @@ void RasterizerVulkan::UpdateAlphaToCoverageEnable(Tegra::Engines::Maxwell3D::Re
     GraphicsPipeline* const pipeline = pipeline_cache.CurrentGraphicsPipeline();
     const bool enable = pipeline != nullptr && pipeline->SupportsAlphaToCoverage() &&
                         regs.anti_alias_alpha_control.alpha_to_coverage != 0;
+    alpha_to_coverage_enable = enable;
     scheduler.Record([enable](vk::CommandBuffer cmdbuf) {
         cmdbuf.SetAlphaToCoverageEnableEXT(enable ? VK_TRUE : VK_FALSE);
     });

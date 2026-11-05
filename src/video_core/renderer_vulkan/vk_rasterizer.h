@@ -220,6 +220,7 @@ private:
     void UpdateLogicOpEnable(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateDepthClampEnable(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateAlphaToCoverageEnable(Tegra::Engines::Maxwell3D::Regs& regs);
+    bool alpha_to_coverage_enable{}; ///< Last value recorded with SetAlphaToCoverageEnableEXT
     void UpdateAlphaToOneEnable(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateFrontFace(Tegra::Engines::Maxwell3D::Regs& regs);
     void UpdateStencilOp(Tegra::Engines::Maxwell3D::Regs& regs);

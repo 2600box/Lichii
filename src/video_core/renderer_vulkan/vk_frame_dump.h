@@ -97,7 +97,22 @@ public:
     /// Starts counting the samples the draw about to be recorded passes; returns the query to end
     /// after it. Sampled captures only, and not while the game counts samples itself.
     std::optional<u32> BeginProbe();
-    void EndProbe(u32 query, bool mesh, bool indirect, u32 first, u32 elements, u32 instances);
+    struct Probe {
+        u32 draw;
+        bool mesh;
+        bool indirect;
+        u32 first;
+        u32 elements;
+        u32 instances;
+        u32 alpha_test; ///< Comparison op while the alpha test is enabled, else 0
+        f32 alpha_ref;
+        bool alpha_to_coverage;      ///< As the guest set it
+        bool host_alpha_to_coverage; ///< As last given to the host
+        bool color0;                 ///< The fragment program writes colour 0
+        bool kill;                   ///< The fragment program can discard
+    };
+    /// Ends the query; the draw index comes from BeginProbe.
+    void EndProbe(u32 query, Probe probe);
     /// Records a draw or dispatch dropped because its program or pipeline is unavailable.
     void NoteSkipped(bool compute, u64 program, GPUVAddr rt0, std::string_view reason);
     /// Captures the current pass; returns true when copies were recorded.
@@ -179,14 +194,6 @@ private:
     u64 frame{};
 
     std::ofstream manifest;
-    struct Probe {
-        u32 draw;
-        bool mesh;
-        bool indirect;
-        u32 first;
-        u32 elements;
-        u32 instances;
-    };
     static constexpr u32 MAX_PROBES = 8192;
     vk::QueryPool probe_pool;
     std::vector<Probe> probes;
