@@ -17,6 +17,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "memory_manager.h"
 #include "video_core/guest_memory.h"
+#include "video_core/nx2_profile.h"
 #include "video_core/nx2.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/invalidation_accumulator.h"
@@ -640,26 +641,61 @@ size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
         entry = {unique_identifier + 1, gpu_addr, size, serial, result};
         return result;
     }
-    // A run is followed this far from its page: past the 8 MiB storage bindings ask for.
-    constexpr size_t RunCap = size_t{16} << 20;
+    // The run from the page start is walked only as far as asked so far: a miss costs about what
+    // a walk from the address does.
     struct Run {
         size_t owner;
         GPUVAddr page;
         u64 serial;
         GPUVAddr end;
+        bool broken; ///< The run ends at end; otherwise it was only walked that far
+    };
+    struct Stats {
+        u64 hits, misses, extends, fallbacks, last_report_ns, last_serial;
     };
     thread_local std::array<Run, 1024> runs{};
+    thread_local Stats stats{};
     const GPUVAddr page = gpu_addr & ~big_page_mask;
+    const GPUVAddr limit = gpu_addr + size;
     Run& run = runs[(page >> big_page_bits) % runs.size()];
+    const auto walk = [&] {
+        const size_t length = MaxContinuousRangeUncached(page, limit - page);
+        run = {unique_identifier + 1, page, serial, page + length, page + length < limit};
+    };
     if (run.owner != unique_identifier + 1 || run.page != page || run.serial != serial) {
-        run = {unique_identifier + 1, page, serial, page + MaxContinuousRangeUncached(page, RunCap)};
+        ++stats.misses;
+        walk();
+    } else if (!run.broken && run.end < limit) {
+        ++stats.extends;
+        walk();
+    } else {
+        ++stats.hits;
     }
     size_t result;
-    if (run.end > gpu_addr && (gpu_addr + size <= page + RunCap || run.end < page + RunCap)) {
+    if (run.end > gpu_addr) {
         // The run from the page start passes gpu_addr, so the run from gpu_addr ends there too.
         result = (std::min<size_t>)(size, run.end - gpu_addr);
     } else {
+        ++stats.fallbacks;
         result = MaxContinuousRangeUncached(gpu_addr, size);
+    }
+    if (VideoCommon::Nx2Profile::Enabled()) [[unlikely]] {
+        const u64 now = VideoCommon::Nx2Profile::Now();
+        if (stats.last_report_ns == 0) {
+            stats.last_report_ns = now;
+            stats.last_serial = serial;
+        } else if (now - stats.last_report_ns >= 10'000'000'000ULL) {
+            const double seconds = static_cast<double>(now - stats.last_report_ns) / 1e9;
+            LOG_INFO(HW_GPU,
+                     "MaxContinuousRange per second: hits {:.0f}, misses {:.0f}, extends {:.0f}, "
+                     "fallbacks {:.0f}, page table changes {:.0f}",
+                     static_cast<double>(stats.hits) / seconds,
+                     static_cast<double>(stats.misses) / seconds,
+                     static_cast<double>(stats.extends) / seconds,
+                     static_cast<double>(stats.fallbacks) / seconds,
+                     static_cast<double>(serial - stats.last_serial) / seconds);
+            stats = {0, 0, 0, 0, now, serial};
+        }
     }
     if (mode == 2) [[unlikely]] {
         const size_t expected = MaxContinuousRangeUncached(gpu_addr, size);
