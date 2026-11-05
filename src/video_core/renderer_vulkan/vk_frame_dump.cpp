@@ -493,6 +493,15 @@ void FrameDump::NoteLaunch(u64 shader_hash, const std::array<u32, 3>& grid,
     Enqueue({.tags = tags + "}"});
 }
 
+void FrameDump::NoteSkipped(bool compute, u64 program, GPUVAddr rt0, std::string_view reason) {
+    std::string text{reason};
+    std::ranges::replace(text, '"', '\'');
+    std::ranges::replace(text, '\\', '/');
+    Enqueue({.tags = fmt::format(
+                 R"({{"kind":"skipped","compute":{},"after_draws":{},"after_dispatches":{},"program":"{:#x}","rt0":"{:#x}","reason":"{}"}})",
+                 compute, draws, dispatches, program, rt0, text)});
+}
+
 void FrameDump::NoteDraw(std::span<const u64> shader_hashes) {
     ++draws;
     for (const u64 hash : shader_hashes) {

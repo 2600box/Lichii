@@ -381,6 +381,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         const auto& regs = maxwell3d->regs;
         const u64 vs = (u64{regs.pipelines[1].reserved[0] & 0xff} << 32) | regs.pipelines[1].reserved[1];
         const u64 ps = (u64{regs.pipelines[5].reserved[0] & 0xff} << 32) | regs.pipelines[5].reserved[1];
+        if (frame_dump.Capturing()) {
+            frame_dump.NoteSkipped(false, ps != 0 ? ps : vs, regs.rt[0].Address(), reason);
+        }
         if (seen.size() < 64 && seen.emplace(vs, ps, reason).second) {
             LOG_WARNING(HW_GPU, "Draw skipped ({}): vs={:#x} ps={:#x} rt0={:#x} {}x{}", reason, vs, ps,
                         regs.rt[0].Address(), regs.rt[0].width, regs.rt[0].height);
@@ -1311,7 +1314,19 @@ void RasterizerVulkan::DispatchCompute() {
         frame_dump.DrainIfFull();
     }
 
-    ComputePipeline* const pipeline{pipeline_cache.CurrentComputePipeline()};
+    ComputePipeline* const pipeline{[&] {
+        try {
+            return pipeline_cache.CurrentComputePipeline();
+        } catch (const Shader::Exception& error) {
+            if (frame_dump.Capturing()) {
+                frame_dump.NoteSkipped(true,
+                                       kepler_compute->regs.code_loc.Address() +
+                                           kepler_compute->launch_description.program_start,
+                                       0, error.what());
+            }
+            throw;
+        }
+    }()};
     if (!pipeline) {
         if (kepler_compute->IsNativeMode()) throw Shader::RuntimeError("Native compute pipeline unavailable");
         return;

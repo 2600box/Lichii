@@ -12,6 +12,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <tuple>
 #include <vector>
@@ -93,6 +94,8 @@ public:
     /// Returns true when copies were recorded, which ends the current render pass.
     bool BeginPass(const void* framebuffer, std::span<ImageView* const> colors);
     void NoteDraw(std::span<const u64> shader_hashes);
+    /// Records a draw or dispatch dropped because its program or pipeline is unavailable.
+    void NoteSkipped(bool compute, u64 program, GPUVAddr rt0, std::string_view reason);
     /// Captures the current pass; returns true when copies were recorded.
     bool EndPass();
     void CaptureDispatch(u64 shader_hash, std::span<ImageView* const> written);
