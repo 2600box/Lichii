@@ -74,6 +74,16 @@ using VideoCommon::ImageViewType;
 
 namespace {
 
+// EXPERIMENT EDEN_NX2_INVALIDATE_BEFORE_DISPATCH=1: apply collected guest CPU writes before every
+// dispatch and draw (=list does it once per command list, in DmaPusher).
+bool InvalidateBeforeUse() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_INVALIDATE_BEFORE_DISPATCH");
+        return value != nullptr && value[0] != '0' && std::string_view{value} != "list";
+    }();
+    return enabled;
+}
+
 /// read_gpu_memory: the first address space (the bound channel's first) that maps the whole range,
 /// read as the GPU reads it, without flushing GPU caches.
 VideoCore::Nx2Debug::GpuReadResult ReadGpuMemory(std::span<Tegra::MemoryManager* const> spaces,
@@ -403,6 +413,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         }
     };
     namespace Profile = VideoCommon::Nx2Profile;
+    if (InvalidateBeforeUse()) {
+        gpu.InvalidateGPUCache();
+    }
     {
         Profile::Scope scope{Profile::Zone::FlushWork};
         FlushWork();
@@ -470,6 +483,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         return;
     }
 
+    TracePendingCpuWrites(false, pipeline->ShaderHashes());
     TraceRenderState(is_indexed, "configured", texture_cache.GetFramebuffer());
     if (frame_dump.Capturing()) {
         FrameDumpPass(texture_cache.GetFramebuffer());
@@ -1344,6 +1358,9 @@ void RasterizerVulkan::Clear(u32 layer_count) {
 
 void RasterizerVulkan::DispatchCompute() {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Compute};
+    if (InvalidateBeforeUse()) {
+        gpu.InvalidateGPUCache();
+    }
     FlushWork();
     gpu_memory->FlushCaching();
     if (frame_dump.Capturing()) {
@@ -1380,6 +1397,7 @@ void RasterizerVulkan::DispatchCompute() {
         }
         frame_dump.CaptureDispatch(pipeline->ShaderHash(), written);
     };
+    TracePendingCpuWrites(true, std::array{pipeline->ShaderHash()});
     if (frame_dump.CapturingSampled()) {
         boost::container::small_vector<FrameDump::Sampled, 16> sampled;
         for (const auto& image : pipeline->SampledImages()) {
@@ -1857,6 +1875,36 @@ void RasterizerVulkan::TraceRenderState(bool is_indexed, const char* outcome,
     LOG_DEBUG(Render_Vulkan, "Render trace condition: address={:#x} mode={} override={}",
               regs.render_enable.Address(), static_cast<u32>(regs.render_enable.mode),
               static_cast<u32>(regs.render_enable_override));
+}
+
+void RasterizerVulkan::TracePendingCpuWrites(bool compute, std::span<const u64> shader_hashes) {
+    // Guest CPU writes into GPU-written buffer memory are collected, and applied to the host
+    // buffers only at the next fence or cache invalidation. A hit here reads the older bytes.
+    static const bool enabled = std::getenv("EDEN_NX2_PENDING_WRITE_TRACE") != nullptr;
+    if (!enabled) {
+        return;
+    }
+    static constexpr u64 max_lines = 100000;
+    static u64 lines{};
+    buffer_cache.ForEachBoundBuffer(compute, [&](u32 stage, bool storage, u32 index, bool written,
+                                                 const auto& binding, u32 bound_size,
+                                                 const auto*, u32) {
+        if (lines > max_lines || !gpu.HasPendingCPUWrites(binding.device_addr, bound_size)) {
+            return;
+        }
+        if (++lines > max_lines) {
+            LOG_INFO(HW_GPU, "Pending write trace stopped after {} lines", max_lines);
+            return;
+        }
+        const size_t program = compute ? 0 : stage + 1;
+        LOG_INFO(HW_GPU,
+                 "Pending CPU write frame={} {} shader={:016x} stage={} {}[{}]{} addr={:#x} "
+                 "device={:#x} size={:#x}",
+                 render_trace_frame, compute ? "dispatch" : "draw",
+                 program < shader_hashes.size() ? shader_hashes[program] : 0, stage,
+                 storage ? "ssbo" : "cbuf", index, written ? " written" : "", binding.gpu_addr,
+                 binding.device_addr, bound_size);
+    });
 }
 
 bool RasterizerVulkan::FrameDumpBuffers(bool compute, std::span<const u64> shader_hashes) {
