@@ -135,7 +135,7 @@ server is on but idle, its thread sleeps in `epoll`/IOCP.
 | `capture_frame` | Relaunch with `EDEN_NX2_FRAME_DUMP`, owner touches `capture.now`, agent copies the dump | Capture the next frame now, sampled textures and bound buffers optional, get the manifest summary back; `capture_image` returns any pass PNG | 1 |
 | `reject_shaders` | Rebuild the env, relaunch, replay to the spot, once per bisection step | Reject or restore hashes live; bisection becomes a loop of reject, screenshot | 1 |
 | `pause`, `resume`, `step_frames` | Not possible | Freeze on the broken frame, capture it, step one present | 2 |
-| `input` (buttons, sticks, timed sequences) | Owner plays to the spot | Agent walks to the spot itself and replays a repro | 2 |
+| `input`, `input_sequence` (buttons, sticks, frame-timed sequences) | Owner plays to the spot | Agent walks to the spot itself and replays a repro (done) | 2 |
 | `shaders` (inventory) | Shader dump and offline sweep | List loaded programs: key, hash, stage, address, lowered or rejected with the error | 2 |
 | `switches` (live `EDEN_NX2_*`) | Relaunch per switch | Toggle the observer switches live (classification below) | 2 |
 | `read_memory`, `search_memory`, `read_gpu_memory` | GDB stub session or log prints plus a rebuild | Read a range by address, find known values in the heap (done) | 3 |
@@ -275,6 +275,47 @@ How the reads are safe:
   flush the GPU caches, so the result is what guest memory holds, not data that is still only in
   GPU buffers.
 
+### Input (implemented)
+
+**`input`** `{buttons?, left_stick?, right_stick?, frames, timeout_s?}` holds the buttons and
+sticks for `frames` presented frames and then releases them. It returns when they are done.
+**`input_sequence`** `{steps: [{buttons?, left_stick?, right_stick?, frames}, ...], timeout_s?}`
+runs the steps back to back, at most 1000 steps and 36000 frames per call. A step with no
+buttons and no sticks injects nothing, so it works as a pause between moves.
+
+- **Buttons** are `A B X Y L R ZL ZR Plus Minus Up Down Left Right StickL StickR` (the
+  `NpadButton` names). Home and Capture are not offered: they would leave the game. Unknown
+  names and unknown step keys are refused, so a typo fails instead of doing nothing.
+- **Sticks** are `[x, y]` in -1..1, up is +y, scaled by `HID_JOYSTICK_MAX`.
+
+Where it hooks in: `EmulatedController::SetInputInjector` installs a function that
+`GetNpadButtons` and `GetSticks` call while it is set
+(`src/hid_core/frontend/emulated_controller.cpp`). The npad service reads those two getters on
+every update (`src/hid_core/resources/npad/npad.cpp:449`). Injected buttons are ORed into the
+owner's, and an injected stick replaces the owner's stick and its `StickL*` or `StickR*`
+direction bits (threshold half of full scale, like a real stick). It changes no mapping, profile
+or setting, so it works with whatever the owner has mapped and leaves nothing behind. The input
+goes to player 1, or to the handheld controller when player 1 is not connected; the result names
+which. When no injector is installed, each getter costs one atomic load.
+
+Timing is by presents, not wall time. `RunInput` starts the script at `g_nx2_present_count + 1`,
+the next present. The injector looks up the active step from the present count at every read
+(`InputAt`), so a step changes at the first npad update after its present: the npad updates
+every 1 ms (`src/hid_core/resource_manager.cpp:48`). A slow frame stretches the step in time but
+not in frames, so the same sequence moves the camera the same way on every run.
+
+Release: the injector returns nothing from the end of the last step on, so the input ends on its
+exact frame even before the handler removes it. The handler removes it on every exit path
+(`SCOPE_EXIT`): when the steps are done; on timeout, when frames stop for `timeout_s` (default
+`frames / 20 + 10`, at most 900); when the game shuts down; and when the client disconnects. The
+transport gives every handler a `ClientGone` probe, a non-blocking peek at the request's socket
+(`nx2_debug_server.cpp`), which the wait polls every 2 ms. The adapter waits as long as the
+emulator's default timeout, so it does not drop a long sequence early.
+
+Use it when the owner has put the controller down: injected buttons add to whatever the owner
+presses. For an A/B test, run the same `input_sequence` from the same spot under each variant
+(for example with a `reject_shaders` change in between), then compare screenshots or captures.
+
 ### Phase 2: control and input (about 4 to 5 days)
 
 - **pause, resume, step_frames.** The core has `System::Pause` and `Run` (`src/core/core.cpp:279`).
@@ -284,15 +325,7 @@ How the reads are safe:
   pause button uses. `step_frames {n}` resumes, waits until `g_nx2_present_count` advances by
   `n`, then pauses. That is present-granular, not exact, because the GPU drains a frame or two
   behind the CPU. Use a capture to get an exact frame.
-- **input.** Inject at `hid_core`'s `EmulatedController`
-  (`src/hid_core/frontend/emulated_controller.h:505`, private `SetButton` and `SetStick`)
-  with a debug overlay: injected buttons are ORed in, and an injected stick replaces the real one
-  while it is held. This works whatever the owner's mapping is. The `VirtualGamepad` engine
-  (`src/input_common/drivers/virtual_gamepad.h:51`) only reaches the game when the player's
-  profile maps to it, and `EDEN_NX2_KEY_SCRIPT` (`src/yuzu_cmd/yuzu.cpp:599`) presses
-  keyboard keys in `eden-cli` only. The tool takes `{buttons, stick_l, stick_r, hold_ms}` and a
-  sequence form `[{at_ms, ...}]`, timed by presents, not wall time, so a slow frame does not
-  shift the input.
+- **input** and **input_sequence** are done; see "Input".
 - **shaders.** An inventory from `ShaderCache::lookup_cache` (key, hash, size, address) and
   `rejected_native` (address plus the exception message), copied on the rasterizer thread like
   the reject change. Each entry carries its stage and whether it was lowered, rejected by the
@@ -351,6 +384,8 @@ once (`EDEN_NX2_KEY_RECORD` already records keys in `eden-cli`) and replayed aft
        --call '{"method":"screenshot","params":{"height":1080}}' --out C:/lx/shot.png
    $PY -I C:/lx/src/tools/nx2/debug_mcp.py --server 127.0.0.1:6545 \
        --call '{"method":"reject_shaders","params":{"hashes":["3ddfb1d7621c4755"]}}'
+   $PY -I C:/lx/src/tools/nx2/debug_mcp.py --server 127.0.0.1:6545 \
+       --call '{"method":"input_sequence","params":{"steps":[{"right_stick":[1,0],"frames":60},{"frames":30}]}}'
    ```
 
    The request is `{"method": <tool>, "params": {...}}`, the same format the socket uses. Adapter-only

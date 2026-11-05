@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <limits>
 #include <thread>
@@ -24,13 +25,14 @@
 namespace {
 
 using namespace std::chrono_literals;
+using Core::Nx2Debug::ClientGone;
 using Core::Nx2Debug::Handlers;
 using nlohmann::json;
 
 Handlers EchoHandlers() {
     return {
-        {"echo", [](const json& params) { return params; }},
-        {"fail", [](const json&) -> json { throw std::runtime_error{"broken"}; }},
+        {"echo", [](const json& params, const ClientGone&) { return params; }},
+        {"fail", [](const json&, const ClientGone&) -> json { throw std::runtime_error{"broken"}; }},
     };
 }
 
@@ -325,4 +327,88 @@ TEST_CASE("Debug control hands GPU reads to the rasterizer once", "[core][nx2_de
     REQUIRE_FALSE(VideoCore::Nx2Debug::HasRequests());
     REQUIRE_FALSE(VideoCore::Nx2Debug::WaitGpuRead(4, 1ms));
     VideoCore::Nx2Debug::EndSession();
+}
+
+TEST_CASE("Debug server tells a waiting handler that its client left", "[core][nx2_debug_server]") {
+    std::atomic<bool> noticed{};
+    Handlers handlers{{"wait", [&noticed](const json&, const ClientGone& client_gone) -> json {
+                           const auto deadline = std::chrono::steady_clock::now() + 10s;
+                           while (!client_gone()) {
+                               if (std::chrono::steady_clock::now() >= deadline) {
+                                   return {};
+                               }
+                               std::this_thread::sleep_for(2ms);
+                           }
+                           noticed = true;
+                           return {};
+                       }}};
+    Core::Nx2Debug::Server server{{"127.0.0.1", 0}, std::move(handlers)};
+    {
+        boost::asio::io_context io;
+        boost::asio::ip::tcp::socket socket{io};
+        socket.connect({boost::asio::ip::make_address("127.0.0.1"), server.Port()});
+        boost::asio::write(socket, boost::asio::buffer(std::string{"{\"id\":1,\"method\":\"wait\"}\n"}));
+        std::this_thread::sleep_for(50ms);
+    }
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    while (!noticed && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(5ms);
+    }
+    REQUIRE(noticed);
+}
+
+TEST_CASE("Debug input steps parse buttons, sticks and frames", "[core][nx2_debug_server]") {
+    const auto step = Core::Nx2Debug::ParseInputStep(
+        json{{"buttons", {"A", "ZL"}}, {"left_stick", {1.0, -0.5}}, {"frames", 3}});
+    REQUIRE(step.frames == 3);
+    REQUIRE(step.input.buttons == (Core::HID::NpadButton::A | Core::HID::NpadButton::ZL));
+    REQUIRE(step.input.left->x == Core::HID::HID_JOYSTICK_MAX);
+    REQUIRE(step.input.left->y == -16384);
+    REQUIRE_FALSE(step.input.right);
+    const auto idle = Core::Nx2Debug::ParseInputStep(json{{"frames", 1}});
+    REQUIRE(idle.input.buttons == Core::HID::NpadButton::None);
+    for (const json& bad : {json{{"buttons", {"A"}}}, json{{"frames", 0}}, json{{"frames", 36001}},
+                            json{{"frames", 1}, {"buttons", {"Home"}}},
+                            json{{"frames", 1}, {"stick_l", {0, 0}}},
+                            json{{"frames", 1}, {"left_stick", {1.5, 0}}},
+                            json{{"frames", 1}, {"right_stick", {0}}}, json::array()}) {
+        CAPTURE(bad.dump());
+        REQUIRE_THROWS_AS(Core::Nx2Debug::ParseInputStep(bad), std::exception);
+    }
+}
+
+TEST_CASE("Debug input steps follow the present count exactly", "[core][nx2_debug_server]") {
+    std::vector<Core::Nx2Debug::InputStep> steps(3);
+    steps[0] = {.input = {.buttons = Core::HID::NpadButton::A, .left = {}, .right = {}}, .frames = 2};
+    steps[1] = {.input = {}, .frames = 1};
+    steps[2] = {.input = {.buttons = Core::HID::NpadButton::B, .left = {}, .right = {}}, .frames = 1};
+    REQUIRE_FALSE(Core::Nx2Debug::InputAt(steps, 10, 9));
+    REQUIRE(Core::Nx2Debug::InputAt(steps, 10, 10)->buttons == Core::HID::NpadButton::A);
+    REQUIRE(Core::Nx2Debug::InputAt(steps, 10, 11)->buttons == Core::HID::NpadButton::A);
+    REQUIRE(Core::Nx2Debug::InputAt(steps, 10, 12)->buttons == Core::HID::NpadButton::None);
+    REQUIRE(Core::Nx2Debug::InputAt(steps, 10, 13)->buttons == Core::HID::NpadButton::B);
+    REQUIRE_FALSE(Core::Nx2Debug::InputAt(steps, 10, 14));
+}
+
+TEST_CASE("Injected input merges buttons and replaces sticks while installed", "[core][nx2_debug_server]") {
+    Core::HID::EmulatedController controller{Core::HID::NpadIdType::Player1};
+    REQUIRE(controller.GetNpadButtons().raw == Core::HID::NpadButton::None);
+    Core::HID::InjectedInput input{.buttons = Core::HID::NpadButton::A | Core::HID::NpadButton::ZR,
+                                   .left = Core::HID::AnalogStickState{.x = -30000, .y = 20000},
+                                   .right = {}};
+    bool active = true;
+    controller.SetInputInjector([&]() -> std::optional<Core::HID::InjectedInput> {
+        return active ? std::optional{input} : std::nullopt;
+    });
+    using enum Core::HID::NpadButton;
+    REQUIRE(controller.GetNpadButtons().raw == (A | ZR | StickLLeft | StickLUp));
+    REQUIRE(controller.GetSticks().left.x == -30000);
+    REQUIRE(controller.GetSticks().left.y == 20000);
+    REQUIRE(controller.GetSticks().right.x == 0);
+    active = false;
+    REQUIRE(controller.GetNpadButtons().raw == None);
+    active = true;
+    controller.SetInputInjector({});
+    REQUIRE(controller.GetNpadButtons().raw == None);
+    REQUIRE(controller.GetSticks().left.x == 0);
 }

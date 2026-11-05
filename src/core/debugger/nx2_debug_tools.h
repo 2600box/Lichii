@@ -14,6 +14,7 @@
 #include <nlohmann/json.hpp>
 
 #include "common/common_types.h"
+#include "hid_core/frontend/emulated_controller.h"
 
 namespace Core {
 class System;
@@ -76,6 +77,21 @@ struct GuestSearch {
 [[nodiscard]] GuestSearch SearchGuestMemory(Memory::Memory& memory, std::span<const u8> pattern,
                                             u64 start, u64 end, size_t max_hits,
                                             std::chrono::steady_clock::time_point deadline);
+
+/// One step of input or input_sequence: what to hold, for how many presented frames.
+struct InputStep {
+    HID::InjectedInput input;
+    u64 frames;
+};
+
+/// {buttons?, left_stick?, right_stick?, frames}. Sticks are [x, y] in -1..1. Throws
+/// std::runtime_error on unknown keys, buttons or out-of-range values.
+[[nodiscard]] InputStep ParseInputStep(const nlohmann::json& step);
+
+/// The input of the step active at present count now, for steps starting at present count start;
+/// nothing before start and from the end of the last step on.
+[[nodiscard]] std::optional<HID::InjectedInput> InputAt(std::span<const InputStep> steps, u64 start,
+                                                       u64 now);
 
 /// The service when EDEN_NX2_DEBUG_SERVER is set and it can listen, otherwise null.
 [[nodiscard]] std::unique_ptr<Service> MaybeStartService(System& system, std::string title,

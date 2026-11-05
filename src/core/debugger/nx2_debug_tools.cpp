@@ -15,6 +15,7 @@
 #include <thread>
 
 #include "common/fs/path_util.h"
+#include "common/scope_exit.h"
 #include "common/logging.h"
 #include "common/scm_rev.h"
 #include "common/settings.h"
@@ -25,6 +26,7 @@
 #include "core/frontend/framebuffer_layout.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/memory.h"
+#include "hid_core/hid_core.h"
 #include "video_core/gpu.h"
 #include "video_core/nx2_debug_control.h"
 #include "video_core/renderer_base.h"
@@ -38,6 +40,20 @@ using namespace std::chrono_literals;
 constexpr size_t RING_LINES = 20000;
 /// Bytes one read_memory or read_gpu_memory call returns at most.
 constexpr u64 MAX_READ = 64 * 1024;
+/// Presented frames one input or input_sequence call holds at most (10 minutes at 60 fps).
+constexpr u64 MAX_INPUT_FRAMES = 36000;
+constexpr size_t MAX_INPUT_STEPS = 1000;
+
+constexpr std::array<std::pair<std::string_view, HID::NpadButton>, 16> INPUT_BUTTONS{{
+    {"A", HID::NpadButton::A},         {"B", HID::NpadButton::B},
+    {"X", HID::NpadButton::X},         {"Y", HID::NpadButton::Y},
+    {"L", HID::NpadButton::L},         {"R", HID::NpadButton::R},
+    {"ZL", HID::NpadButton::ZL},       {"ZR", HID::NpadButton::ZR},
+    {"Plus", HID::NpadButton::Plus},   {"Minus", HID::NpadButton::Minus},
+    {"Up", HID::NpadButton::Up},       {"Down", HID::NpadButton::Down},
+    {"Left", HID::NpadButton::Left},   {"Right", HID::NpadButton::Right},
+    {"StickL", HID::NpadButton::StickL}, {"StickR", HID::NpadButton::StickR},
+}};
 
 struct ToolState {
     explicit ToolState(System& system_, std::string title_, u64 program_id_,
@@ -452,9 +468,99 @@ json ReadGpuMemory(ToolState& state, const json& params) {
     return result;
 }
 
+/// Holds the steps on player 1 (or the handheld controller when player 1 is not connected) from
+/// the next present on, and returns once they are done. The injector stops by itself after the
+/// last step; leaving this function by any path removes it.
+json RunInput(ToolState& state, const std::vector<InputStep>& steps, const json& params,
+              const ClientGone& client_gone) {
+    u64 total = 0;
+    for (const InputStep& step : steps) {
+        total += step.frames;
+    }
+    if (total > MAX_INPUT_FRAMES) {
+        throw std::runtime_error{
+            fmt::format("{} frames in total; at most {} per call", total, MAX_INPUT_FRAMES)};
+    }
+    auto& hid = state.system.HIDCore();
+    HID::EmulatedController* controller = hid.GetEmulatedController(HID::NpadIdType::Player1);
+    std::string name = "player1";
+    if (!controller->IsConnected()) {
+        controller = hid.GetEmulatedController(HID::NpadIdType::Handheld);
+        name = "handheld";
+    }
+    if (!controller->IsConnected()) {
+        throw std::runtime_error{"neither player 1 nor the handheld controller is connected"};
+    }
+    const int timeout = Param<int>(params, "timeout_s", static_cast<int>(total / 20 + 10), 1, 900);
+    const u64 start = g_nx2_present_count.load(std::memory_order_relaxed) + 1;
+    const auto script = std::make_shared<const std::vector<InputStep>>(steps);
+    controller->SetInputInjector([script, start] {
+        return InputAt(*script, start, g_nx2_present_count.load(std::memory_order_relaxed));
+    });
+    SCOPE_EXIT {
+        controller->SetInputInjector({});
+    };
+    const auto begin = std::chrono::steady_clock::now();
+    const auto deadline = begin + std::chrono::seconds{timeout};
+    for (;;) {
+        const u64 now = g_nx2_present_count.load(std::memory_order_relaxed);
+        if (now >= start + total) {
+            break;
+        }
+        if (state.stopping.load(std::memory_order_relaxed)) {
+            throw std::runtime_error{"the game is shutting down; input released"};
+        }
+        if (client_gone()) {
+            LOG_INFO(Debug, "Debug server client left during input; input released");
+            throw std::runtime_error{"the client disconnected; input released"};
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            throw std::runtime_error{fmt::format(
+                "{} of {} frames were presented within {} s (paused or loading?); input released",
+                now >= start ? now - start : 0, total, timeout)};
+        }
+        std::this_thread::sleep_for(2ms);
+    }
+    return {
+        {"controller", name},
+        {"steps", steps.size()},
+        {"frames", total},
+        {"first_present", start},
+        {"elapsed_s",
+         std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count()},
+    };
+}
+
+json Input(ToolState& state, const json& params, const ClientGone& client_gone) {
+    json step = params;
+    step.erase("timeout_s");
+    return RunInput(state, {ParseInputStep(step)}, params, client_gone);
+}
+
+json InputSequence(ToolState& state, const json& params, const ClientGone& client_gone) {
+    const json& list = params.at("steps");
+    if (!list.is_array() || list.empty() || list.size() > MAX_INPUT_STEPS) {
+        throw std::runtime_error{fmt::format("steps must be an array of 1 to {}", MAX_INPUT_STEPS)};
+    }
+    std::vector<InputStep> steps;
+    for (size_t index = 0; index < list.size(); ++index) {
+        try {
+            steps.push_back(ParseInputStep(list[index]));
+        } catch (const std::exception& error) {
+            throw std::runtime_error{fmt::format("step {}: {}", index, error.what())};
+        }
+    }
+    return RunInput(state, steps, params, client_gone);
+}
+
 Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
     const auto handler = [&state](json (*tool)(ToolState&, const json&)) -> Handler {
-        return [state, tool](const json& params) { return tool(*state, params); };
+        return [state, tool](const json& params, const ClientGone&) { return tool(*state, params); };
+    };
+    const auto waiting = [&state](json (*tool)(ToolState&, const json&, const ClientGone&)) -> Handler {
+        return [state, tool](const json& params, const ClientGone& client_gone) {
+            return tool(*state, params, client_gone);
+        };
     };
     return {
         {"status", handler(Status)},
@@ -466,6 +572,8 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
         {"read_memory", handler(ReadMemory)},
         {"search_memory", handler(SearchMemory)},
         {"read_gpu_memory", handler(ReadGpuMemory)},
+        {"input", waiting(Input)},
+        {"input_sequence", waiting(InputSequence)},
     };
 }
 
@@ -618,6 +726,70 @@ GuestSearch SearchGuestMemory(Memory::Memory& memory, std::span<const u8> patter
         address = page_end;
     }
     return search;
+}
+
+InputStep ParseInputStep(const json& step) {
+    if (!step.is_object()) {
+        throw std::runtime_error{"a step is an object"};
+    }
+    for (const auto& [key, value] : step.items()) {
+        if (key != "buttons" && key != "left_stick" && key != "right_stick" && key != "frames") {
+            throw std::runtime_error{fmt::format(
+                "unknown key \"{}\": want buttons, left_stick, right_stick, frames", key)};
+        }
+    }
+    InputStep result{.input = {}, .frames = 0};
+    const json& frames = step.at("frames");
+    if (!frames.is_number_integer() || frames.get<s64>() < 1 ||
+        frames.get<u64>() > MAX_INPUT_FRAMES) {
+        throw std::runtime_error{fmt::format("frames must be 1 to {}", MAX_INPUT_FRAMES)};
+    }
+    result.frames = frames.get<u64>();
+    for (const json& button : step.value("buttons", json::array())) {
+        const std::string text = button.is_string() ? button.get<std::string>() : button.dump();
+        const auto it = std::ranges::find(INPUT_BUTTONS, std::string_view{text},
+                                          &std::pair<std::string_view, HID::NpadButton>::first);
+        if (it == INPUT_BUTTONS.end()) {
+            std::string names;
+            for (const auto& [known, _] : INPUT_BUTTONS) {
+                names += names.empty() ? "" : ", ";
+                names += known;
+            }
+            throw std::runtime_error{fmt::format("unknown button {}: want one of {}", text, names)};
+        }
+        result.input.buttons |= it->second;
+    }
+    const auto stick = [&step](const char* key) -> std::optional<HID::AnalogStickState> {
+        if (!step.contains(key)) {
+            return std::nullopt;
+        }
+        const json& value = step.at(key);
+        const auto axis = [&](size_t index) {
+            if (!value.is_array() || value.size() != 2 || !value[index].is_number() ||
+                std::abs(value[index].get<double>()) > 1.0) {
+                throw std::runtime_error{fmt::format("{} must be [x, y] with both in -1..1", key)};
+            }
+            return static_cast<s32>(std::lround(value[index].get<double>() * HID::HID_JOYSTICK_MAX));
+        };
+        return HID::AnalogStickState{.x = axis(0), .y = axis(1)};
+    };
+    result.input.left = stick("left_stick");
+    result.input.right = stick("right_stick");
+    return result;
+}
+
+std::optional<HID::InjectedInput> InputAt(std::span<const InputStep> steps, u64 start, u64 now) {
+    if (now < start) {
+        return std::nullopt;
+    }
+    u64 end = start;
+    for (const InputStep& step : steps) {
+        end += step.frames;
+        if (now < end) {
+            return step.input;
+        }
+    }
+    return std::nullopt;
 }
 
 Service::Service(System& system, std::string title, u64 program_id, const Endpoint& endpoint,
