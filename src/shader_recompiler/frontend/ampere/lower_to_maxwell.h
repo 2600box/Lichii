@@ -77,7 +77,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
         uses_uniform_bank |= op == 0x987 ||
             ((op == 0x387 || op == 0x983) && instruction.Bits(91, 1));
         uses_uniform_bank |= op == 0x3c4 || op == 0x2bd || op == 0x896 || op == 0xf60 || op == 0xc11 || op == 0xd08 || op == 0xc0c || op == 0x986 || op == 0x9a8 || op == 0xc12 || op == 0xc17 || op == 0xe24 || op == 0xc24 || op == 0xd00 || op == 0xd09 || op == 0x9c3 || op == 0xc45 || op == 0x2a4 || op == 0x891 || op == 0x890 || op == 0x290 || op == 0x28c || op == 0x88c || op == 0x287 || op == 0x887 || op == 0x958 || op == 0xab9 || op == 0xabb || op == 0x899 || op == 0xc20 || op == 0xe21 || op == 0xe23 || op == 0xc02 ||
-                             op == 0x886 || op == 0x3c2 || op == 0xc82 || op == 0x882 || op == 0x292 || op == 0x892 || op == 0x291 || op == 0x981 || op == 0xc13 || op == 0xc10 || op == 0xc23 || op == 0x526 || op == 0x2be || op == 0x8a4 || op == 0xd05 || (op == 0x984 && instruction.Bits(91, 1)) || (op == 0x988 && instruction.Bits(91, 1)) || op == 0x89c || op == 0x883 || op == 0x2a5 || op == 0xd06 || op == 0xf63 || op == 0xf66 || op == 0xf69 || op == 0xc0b || op == 0x8a5 || op == 0x299 || op == 0xc09 || (op == 0x81c && instruction.Bits(67, 1)) || op == 0xc0a ||
+                             op == 0x886 || op == 0x3c2 || op == 0xc82 || op == 0x882 || op == 0x292 || op == 0x892 || op == 0x291 || op == 0x981 || op == 0xc13 || op == 0xc10 || op == 0xc23 || op == 0x526 || op == 0x2be || op == 0x8a4 || op == 0xd05 || (op == 0x984 && instruction.Bits(91, 1)) || (op == 0x988 && instruction.Bits(91, 1)) || op == 0x89c || op == 0x883 || op == 0x2a5 || op == 0xd06 || op == 0xf63 || op == 0xf66 || op == 0xf69 || op == 0xc0b || op == 0x8a5 || op == 0x299 || op == 0xc09 || op == 0xc07 || (op == 0x81c && instruction.Bits(67, 1)) || op == 0xc0a ||
                              (op == 0x83b && instruction.Bits(91, 1));
     }
     const auto address_of = [](u32 index) { return 0x50U + index * 8 + ((index + 1) / 3) * 8; };
@@ -1919,15 +1919,21 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             const u32 a = uniform_register(insn.Bits(24, 8)), b = opcode == 0x88c ? 252U : uniform_register(insn.Bits(32, 8));
             const u32 combine = insn.Bits(87, 3), combine_op = insn.Bits(74, 2);
             if (output > 6 || insn.Bits(84, 3) != 7 || insn.Bits(72, 1) || combine_op == 3 ||
-                insn.Bits(12, 4) != 7 || a == ~0U || b == ~0U)
+                a == ~0U || b == ~0U)
                 return fail(index, "native uniform comparison mode");
             const u32 temporary = 6 - output, combine_slot = combine == 7 ? 7U : 6 - combine;
             const u32 combine_mask = combine == 7 ? 0U : 1U << combine_slot;
-            const u32 temporary_mask = 1U << temporary, mask = temporary_mask | combine_mask;
-            if (opcode == 0x88c) mov_imm(252, insn.words[1]);
+            const bool guarded = native_predicate != 7;
+            const u32 temporary_mask = 1U << temporary;
+            const u32 load_mask = combine_mask | (guarded ? temporary_mask | 1U << guard_slot : 0U);
+            const u32 mask = temporary_mask | load_mask;
+            if (opcode == 0x88c)
+                emit(0x0100000000000000ULL | (u64{7} << 16) | 252 | (u64{15} << 12) |
+                     (u64{insn.words[1]} << 20));
             emit(0x38e8000000070000ULL | 253 | (u64{255} << 8) | (u64{mask} << 20));
-            if (combine_mask) emit(0x38f0000000070000ULL | (u64{239} << 8) | (u64{combine_mask} << 20));
-            emit(0x5b60000000070000ULL | 7 | (u64{temporary} << 3) |
+            if (load_mask) emit(0x38f0000000070000ULL | (u64{239} << 8) | (u64{load_mask} << 20));
+            emit(0x5b60000000000000ULL |
+                (u64{guarded ? (native_predicate & 8) | guard_slot : 7U} << 16) | 7 | (u64{temporary} << 3) |
                 (u64{a} << 8) | (u64{b} << 20) | (u64{combine_slot} << 39) |
                 (u64{insn.Bits(90, 1)} << 42) | (u64{combine_op} << 45) | (u64{insn.Bits(73, 1)} << 48) |
                 (u64{insn.Bits(76, 3)} << 49));
@@ -3169,7 +3175,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                  (u64{insn.Bits(78, 2)} << 39));
             break;
         }
-        case 0x207: case 0x807: case 0xa07:
+        case 0x207: case 0x807: case 0xa07: case 0xc07:
         case 0x208: case 0x808: case 0xa08: { // Bitwise SEL / FSEL
             // FSEL applies the floating operand modifiers (negate/absolute) before selecting.
             const bool floating = (opcode & 0x1ff) == 0x008;
