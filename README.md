@@ -50,7 +50,7 @@ The supplied Lichii logo, icon and library artwork are in [dist/branding](dist/b
 
 ## Support Lichii
 
-Lichii is free and stays free. If you want to help, you can donate in crypto. Donations pay for more AI agents working on game fixes in parallel, so bugs get found and fixed faster.
+Lichii is free and stays free. If you want to help, you can donate in crypto. Donations help pay for the AI tools and build machines used to develop this open-source project faster.
 
 **Solana (SOL)**
 ```text
@@ -80,7 +80,7 @@ bc1qcvxdpf4qvdhqp8ee4s355cjmxrzsphsdwpl8w4
 Send each coin on its matching network. Coins sent on the wrong network can't be recovered.
 
 > [!NOTE]
-> Donations are voluntary gifts and are non-refundable. A donation does not buy any product, service, perk, early access, priority support or say in the project.
+> Donations are voluntary gifts and are non-refundable. A donation does not buy any product, service, perk, early access, exclusive build, priority support or say in the project. Every release stays free and public for everyone.
 
 ## Credits and license
 
