@@ -118,12 +118,13 @@ TEST_CASE("Debug server answers over loopback TCP", "[core][nx2_debug_server]") 
 TEST_CASE("Debug control hands captures to the rasterizer once", "[core][nx2_debug_server]") {
     VideoCore::Nx2Debug::BeginSession();
     REQUIRE_FALSE(VideoCore::Nx2Debug::HasRequests());
-    VideoCore::Nx2Debug::RequestCapture({.id = 5, .directory = "dir", .sampled = true});
+    VideoCore::Nx2Debug::RequestCapture({.id = 5, .directory = "dir", .sampled = true, .buffers = true});
     REQUIRE(VideoCore::Nx2Debug::HasRequests());
     const auto request = VideoCore::Nx2Debug::TakeCapture();
     REQUIRE(request);
     REQUIRE(request->id == 5);
     REQUIRE(request->sampled);
+    REQUIRE(request->buffers);
     REQUIRE_FALSE(VideoCore::Nx2Debug::HasRequests());
     REQUIRE_FALSE(VideoCore::Nx2Debug::TakeCapture());
     REQUIRE_FALSE(VideoCore::Nx2Debug::WaitCapture(5, 1ms));
@@ -133,7 +134,7 @@ TEST_CASE("Debug control hands captures to the rasterizer once", "[core][nx2_deb
     REQUIRE(result);
     REQUIRE(result->error == "disk full");
 
-    VideoCore::Nx2Debug::RequestCapture({.id = 6, .directory = "dir", .sampled = false});
+    VideoCore::Nx2Debug::RequestCapture({.id = 6, .directory = "dir", .sampled = false, .buffers = false});
     VideoCore::Nx2Debug::CancelCapture(6);
     REQUIRE_FALSE(VideoCore::Nx2Debug::HasRequests());
 
