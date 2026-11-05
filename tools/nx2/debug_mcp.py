@@ -113,6 +113,22 @@ TOOLS = [
             },
         },
     },
+    {
+        "name": "sample",
+        "description": "Sampling profiler: pauses the named host threads about 1000 times a second "
+                       "for the given seconds and returns where they were (self, self <- caller, "
+                       "inclusive counts per function). Also writes the report and its folded "
+                       "stacks to the dump directory. Windows only.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "threads": {"type": "string",
+                            "description": "Comma separated thread names; default GPU,GPUBack"},
+                "seconds": {"type": "number", "minimum": 1, "maximum": 60},
+                "max_chars": {"type": "integer", "minimum": 0},
+            },
+        },
+    },
 ]
 
 TOOL_NAMES = {tool["name"] for tool in TOOLS}
@@ -192,6 +208,8 @@ class Adapter:
         params = dict(arguments)
         index = params.pop("index", False)
         timeout = max(int(params.get("timeout_s", 120 if name == "capture_frame" else 5)), 1) + 30
+        if name == "sample":
+            timeout = int(params.get("seconds", 10)) + 120
         result = self.emulator.call(name, params, timeout)
         if name == "screenshot":
             png = result.pop("png_base64", None)

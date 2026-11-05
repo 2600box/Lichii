@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include "yuzu_cmd/nx2_sampler.h"
+#include "common/nx2_sampler.h"
 
 #ifdef _WIN32
 
@@ -202,13 +202,15 @@ struct Symbolizer {
     std::unordered_map<DWORD64, std::string> cache;
 };
 
-void Report(const std::vector<Target>& targets, const std::vector<Sample>& samples,
-            const char* path) {
+std::string Report(const std::vector<Target>& targets, const std::vector<Sample>& samples,
+                   const char* path) {
     Symbolizer symbolizer;
-    std::FILE* const file = std::fopen(path, "w");
-    if (file == nullptr) {
-        return;
-    }
+    std::string text;
+    const auto append = [&text](const char* format, auto... args) {
+        char line[512];
+        const int length = std::snprintf(line, sizeof(line), format, args...);
+        text.append(line, static_cast<size_t>((std::clamp)(length, 0, int{sizeof(line)} - 1)));
+    };
     for (unsigned thread = 0; thread < targets.size(); ++thread) {
         std::map<std::string, unsigned> self;
         std::map<std::string, unsigned> inclusive;
@@ -239,20 +241,23 @@ void Report(const std::vector<Target>& targets, const std::vector<Sample>& sampl
                 sorted.emplace_back(count, name);
             }
             std::sort(sorted.rbegin(), sorted.rend());
-            std::fprintf(file, "-- %s\n", title);
+            append("-- %s\n", title);
             for (size_t i = 0; i < (std::min)(limit, sorted.size()); ++i) {
-                std::fprintf(file, "%6u %5.1f%% %s\n", sorted[i].first,
+                append("%6u %5.1f%% %s\n", sorted[i].first,
                              100.0 * sorted[i].first / (std::max)(total, 1U),
                              sorted[i].second.c_str());
             }
         };
-        std::fprintf(file, "=== thread \"%s\": %u samples\n", targets[thread].name.c_str(), total);
+        append("=== thread \"%s\": %u samples\n", targets[thread].name.c_str(), total);
         print("self (where the thread is)", self, 60);
         print("self <- caller", self_caller, 50);
         print("inclusive (on the stack)", inclusive, 90);
-        std::fprintf(file, "\n");
+        append("\n");
     }
-    std::fclose(file);
+    if (std::FILE* const file = std::fopen(path, "w")) {
+        std::fwrite(text.data(), 1, text.size(), file);
+        std::fclose(file);
+    }
 
     // <out>.folded: every distinct stack with its count, root first ("thread;a;b;c count").
     std::map<std::string, unsigned> folded;
@@ -270,15 +275,16 @@ void Report(const std::vector<Target>& targets, const std::vector<Sample>& sampl
         }
         std::fclose(out);
     }
+    return text;
 }
 
-void Run(std::vector<std::string> patterns, double start, double seconds, std::string out) {
-    std::this_thread::sleep_for(std::chrono::duration<double>(start));
+std::string SampleThreads(const std::vector<std::string>& patterns, double seconds,
+                          const std::string& out) {
     const std::vector<Target> targets = FindThreads(patterns);
     std::fprintf(stderr, "nx2 sampler: %zu threads match, sampling %.0f s\n", targets.size(),
                  seconds);
     if (targets.empty()) {
-        return;
+        return "no thread matches";
     }
     std::vector<Sample> samples;
     samples.reserve(static_cast<size_t>(seconds * 1100.0) * targets.size() + 16);
@@ -301,14 +307,19 @@ void Run(std::vector<std::string> patterns, double start, double seconds, std::s
         }
         Sleep(1);
     }
-    Report(targets, samples, out.c_str());
+    std::string text = Report(targets, samples, out.c_str());
     std::fprintf(stderr, "nx2 sampler: %zu samples written to %s\n", samples.size(), out.c_str());
     for (const auto& target : targets) {
         CloseHandle(target.handle);
     }
+    return text;
 }
 
 } // Anonymous namespace
+
+std::string Sample(const char* names, double seconds, const std::string& out) {
+    return SampleThreads(SplitNames(names), seconds, out);
+}
 
 void StartFromEnvironment() {
     const char* names = std::getenv("EDEN_NX2_SAMPLE");
@@ -316,10 +327,12 @@ void StartFromEnvironment() {
         return;
     }
     const char* out = std::getenv("EDEN_NX2_SAMPLE_OUT");
-    std::thread{Run, SplitNames(names), EnvSeconds("EDEN_NX2_SAMPLE_START", 60.0),
-                EnvSeconds("EDEN_NX2_SAMPLE_SECONDS", 30.0),
-                std::string{out != nullptr ? out : "nx2_samples.txt"}}
-        .detach();
+    std::thread{[patterns = SplitNames(names), start = EnvSeconds("EDEN_NX2_SAMPLE_START", 60.0),
+                 seconds = EnvSeconds("EDEN_NX2_SAMPLE_SECONDS", 30.0),
+                 out = std::string{out != nullptr ? out : "nx2_samples.txt"}] {
+        std::this_thread::sleep_for(std::chrono::duration<double>(start));
+        SampleThreads(patterns, seconds, out);
+    }}.detach();
 }
 
 } // namespace Nx2Sampler
@@ -328,6 +341,9 @@ void StartFromEnvironment() {
 
 namespace Nx2Sampler {
 void StartFromEnvironment() {}
+std::string Sample(const char*, double, const std::string&) {
+    return "the sampler is Windows only";
+}
 } // namespace Nx2Sampler
 
 #endif
