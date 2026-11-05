@@ -15,7 +15,9 @@
 #include <mutex>
 #include <numeric>
 #include <optional>
+#include <set>
 #include <span>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -67,6 +69,23 @@ constexpr u32 NUM_STORAGE_BUFFERS = Shader::Info::MAX_SSBOS;
 static_assert(NUM_STORAGE_BUFFERS <= 32, "storage binding masks must fit u32");
 constexpr u32 NUM_TEXTURE_BUFFERS = 32;
 constexpr u32 NUM_STAGES = 5;
+
+/// End of the writes a run-time selected global access can make through the buffer at base: the
+/// backend assigns an address to the closest base at or below it, so writes through this buffer
+/// stop before the next higher base. Bases are aligned down by up to alignment bytes where the
+/// shader reads them, so a base may lie that much past the one bound. Returns size when no
+/// other base is higher.
+[[nodiscard]] inline u64 SelectedWriteExtent(GPUVAddr base, u64 size,
+                                             std::span<const GPUVAddr> other_bases,
+                                             u64 alignment) {
+    u64 extent = size;
+    for (const GPUVAddr other : other_bases) {
+        if (other > base) {
+            extent = (std::min)(extent, other - base + alignment);
+        }
+    }
+    return extent;
+}
 
 static_assert(NUM_GRAPHICS_UNIFORM_BUFFERS <= 32, "fast bitmask must fit u32");
 
@@ -154,6 +173,12 @@ public:
     std::array<u32, NUM_STAGES> written_storage_buffers{};
     u32 enabled_compute_storage_buffers = 0;
     u32 written_compute_storage_buffers = 0;
+    /// Written only by run-time selected global accesses (see SelectedWriteExtent).
+    std::array<u32, NUM_STAGES> selected_write_storage_buffers{};
+    u32 selected_write_compute_storage_buffers = 0;
+    /// Bound from a pointer table entry.
+    std::array<u32, NUM_STAGES> table_storage_buffers{};
+    u32 table_compute_storage_buffers = 0;
 
     u32 total_graphics_storage_buffers = 0;
     u32 total_compute_storage_buffers = 0;
@@ -289,7 +314,8 @@ public:
     void UnbindGraphicsStorageBuffers(size_t stage);
 
     bool BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, u32 cbuf_index, u32 cbuf_offset,
-                                   bool is_written, u32 indirect_offset = ~0U);
+                                   bool is_written, u32 indirect_offset = ~0U,
+                                   bool selected_writes = false);
 
     void UnbindGraphicsTextureBuffers(size_t stage);
 
@@ -299,7 +325,8 @@ public:
     void UnbindComputeStorageBuffers();
 
     void BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index, u32 cbuf_offset,
-                                  bool is_written, u32 indirect_offset = ~0U);
+                                  bool is_written, u32 indirect_offset = ~0U,
+                                  bool selected_writes = false);
 
     void UnbindComputeTextureBuffers();
 
@@ -665,6 +692,10 @@ private:
         return static_cast<u32>((std::min<u64>)(size, cap));
     }
 
+    /// Experiment, EDEN_NX2_SELECTED_WRITE_BOUND=1: the GPU-written mark of a written storage
+    /// binding, bounded for bindings only written by run-time selected global accesses.
+    u32 WrittenMarkSize(bool compute, size_t stage, u32 index, const Binding& binding);
+
     /// Whether a GPU write to this range is copied back at the next fence. Ranges the guest CPU
     /// has read (Preflushable, set by the first reactive flush) always are: later reads skip the
     /// flush and rely on these downloads, e.g. collision meshes skinned by compute shaders.
@@ -753,6 +784,8 @@ private:
     std::vector<MultiRangeSegment> graphics_segments;
     std::vector<MultiRangeSegment> compute_segments;
     u64 frame_tick = 0;
+    /// EDEN_NX2_SELECTED_WRITE_BOUND: bounds already logged.
+    std::set<std::tuple<bool, size_t, u32, GPUVAddr, u32, u64>> logged_write_bounds;
     /// EDEN_NX2_TABLE_POINTER_TRACE: last table entry and size bound per table pointer slot.
     std::unordered_map<u64, std::pair<GPUVAddr, u32>> traced_table_pointers;
     u64 total_used_memory = 0;

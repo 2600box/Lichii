@@ -178,6 +178,10 @@ struct StorageBufferDescriptor {
     /// When set, the buffer pointer is read from memory at this offset from the constant buffer
     /// pointer, which is bound as its own descriptor.
     u32 indirect_offset{~0U};
+    /// Written through accesses rebased on this buffer. Without them, every write is a global
+    /// access that native_global_bounds assigns at run time to the buffer with the closest base
+    /// at or below its address, so it ends before the next higher base of the program's buffers.
+    bool rebased_writes{};
 
     auto operator<=>(const StorageBufferDescriptor&) const = default;
 };

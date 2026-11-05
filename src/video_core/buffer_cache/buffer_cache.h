@@ -553,12 +553,14 @@ void BufferCache<P>::UnbindGraphicsStorageBuffers(size_t stage) {
     }
     channel_state->enabled_storage_buffers[stage] = 0;
     channel_state->written_storage_buffers[stage] = 0;
+    channel_state->selected_write_storage_buffers[stage] = 0;
+    channel_state->table_storage_buffers[stage] = 0;
 }
 
 template <class P>
 bool BufferCache<P>::BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, u32 cbuf_index,
                                                u32 cbuf_offset, bool is_written,
-                                               u32 indirect_offset) {
+                                               u32 indirect_offset, bool selected_writes) {
     if (stage >= NUM_STAGES || ssbo_index >= NUM_STORAGE_BUFFERS) {
         LOG_ERROR(HW_GPU, "Invalid graphics storage buffer binding: stage {}, index {}",
                   stage, ssbo_index);
@@ -579,6 +581,9 @@ bool BufferCache<P>::BindGraphicsStorageBuffer(size_t stage, size_t ssbo_index, 
     }
     channel_state->enabled_storage_buffers[stage] |= 1U << ssbo_index;
     channel_state->written_storage_buffers[stage] |= (is_written ? 1U : 0U) << ssbo_index;
+    channel_state->selected_write_storage_buffers[stage] |=
+        (is_written && selected_writes ? 1U : 0U) << ssbo_index;
+    channel_state->table_storage_buffers[stage] |= (indirect_offset != ~0U ? 1U : 0U) << ssbo_index;
     if constexpr (requires { runtime.ShouldLimitDynamicStorageBuffers(); }) {
         if (runtime.ShouldLimitDynamicStorageBuffers() && !already_enabled) {
             ++channel_state->total_graphics_storage_buffers;
@@ -642,12 +647,15 @@ void BufferCache<P>::UnbindComputeStorageBuffers() {
     }
     channel_state->enabled_compute_storage_buffers = 0;
     channel_state->written_compute_storage_buffers = 0;
+    channel_state->selected_write_compute_storage_buffers = 0;
+    channel_state->table_compute_storage_buffers = 0;
     channel_state->image_compute_texture_buffers = 0;
 }
 
 template <class P>
 void BufferCache<P>::BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index, u32 cbuf_offset,
-                                              bool is_written, u32 indirect_offset) {
+                                              bool is_written, u32 indirect_offset,
+                                              bool selected_writes) {
     if (ssbo_index >= channel_state->compute_storage_buffers.size()) [[unlikely]] {
         LOG_ERROR(HW_GPU, "Storage buffer index {} exceeds maximum storage buffer count",
                   ssbo_index);
@@ -668,6 +676,10 @@ void BufferCache<P>::BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index,
     }
     channel_state->enabled_compute_storage_buffers |= 1U << ssbo_index;
     channel_state->written_compute_storage_buffers |= (is_written ? 1U : 0U) << ssbo_index;
+    channel_state->selected_write_compute_storage_buffers |=
+        (is_written && selected_writes ? 1U : 0U) << ssbo_index;
+    channel_state->table_compute_storage_buffers |= (indirect_offset != ~0U ? 1U : 0U)
+                                                    << ssbo_index;
     if constexpr (requires { runtime.ShouldLimitDynamicStorageBuffers(); }) {
         if (runtime.ShouldLimitDynamicStorageBuffers() && !already_enabled) {
             ++channel_state->total_compute_storage_buffers;
@@ -1399,7 +1411,8 @@ void BufferCache<P>::BindHostGraphicsStorageBuffers(size_t stage) {
         buffer.MarkUsage(offset, size);
 
         if (is_written) {
-            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, WrittenStorageMarkSize(size));
+            MarkWrittenBuffer(binding.buffer_id, binding.device_addr,
+                              WrittenMarkSize(false, stage, index, binding));
         }
 
         if constexpr (NEEDS_BIND_STORAGE_INDEX) {
@@ -1546,8 +1559,8 @@ void BufferCache<P>::BindHostComputeStorageBuffers() {
         buffer.MarkUsage(offset, size);
 
         if (is_written) {
-            MarkWrittenBuffer(binding.buffer_id, binding.device_addr, WrittenStorageMarkSize(size),
-                              true);
+            MarkWrittenBuffer(binding.buffer_id, binding.device_addr,
+                              WrittenMarkSize(true, 0, index, binding), true);
         }
 
         if constexpr (NEEDS_BIND_STORAGE_INDEX) {
@@ -1846,6 +1859,45 @@ void BufferCache<P>::UpdateComputeTextureBuffers() {
         Binding& binding = channel_state->compute_texture_buffers[index];
         binding.buffer_id = FindBuffer(binding.device_addr, binding.size, false);
     });
+}
+
+template <class P>
+u32 BufferCache<P>::WrittenMarkSize(bool compute, size_t stage, u32 index, const Binding& binding) {
+    const u32 size = WrittenStorageMarkSize(binding.size);
+    static const bool bound = [] {
+        const char* value = std::getenv("EDEN_NX2_SELECTED_WRITE_BOUND");
+        return value != nullptr && value[0] != '0';
+    }();
+    const u32 selected = compute ? channel_state->selected_write_compute_storage_buffers
+                                 : channel_state->selected_write_storage_buffers[stage];
+    if (!bound || ((selected >> index) & 1) == 0) {
+        return size;
+    }
+    // Table entries are read from guest memory here and from the holder's host buffer by the
+    // shader; a GPU-written table can make the two differ, so they don't bound other buffers.
+    const u32 enabled = compute ? channel_state->enabled_compute_storage_buffers
+                                : channel_state->enabled_storage_buffers[stage];
+    const u32 tables = compute ? channel_state->table_compute_storage_buffers
+                               : channel_state->table_storage_buffers[stage];
+    const auto& bindings =
+        compute ? channel_state->compute_storage_buffers : channel_state->storage_buffers[stage];
+    boost::container::small_vector<GPUVAddr, NUM_STORAGE_BUFFERS> bases;
+    ForEachEnabledBit(enabled & ~tables, [&](u32 other) {
+        if (other != index && bindings[other].gpu_addr != 0) {
+            bases.push_back(bindings[other].gpu_addr);
+        }
+    });
+    const u64 extent = SelectedWriteExtent(binding.gpu_addr, size, bases,
+                                           runtime.GetStorageBufferAlignment());
+    const u32 bounded = static_cast<u32>(extent);
+    static constexpr size_t max_lines = 4096;
+    if (logged_write_bounds.size() < max_lines &&
+        logged_write_bounds.emplace(compute, stage, index, binding.gpu_addr, size, extent).second) {
+        LOG_INFO(HW_GPU, "Selected write bound {} stage={} ssbo={} gpu={:#x} size={:#x} -> {:#x}{}",
+                 compute ? "compute" : "graphics", stage, index, binding.gpu_addr, size, bounded,
+                 bounded == size ? " (no higher base)" : "");
+    }
+    return bounded;
 }
 
 template <class P>
