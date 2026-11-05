@@ -1337,6 +1337,13 @@ void RasterizerVulkan::DispatchCompute() {
         }
         frame_dump.CaptureDispatch(pipeline->ShaderHash(), written);
     };
+    if (frame_dump.CapturingSampled()) {
+        boost::container::small_vector<FrameDump::Sampled, 16> sampled;
+        for (const auto& image : pipeline->SampledImages()) {
+            sampled.push_back({5, image.tic, &texture_cache.GetImageView(image.id)});
+        }
+        frame_dump.NoteDispatchSampled(pipeline->ShaderHash(), sampled);
+    }
 
     const auto& qmd{kepler_compute->launch_description};
     auto indirect_address = kepler_compute->GetIndirectComputeAddress();

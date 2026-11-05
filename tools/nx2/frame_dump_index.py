@@ -35,6 +35,8 @@ def card(entry):
         title = f"pass {entry['pass']} rt{entry['slot']} · draws {entry['first_draw']}+{entry['draw_count']}"
     elif kind == "dispatch":
         title = f"dispatch {entry['dispatch']} img{entry['slot']} · after draw {entry['after_draws']}"
+    elif kind == "sampled" and "dispatch" in entry:
+        title = f"dispatch {entry['dispatch']} samples tic {entry['tic']} · after draw {entry['after_draws']}"
     elif kind == "sampled":
         title = f"pass {entry['pass']} samples tic {entry['tic']} (stage {entry['stage']}) · draw {entry['draw']}"
     else:

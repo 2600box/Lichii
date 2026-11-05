@@ -27,7 +27,7 @@ namespace {
 
 using VideoCore::Surface::PixelFormat;
 
-constexpr size_t SIZE_CAP = size_t{500} << 20;
+constexpr size_t SIZE_CAP = size_t{2} << 30;
 constexpr size_t STAGING_BUDGET = size_t{256} << 20;
 
 template <typename T>
@@ -206,7 +206,17 @@ FrameDump::FrameDump(const Device& device_, MemoryAllocator& memory_allocator_,
     LOG_INFO(Render_Vulkan, "Frame dump armed: dir={} at={}", directory.string(), value);
 }
 
-FrameDump::~FrameDump() = default;
+FrameDump::~FrameDump() {
+    if (!writer.joinable()) {
+        return;
+    }
+    {
+        std::scoped_lock lock{queue_mutex};
+        stop_writer = true;
+    }
+    queue_ready.notify_one();
+    writer.join();
+}
 
 std::optional<FrameDump::Target> FrameDump::MakeTarget(ImageView& view, u32 slot) const {
     using namespace VideoCore::Surface;
@@ -314,40 +324,71 @@ bool FrameDump::BeginPass(const void* framebuffer, std::span<ImageView* const> c
     return recorded;
 }
 
+namespace {
+std::optional<std::pair<GPUVAddr, u32>> SampledKey(const FrameDump::Sampled& texture) {
+    const Image* const image = texture.view ? texture.view->BackingImage() : nullptr;
+    if (!image) {
+        return std::nullopt;
+    }
+    return std::pair{image->gpu_addr, (static_cast<u32>(texture.view->format) << 16) |
+                                          (static_cast<u32>(texture.view->range.base.level) << 8) |
+                                          static_cast<u32>(texture.view->range.base.layer)};
+}
+} // Anonymous namespace
+
+bool FrameDump::RecordSampled(const Sampled& texture, u32 index, std::string name,
+                              std::string tags) {
+    if (const auto target = MakeTarget(*texture.view, index)) {
+        return Record(*target, std::move(name), std::move(tags));
+    }
+    const Image& image = *texture.view->BackingImage();
+    const auto& info = image.info;
+    Enqueue({.tags = fmt::format(
+                 R"({{"name":"{}",{},"format":"{}","width":{},"height":{},"depth":{},"type":{},"gpu_addr":"{:#x}","skipped":"format"}})",
+                 name, tags, info.format, info.size.width, info.size.height, info.size.depth,
+                 static_cast<u32>(info.type), image.gpu_addr)});
+    return false;
+}
+
 bool FrameDump::NoteSampled(std::span<const Sampled> textures) {
     bool recorded = false;
     for (const Sampled& texture : textures) {
-        const Image* const image = texture.view ? texture.view->BackingImage() : nullptr;
-        if (!image) {
-            continue;
-        }
-        const std::pair<GPUVAddr, u32> key{
-            image->gpu_addr, (static_cast<u32>(texture.view->format) << 16) |
-                                 (static_cast<u32>(texture.view->range.base.level) << 8) |
-                                 static_cast<u32>(texture.view->range.base.layer)};
-        if (std::ranges::find(pass_sampled, key) != pass_sampled.end()) {
+        const auto key = SampledKey(texture);
+        if (!key || std::ranges::find(pass_sampled, *key) != pass_sampled.end()) {
             continue;
         }
         const u32 index = static_cast<u32>(pass_sampled.size());
-        pass_sampled.push_back(key);
-        const std::string tags = fmt::format(
-            R"("kind":"sampled","pass":{},"draw":{},"stage":{},"tic":{},"index":{})", pass_index,
-            draws - 1, texture.stage, texture.tic, index);
-        const std::string name =
+        pass_sampled.push_back(*key);
+        recorded |= RecordSampled(
+            texture, index,
             fmt::format("{:04}_pass{:03}_tex{:02}_s{}_tic{}", sequence++, pass_index, index,
-                        texture.stage, texture.tic);
-        if (const auto target = MakeTarget(*texture.view, index)) {
-            recorded |= Record(*target, name, tags);
-            continue;
-        }
-        const auto& info = image->info;
-        manifest << fmt::format(
-                        R"({{"name":"{}",{},"format":"{}","width":{},"height":{},"depth":{},"type":{},"gpu_addr":"{:#x}","skipped":"format"}})",
-                        name, tags, info.format, info.size.width, info.size.height,
-                        info.size.depth, static_cast<u32>(info.type), image->gpu_addr)
-                 << '\n';
+                        texture.stage, texture.tic),
+            fmt::format(R"("kind":"sampled","pass":{},"draw":{},"stage":{},"tic":{},"index":{})",
+                        pass_index, draws - 1, texture.stage, texture.tic, index));
     }
     return recorded;
+}
+
+void FrameDump::NoteDispatchSampled(u64 shader_hash, std::span<const Sampled> textures) {
+    for (u32 index = 0; index < textures.size(); ++index) {
+        const Sampled& texture = textures[index];
+        const auto key = SampledKey(texture);
+        if (!key) {
+            continue;
+        }
+        const std::tuple<u64, GPUVAddr, u32> seen{shader_hash, key->first, key->second};
+        if (std::ranges::find(dispatch_sampled, seen) != dispatch_sampled.end()) {
+            continue;
+        }
+        dispatch_sampled.push_back(seen);
+        RecordSampled(
+            texture, index,
+            fmt::format("{:04}_dispatch{:04}_{:016x}_tex{:02}_tic{}", sequence++, dispatches,
+                        shader_hash, index, texture.tic),
+            fmt::format(
+                R"("kind":"sampled","dispatch":{},"after_draws":{},"stage":{},"tic":{},"index":{},"shaders":["{:016x}"])",
+                dispatches, draws, texture.stage, texture.tic, index, shader_hash));
+    }
 }
 
 void FrameDump::NoteDraw(std::span<const u64> shader_hashes) {
@@ -411,14 +452,15 @@ bool FrameDump::Record(const Target& target, std::string name, std::string tags)
                              : fmt::format("_{}_{}x{}_{:x}", target.format, target.width,
                                            target.height, target.gpu_addr);
     if (target.msaa) {
-        manifest << fmt::format(R"({{"name":"{}",{},"skipped":"msaa"}})", name, tags) << '\n';
+        Enqueue({.tags = fmt::format(R"({{"name":"{}",{},"skipped":"msaa"}})", name, tags)});
         return false;
     }
     const size_t size = size_t{target.width} * target.height * target.depth * TexelBytes(target);
-    if (written_bytes + pending_bytes + size > SIZE_CAP) {
+    if (recorded_bytes + size > SIZE_CAP) {
         truncated = true;
         return false;
     }
+    recorded_bytes += size;
     vk::Buffer buffer = memory_allocator.CreateBuffer(
         VkBufferCreateInfo{
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -480,18 +522,65 @@ void FrameDump::Drain() {
     scheduler.Finish();
     for (Readback& readback : readbacks) {
         readback.buffer.Invalidate();
-        Write(readback, readback.buffer.Mapped());
+        const Target& target = readback.target;
+        const auto mapped = readback.buffer.Mapped().first(size_t{target.width} * target.height *
+                                                           target.depth * TexelBytes(target));
+        Enqueue({.target = target,
+                 .name = std::move(readback.name),
+                 .tags = std::move(readback.tags),
+                 .data = {mapped.begin(), mapped.end()}});
     }
     readbacks.clear();
     pending_bytes = 0;
 }
 
-void FrameDump::Write(const Readback& readback, std::span<const u8> mapped) {
-    const Target& target = readback.target;
+void FrameDump::Enqueue(Job job) {
+    {
+        std::scoped_lock lock{queue_mutex};
+        queue.push_back(std::move(job));
+    }
+    queue_ready.notify_one();
+}
+
+void FrameDump::WriterLoop() {
+    for (;;) {
+        Job job;
+        {
+            std::unique_lock lock{queue_mutex};
+            queue_ready.wait(lock, [this] { return !queue.empty() || stop_writer; });
+            if (queue.empty()) {
+                return;
+            }
+            job = std::move(queue.front());
+            queue.pop_front();
+        }
+        if (job.summary) {
+            manifest << fmt::format(
+                            R"({{"kind":"summary","images":{},{},"bytes":{},"truncated":{}}})",
+                            images, job.tags, written_bytes, job.truncated)
+                     << '\n';
+            manifest.close();
+            LOG_INFO(Render_Vulkan, "Frame dump done: {} images, {}, {} MiB in {}{}", images,
+                     job.tags, written_bytes >> 20, directory.string(),
+                     job.truncated ? fmt::format(" (stopped at the {} GiB cap)", SIZE_CAP >> 30)
+                                   : "");
+            continue;
+        }
+        if (job.name.empty()) {
+            manifest << job.tags << '\n';
+        } else {
+            Write(job);
+        }
+        manifest.flush();
+    }
+}
+
+void FrameDump::Write(const Job& job) {
+    const Target& target = job.target;
     const u32 bytes_per_pixel = TexelBytes(target);
     const size_t pixels = size_t{target.width} * target.height * target.depth;
-    const auto data = mapped.first(pixels * bytes_per_pixel);
-    WriteFile(readback.name + ".raw.zst",
+    const std::span<const u8> data = job.data;
+    WriteFile(job.name + ".raw.zst",
               Common::Compression::CompressDataZSTDDefault(data.data(), data.size()));
     ++images;
 
@@ -557,15 +646,15 @@ void FrameDump::Write(const Readback& readback, std::span<const u8> mapped) {
             &encoded, static_cast<int>(target.width), static_cast<int>(target.height * target.depth), 3,
             rgb.data(), static_cast<int>(target.width * 3));
         if (ok != 0) {
-            WriteFile(readback.name + ".png", encoded);
-            png = fmt::format("\"{}.png\"", readback.name);
+            WriteFile(job.name + ".png", encoded);
+            png = fmt::format("\"{}.png\"", job.name);
         }
     }
     manifest << fmt::format(
                     R"({{"name":"{}",{},"format":"{}","width":{},"height":{},"depth":{},"level":{},"layer":{},"gpu_addr":"{:#x}","rescaled":{},"depth_encoding":{},"raw":"{}.raw.zst","png":{}{}}})",
-                    readback.name, readback.tags, target.format, target.width, target.height,
+                    job.name, job.tags, target.format, target.width, target.height,
                     target.depth, target.level, target.layer, target.gpu_addr, target.rescaled,
-                    static_cast<u32>(target.depth_encoding), readback.name, png, stats)
+                    static_cast<u32>(target.depth_encoding), job.name, png, stats)
              << '\n';
 }
 
@@ -583,17 +672,12 @@ void FrameDump::TickFrame() {
     if (capturing) {
         EndPass();
         Drain();
-        manifest << fmt::format(
-                        R"({{"kind":"summary","images":{},"passes":{},"draws":{},"dispatches":{},"bytes":{},"truncated":{}}})",
-                        images, pass_index, draws, dispatches, written_bytes, truncated)
-                 << '\n';
-        manifest.close();
+        Enqueue({.tags = fmt::format(R"("passes":{},"draws":{},"dispatches":{})", pass_index,
+                                     draws, dispatches),
+                 .summary = true,
+                 .truncated = truncated});
         capturing = false;
         done = true;
-        LOG_INFO(Render_Vulkan,
-                 "Frame dump done: {} images, {} passes, {} draws, {} dispatches, {} MiB in {}{}",
-                 images, pass_index, draws, dispatches, written_bytes >> 20, directory.string(),
-                 truncated ? " (stopped at the 500 MiB cap)" : "");
         return;
     }
     const double elapsed =
@@ -613,6 +697,7 @@ void FrameDump::TickFrame() {
     }
     manifest << fmt::format(R"({{"kind":"frame","frame":{},"seconds":{:.3f}}})", frame, elapsed)
              << '\n';
+    writer = std::thread{[this] { WriterLoop(); }};
     capturing = true;
     LOG_INFO(Render_Vulkan, "Frame dump: capturing frame {} ({:.1f} s after boot) into {}", frame,
              elapsed, directory.string());

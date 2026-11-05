@@ -4,11 +4,16 @@
 
 #include <array>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
+#include <thread>
+#include <tuple>
 #include <vector>
 
 #include "common/common_types.h"
@@ -26,7 +31,9 @@ class Scheduler;
 /// images written by every compute dispatch and the presented image. EDEN_NX2_FRAME_DUMP_AT picks
 /// the frame, in seconds after boot ("45") or as a frame number ("2700f").
 /// EDEN_NX2_FRAME_DUMP_SAMPLED=1 also reads back every texture a pass samples (3D and depth
-/// included), once per pass, as the first draw sampling it sees it.
+/// included), once per pass, as the first draw sampling it sees it, and the textures each compute
+/// shader samples, once per shader, before its first dispatch. Readbacks are encoded and written on
+/// a worker thread so the capture does not stall the game.
 class FrameDump {
 public:
     struct Sampled {
@@ -50,6 +57,8 @@ public:
     /// Reads back the textures of the current draw not yet seen in this pass. Returns true when
     /// copies were recorded, which ends the current render pass.
     bool NoteSampled(std::span<const Sampled> textures);
+    /// Reads back the textures of the dispatch about to run not yet seen for this shader.
+    void NoteDispatchSampled(u64 shader_hash, std::span<const Sampled> textures);
 
     /// Starts a pass when the framebuffer changes and captures the previous one.
     /// Returns true when copies were recorded, which ends the current render pass.
@@ -88,12 +97,25 @@ private:
         std::string tags;
     };
 
+    /// Work for the writer thread: a readback (`name` set), a finished manifest line, or the summary.
+    struct Job {
+        Target target{};
+        std::string name;
+        std::string tags;
+        std::vector<u8> data;
+        bool summary{};
+        bool truncated{};
+    };
+
     std::optional<Target> MakeTarget(ImageView& view, u32 slot) const;
     static u32 TexelBytes(const Target& target);
     static int Decode(const Target& target, const u8* pixel, std::array<float, 4>& out);
     bool Record(const Target& target, std::string name, std::string tags);
+    bool RecordSampled(const Sampled& texture, u32 index, std::string name, std::string tags);
     void Drain();
-    void Write(const Readback& readback, std::span<const u8> data);
+    void Enqueue(Job job);
+    void WriterLoop();
+    void Write(const Job& job);
     void WriteFile(const std::string& name, std::span<const u8> data);
 
     const Device& device;
@@ -115,6 +137,7 @@ private:
     std::ofstream manifest;
     std::vector<Readback> readbacks;
     size_t pending_bytes{};
+    size_t recorded_bytes{};
     size_t written_bytes{};
     u32 sequence{};
     u32 images{};
@@ -123,10 +146,18 @@ private:
     std::vector<Target> pass_targets;
     std::vector<u64> pass_hashes;
     std::vector<std::pair<GPUVAddr, u32>> pass_sampled;
+    /// (compute shader hash, image address, format/level/layer) already read back this frame.
+    std::vector<std::tuple<u64, GPUVAddr, u32>> dispatch_sampled;
     u32 pass_index{};
     u32 pass_first_draw{};
     u32 draws{};
     u32 dispatches{};
+
+    std::thread writer;
+    std::mutex queue_mutex;
+    std::condition_variable queue_ready;
+    std::deque<Job> queue;
+    bool stop_writer{};
 };
 
 } // namespace Vulkan
