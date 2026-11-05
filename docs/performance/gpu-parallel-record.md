@@ -49,9 +49,10 @@ bound on the work eligible for graphics parallelism.
 
 ## Phase 2: immutable batches with serial replay
 
-`EDEN_NX2_PARALLEL_RECORD=1` enables immutable command capture. Unset, `0`, or any
-other value keeps the original path. This phase still records Vulkan commands
-serially. It is a correctness checkpoint, not a speedup.
+At checkpoint `d94ec5585d`, `EDEN_NX2_PARALLEL_RECORD=1` enables immutable command
+capture with serial replay. Unset, `0`, or any other value keeps the original path.
+That checkpoint tests correctness, not speed. The current implementation adds the
+parallel encoder described below.
 
 GPUBack remains the sole owner of guest resource resolution and buffer/texture
 cache mutation. VulkanWorker still executes the existing callbacks in FIFO order,
@@ -94,16 +95,61 @@ owning reference. The frame/drain gates enforce CPU recording completion before
 retirement, and submission order remains unchanged.
 
 With profiling enabled, `host resolved passes`, `host resolved batches`,
-`host inline passes` and `host budget fallbacks` show the path taken. The forthcoming
-parallel encoder also reports `host parallel passes` and `host parallel batches`.
+`host inline passes` and `host budget fallbacks` show the path taken. The parallel
+encoder also reports `host parallel passes` and `host parallel batches`.
 
 ## Phase 3: parallel secondary recording
 
-The next checkpoint attaches bounded worker-owned secondary pools to the same
-immutable batch boundary. VulkanWorker remains the sole primary recorder and
-submitter. It consumes results in guest order, restores logical primary state after
-executing secondaries, and preserves GPU timeline retirement. Unsupported paths
-continue to record serially.
+The same switch now attaches two recording workers to the immutable batch boundary.
+Each worker owns its command pool and secondary buffers. VulkanWorker remains the
+sole primary recorder and submitter; recording workers never call the scheduler,
+read guest memory or mutate resource caches.
+
+Passes with fewer than two batches stay inline because they offer no recording
+parallelism. An eligible pass reserves all its secondary slots before dispatch. The queue holds
+at most eight waiting jobs, with 256 retained secondary buffers across the two
+workers. If a whole pass cannot fit, it replays inline instead of waiting for its
+own unsubmitted GPU tick. Each slot carries the primary submission's explicit tick
+and can be reused only after that tick completes on the GPU.
+
+Workers can finish out of order. VulkanWorker waits for every job and executes the
+secondary handles in original order, using one physical render-pass begin and end.
+It restores the complete logical state onto the primary afterward because
+`vkCmdExecuteCommands` invalidates primary command-buffer state. Callback side
+effects are never repeated. Recording exceptions propagate rather than pretending
+that a device loss was a successful serial fallback.
+
+This first implementation records batches in parallel within one pass. It joins
+them at the pass boundary, not at a later submission. Shutdown joins the recording
+threads and waits for the last successful submission before destroying their pools.
+Unsupported commands, active queries and exhausted budgets still use serial
+recording. A low eligible-pass fraction or repeated-state overhead can make the
+experiment slower; no game-speed improvement follows from compiling it.
+
+## Verification
+
+The full tests binary includes deterministic capture/replay and queue tests.
+They cover owned payloads, overlapping state updates, late fallback, an open-pass
+drain, reversed worker completion, capacity exhaustion, explicit tick retirement,
+exception draining and shutdown.
+
+The opt-in headless test uses synthetic shaders and offscreen readback. It compares
+serial, captured and parallel pixels, requires four actual secondary buffers for
+97 draws, exercises query/indirect/capacity fallback and repeats pool reuse after
+retirement. A second pass in the same primary uses restored state without rebinding.
+The test requires a Vulkan device and Khronos validation when enabled;
+otherwise it reports a skip rather than claiming GPU coverage.
+
+```sh
+EDEN_TEST_VULKAN=1 \
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
+VK_LAYER_ENABLES=VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT \
+build/bin/tests
+```
+
+Use the installed ICD manifest on other systems. The production device-selection
+policy is not part of this fixture; it creates a minimal graphics device so unrelated
+optional extensions do not hide recorder validation failures.
 
 Further resolution parallelism needs separate measurements. Guest reads, uploads,
 hazards and cache mutation remain ordered; per-stage tasks would need snapshotted

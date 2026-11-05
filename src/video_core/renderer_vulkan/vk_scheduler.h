@@ -39,6 +39,7 @@ class CommandPool;
 class Device;
 class Framebuffer;
 class GraphicsPipeline;
+class ParallelRecorder;
 class PassRecorder;
 class StateTracker;
 
@@ -435,6 +436,7 @@ private:
     bool fragment_barrier_pending{};
     bool render_pass_has_stores{};
     std::unique_ptr<CommandPool> command_pool;
+    std::unique_ptr<ParallelRecorder> parallel_recorder;
     std::unique_ptr<PassRecorder> resolved_recorder;
     u64 worker_submission_tick{1};
     u64 last_worker_submitted_tick{};

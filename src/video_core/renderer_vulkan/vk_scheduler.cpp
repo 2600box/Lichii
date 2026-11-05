@@ -29,6 +29,7 @@
 #include "video_core/renderer_vulkan/vk_command_pool.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
+#include "video_core/renderer_vulkan/vk_parallel_recorder.h"
 #include "video_core/renderer_vulkan/vk_resolved_batch.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_state_tracker.h"
@@ -158,9 +159,24 @@ Scheduler::Scheduler(const Device& device_, StateTracker& state_tracker_)
     }
 
     if (ParallelRecordEnabled()) {
-        resolved_recorder = std::make_unique<PassRecorder>();
+        parallel_recorder = std::make_unique<ParallelRecorder>(
+            device.GetLogical(), device.GetDispatchLoader(), device.GetGraphicsFamily());
+        resolved_recorder = std::make_unique<PassRecorder>(
+            [this](std::span<const ResolvedBatch> batches) {
+                if (batches.size() < 2) {
+                    return std::optional<std::vector<VkCommandBuffer>>{};
+                }
+                master_semaphore->Refresh();
+                auto recorded =
+                    parallel_recorder->RecordPass(batches, master_semaphore->KnownGpuTick());
+                if (!recorded) {
+                    VideoCommon::HostGpuProfile::Add(
+                        VideoCommon::HostGpuProfile::Counter::BudgetFallbacks);
+                }
+                return recorded;
+            });
         LOG_INFO(Render_Vulkan,
-                 "Parallel record experiment: immutable batch capture, serial replay");
+                 "Parallel record experiment: immutable batches, two secondary recording workers");
     }
     worker_submission_tick = master_semaphore->CurrentTick();
     AcquireNewChunk();
@@ -173,6 +189,9 @@ Scheduler::~Scheduler() {
         WaitWorker();
         worker_thread.request_stop();
         worker_thread.join();
+        if (parallel_recorder) {
+            parallel_recorder->StopAndJoin();
+        }
         if (trace_gpu_tick != 0) {
             master_semaphore->Wait(trace_gpu_tick);
         }
