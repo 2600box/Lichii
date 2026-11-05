@@ -299,6 +299,8 @@ add_library(video_core STATIC
     textures/decoders.h
     textures/texture.cpp
     textures/texture.h
+    textures/unswizzle_worker.cpp
+    textures/unswizzle_worker.h
     textures/workers.cpp
     textures/workers.h
     transform_feedback.cpp
