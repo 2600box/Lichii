@@ -159,13 +159,11 @@ Scheduler::Scheduler(const Device& device_, StateTracker& state_tracker_)
     }
 
     if (ParallelRecordEnabled()) {
-        parallel_recorder = std::make_unique<ParallelRecorder>(
-            device.GetLogical(), device.GetDispatchLoader(), device.GetGraphicsFamily());
         resolved_recorder = std::make_unique<PassRecorder>(
             [this](std::span<const ResolvedBatch> batches) {
-                if (batches.size() < 2) {
-                    resolved_recorder->NoteFallback(InlineFallbackReason::SingleBatch);
-                    return std::optional<std::vector<VkCommandBuffer>>{};
+                if (!parallel_recorder) {
+                    parallel_recorder = std::make_unique<ParallelRecorder>(
+                        device.GetLogical(), device.GetDispatchLoader(), device.GetGraphicsFamily());
                 }
                 master_semaphore->Refresh();
                 auto recorded =
@@ -176,9 +174,10 @@ Scheduler::Scheduler(const Device& device_, StateTracker& state_tracker_)
                         VideoCommon::HostGpuProfile::Counter::BudgetFallbacks);
                 }
                 return recorded;
-            });
+            },
+            PassRecorder::Limits{.minimum_batches = 2, .retain_inline_state = false});
         LOG_INFO(Render_Vulkan,
-                 "Parallel record experiment: immutable batches, two secondary recording workers");
+                 "Parallel record experiment: immutable batches, secondary workers started on demand");
     }
     worker_submission_tick = master_semaphore->CurrentTick();
     AcquireNewChunk();

@@ -31,9 +31,12 @@ struct Event {
 };
 
 thread_local std::vector<Event>* events;
+thread_local const VkClearValue* forwarded_clears;
+thread_local const VkViewport* forwarded_viewports;
 
 VKAPI_ATTR void VKAPI_CALL BeginPass(VkCommandBuffer, const VkRenderPassBeginInfo* info,
                                      VkSubpassContents contents) {
+    forwarded_clears = info->pClearValues;
     events->push_back({"begin",
                        {static_cast<u64>(contents), info->clearValueCount,
                         info->clearValueCount ? info->pClearValues[0].color.uint32[0] : 0}});
@@ -49,6 +52,7 @@ VKAPI_ATTR void VKAPI_CALL DrawIndirect(VkCommandBuffer, VkBuffer, VkDeviceSize,
 }
 VKAPI_ATTR void VKAPI_CALL Viewports(VkCommandBuffer, u32 first, u32 count,
                                      const VkViewport* values) {
+    forwarded_viewports = values;
     Event event{"viewports", {first}};
     for (u32 i = 0; i < count; ++i)
         event.values.push_back(static_cast<u64>(values[i].x));
@@ -105,6 +109,8 @@ struct Fixture {
 
     Fixture() {
         events = &log;
+        forwarded_clears = nullptr;
+        forwarded_viewports = nullptr;
         dispatch.vkCmdBeginRenderPass = BeginPass;
         dispatch.vkCmdEndRenderPass = EndPass;
         dispatch.vkCmdDraw = Draw;
@@ -590,5 +596,184 @@ TEST_CASE("Budget fallback reasons persist for later passes without recounting e
     REQUIRE(counts[static_cast<size_t>(Profile::Counter::InlinePasses)] == 2 * unit);
     REQUIRE(counts[static_cast<size_t>(Profile::Counter::InlineBudget)] == 2 * unit);
     REQUIRE(counts[static_cast<size_t>(Profile::Counter::BudgetFallbacks)] == unit);
+}
+
+TEST_CASE("Minimum batch preflight rejects short passes before snapshot budgeting",
+          "[video_core][resolved]") {
+    namespace Profile = VideoCommon::HostGpuProfile;
+    Profile::TakeCounters();
+    Fixture f;
+    u32 callbacks{};
+    PassRecorder::Limits limits;
+    limits.minimum_batches = 2;
+    limits.replay_bytes = 0;
+    PassRecorder recorder{
+        [&](std::span<const ResolvedBatch>) -> std::optional<std::vector<VkCommandBuffer>> {
+            ++callbacks;
+            return std::nullopt;
+        },
+        limits};
+    recorder.BeginSubmission(1, f.Native());
+    auto cb = recorder.CommandBuffer();
+    cb.SetStencilReference(VK_STENCIL_FACE_FRONT_BIT, 4);
+    cb.BeginRenderPass(Fixture::Pass(), VK_SUBPASS_CONTENTS_INLINE);
+    cb.Draw(3, 1, 0, 0);
+    cb.EndRenderPass();
+    REQUIRE(callbacks == 0);
+    REQUIRE(recorder.CapturingState());
+    REQUIRE(f.Names() == std::vector<std::string>{"stencil", "begin", "draw", "end"});
+    const auto counts = Profile::TakeCounters();
+    const u64 unit = Profile::enabled ? 1 : 0;
+    REQUIRE(counts[static_cast<size_t>(Profile::Counter::InlineSingleBatch)] == unit);
+    REQUIRE(counts[static_cast<size_t>(Profile::Counter::ResolvedPasses)] == 0);
+    REQUIRE(counts[static_cast<size_t>(Profile::Counter::ResolvedBatches)] == 0);
+    REQUIRE(counts[static_cast<size_t>(Profile::Counter::BudgetFallbacks)] == 0);
+}
+
+TEST_CASE("Production fallback forwards payloads without ownership until a fresh epoch",
+          "[video_core][resolved]") {
+    Fixture f;
+    u32 callbacks{};
+    PassRecorder::Limits limits;
+    limits.minimum_batches = 2;
+    limits.draws_per_batch = 1;
+    limits.retain_inline_state = false;
+    PassRecorder recorder{
+        [&](std::span<const ResolvedBatch> batches) -> std::optional<std::vector<VkCommandBuffer>> {
+            ++callbacks;
+            return std::vector<VkCommandBuffer>(batches.size(), Handle<VkCommandBuffer>(8));
+        },
+        limits};
+    recorder.BeginSubmission(1, f.Native());
+    auto cb = recorder.CommandBuffer();
+    cb.BeginRenderPass(Fixture::Pass(), VK_SUBPASS_CONTENTS_INLINE);
+    cb.Draw(3, 1, 0, 0);
+    SECTION("A late query forces serial recording") {
+        cb.BeginQuery(Handle<VkQueryPool>(1), 0, 0);
+        cb.EndQuery(Handle<VkQueryPool>(1), 0);
+    }
+    SECTION("An explicit drain forces serial recording") {
+        recorder.MaterializeInline(InlineFallbackReason::Drain);
+    }
+    SECTION("Conditional rendering forces serial recording") {
+        recorder.SetConditionalRenderingActive(true);
+        recorder.SetConditionalRenderingActive(false);
+    }
+    SECTION("Transform feedback forces serial recording") {
+        recorder.SetTransformFeedbackActive(true);
+        recorder.SetTransformFeedbackActive(false);
+    }
+    SECTION("Raw command buffer escape forces serial recording") {
+        (void)*cb;
+    }
+    SECTION("An unsupported draw forces serial recording") {
+        cb.DrawIndirect(Handle<VkBuffer>(7), 0, 1, 16);
+    }
+    REQUIRE_FALSE(recorder.CapturingState());
+    VkViewport viewport{.x = 7};
+    const auto previous_events = f.log.size();
+    cb.SetViewport(0, viewport);
+    REQUIRE(f.log.size() == previous_events + 1);
+    REQUIRE(forwarded_viewports == &viewport);
+    cb.EndRenderPass();
+
+    auto pass = Fixture::Pass();
+    VkClearValue clear{};
+    clear.color.uint32[0] = 42;
+    pass.clearValueCount = 1;
+    pass.pClearValues = &clear;
+    const auto before_pass = f.log.size();
+    cb.BeginRenderPass(pass, VK_SUBPASS_CONTENTS_INLINE);
+    REQUIRE(f.log.size() == before_pass + 1);
+    REQUIRE(forwarded_clears == &clear);
+    cb.SetViewport(0, viewport);
+    REQUIRE(forwarded_viewports == &viewport);
+    cb.Draw(3, 1, 0, 0);
+    cb.Draw(3, 1, 0, 0);
+    cb.EndRenderPass();
+    REQUIRE(callbacks == 0);
+
+    recorder.EndSubmission();
+    recorder.BeginSubmission(2, f.Native());
+    REQUIRE(recorder.CapturingState());
+    cb = recorder.CommandBuffer();
+    const auto before_capture = f.log.size();
+    cb.BeginRenderPass(Fixture::Pass(), VK_SUBPASS_CONTENTS_INLINE);
+    cb.Draw(3, 1, 0, 0);
+    cb.Draw(3, 1, 0, 0);
+    REQUIRE(f.log.size() == before_capture);
+    cb.EndRenderPass();
+    REQUIRE(callbacks == 1);
+    REQUIRE(recorder.CapturingState());
+}
+
+TEST_CASE("Production policy restores parallel state before downgrading the next pass",
+          "[video_core][resolved]") {
+    Fixture f;
+    PassRecorder::Limits limits;
+    limits.minimum_batches = 2;
+    limits.draws_per_batch = 1;
+    limits.retain_inline_state = false;
+    PassRecorder recorder{
+        [](std::span<const ResolvedBatch> batches) -> std::optional<std::vector<VkCommandBuffer>> {
+            return std::vector<VkCommandBuffer>(batches.size(), Handle<VkCommandBuffer>(8));
+        },
+        limits};
+    recorder.BeginSubmission(1, f.Native());
+    auto cb = recorder.CommandBuffer();
+    cb.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, Handle<VkPipeline>(1));
+    cb.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, Handle<VkPipeline>(2));
+    cb.BeginRenderPass(Fixture::Pass(), VK_SUBPASS_CONTENTS_INLINE);
+    cb.Draw(3, 1, 0, 0);
+    cb.Draw(3, 1, 0, 0);
+    cb.EndRenderPass();
+    REQUIRE(recorder.CapturingState());
+    cb.BeginRenderPass(Fixture::Pass(), VK_SUBPASS_CONTENTS_INLINE);
+    cb.Draw(3, 1, 0, 0);
+    cb.DrawIndirect(Handle<VkBuffer>(7), 0, 1, 16);
+    cb.EndRenderPass();
+    REQUIRE_FALSE(recorder.CapturingState());
+    REQUIRE(f.Names() == std::vector<std::string>{"pipeline", "pipeline", "begin", "execute", "end",
+                                                  "pipeline", "pipeline", "begin", "draw",
+                                                  "indirect", "end"});
+    REQUIRE(f.log[5].values[0] == VK_PIPELINE_BIND_POINT_COMPUTE);
+    REQUIRE(f.log[6].values[0] == VK_PIPELINE_BIND_POINT_GRAPHICS);
+}
+
+TEST_CASE("Production policy preserves eligibility after empty and short passes",
+          "[video_core][resolved]") {
+    Fixture f;
+    u32 callbacks{};
+    size_t inherited_commands{};
+    PassRecorder::Limits limits;
+    limits.minimum_batches = 2;
+    limits.draws_per_batch = 1;
+    limits.retain_inline_state = false;
+    PassRecorder recorder{
+        [&](std::span<const ResolvedBatch> batches) -> std::optional<std::vector<VkCommandBuffer>> {
+            ++callbacks;
+            inherited_commands = batches.front().initial_state.size();
+            return std::vector<VkCommandBuffer>(batches.size(), Handle<VkCommandBuffer>(8));
+        },
+        limits};
+    recorder.BeginSubmission(1, f.Native());
+    auto cb = recorder.CommandBuffer();
+    cb.SetStencilReference(VK_STENCIL_FACE_FRONT_AND_BACK, 4);
+    cb.BeginRenderPass(Fixture::Pass(), VK_SUBPASS_CONTENTS_INLINE);
+    cb.EndRenderPass();
+    REQUIRE(recorder.CapturingState());
+    cb.BeginRenderPass(Fixture::Pass(), VK_SUBPASS_CONTENTS_INLINE);
+    cb.SetStencilReference(VK_STENCIL_FACE_BACK_BIT, 9);
+    cb.Draw(3, 1, 0, 0);
+    cb.EndRenderPass();
+    REQUIRE(recorder.CapturingState());
+    REQUIRE(callbacks == 0);
+    cb.BeginRenderPass(Fixture::Pass(), VK_SUBPASS_CONTENTS_INLINE);
+    cb.Draw(3, 1, 0, 0);
+    cb.Draw(3, 1, 0, 0);
+    cb.EndRenderPass();
+    REQUIRE(callbacks == 1);
+    REQUIRE(inherited_commands == 2);
+    REQUIRE(recorder.CapturingState());
 }
 } // namespace

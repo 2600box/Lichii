@@ -184,6 +184,12 @@ enum class RecordingMode {
     CapacityFallback,
     InlineTransition,
     ParallelTransition,
+    QueryFirst,
+    InlineQueryFirst,
+    ShortFirst,
+    EmptyFirst,
+    SingleBatch,
+    InlineSingleBatch,
 };
 
 struct RenderResult {
@@ -195,10 +201,13 @@ struct RenderResult {
 };
 
 RenderResult Render(const HeadlessDevice& device, ParallelRecorder& parallel, RecordingMode mode,
-                    u64 tick) {
+                    u64 tick, PassRecorder* reused_recorder = nullptr) {
     RenderResult result;
-    const bool continuation =
-        mode == RecordingMode::InlineTransition || mode == RecordingMode::ParallelTransition;
+    const bool query_first =
+        mode == RecordingMode::QueryFirst || mode == RecordingMode::InlineQueryFirst;
+    const bool first_pass_query = mode == RecordingMode::Query || query_first;
+    const bool continuation = mode == RecordingMode::InlineTransition ||
+                              mode == RecordingMode::ParallelTransition || query_first;
     const auto& logical = device.logical;
     auto image = device.CreateImage({
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -392,13 +401,17 @@ RenderResult Render(const HeadlessDevice& device, ParallelRecorder& parallel, Re
         }
         return recorded;
     };
-    PassRecorder recorder{mode == RecordingMode::NoCallback ? RecordBatches{} : record_batches};
+    PassRecorder local_recorder{mode == RecordingMode::NoCallback ? RecordBatches{}
+                                                                  : record_batches};
+    auto& recorder = reused_recorder ? *reused_recorder : local_recorder;
     raw.Begin({.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT});
     recorder.BeginSubmission(tick, raw);
-    const auto commands = mode == RecordingMode::Inline || mode == RecordingMode::InlineTransition
-                              ? raw
-                              : recorder.CommandBuffer();
+    const auto commands =
+        mode == RecordingMode::Inline || mode == RecordingMode::InlineTransition ||
+                mode == RecordingMode::InlineQueryFirst || mode == RecordingMode::InlineSingleBatch
+            ? raw
+            : recorder.CommandBuffer();
     commands.CopyBuffer(*upload, *geometry,
                         VkBufferCopy{0, 0, sizeof(Vertices) + sizeof(VkDrawIndirectCommand)});
     const VkBufferMemoryBarrier upload_barrier{
@@ -426,7 +439,7 @@ RenderResult Render(const HeadlessDevice& device, ParallelRecorder& parallel, Re
     };
     commands.PipelineBarrier(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                              VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, start_barrier);
-    if (mode == RecordingMode::Query) {
+    if (first_pass_query) {
         commands.ResetQueryPool(*query, 0, 1);
         commands.BeginQuery(*query, 0, 0);
     }
@@ -444,7 +457,31 @@ RenderResult Render(const HeadlessDevice& device, ParallelRecorder& parallel, Re
                              VK_SUBPASS_CONTENTS_INLINE);
     std::array<float, 4> color{1.0f, 0.25f, 0.5f, 1.0f};
     commands.PushConstants(*layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(color), color.data());
-    for (u32 draw = 0; draw < 97; ++draw) {
+    if (mode == RecordingMode::ShortFirst || mode == RecordingMode::EmptyFirst) {
+        if (mode == RecordingMode::ShortFirst) {
+            commands.SetScissor(0, VkRect2D{{0, 0}, {Width, Height}});
+            const std::array<float, 4> blend_constants{1, 1, 1, 1};
+            commands.SetBlendConstants(blend_constants.data());
+            commands.Draw(3, 1, 0, 0);
+        }
+        commands.EndRenderPass();
+        auto preflight_barrier = start_barrier;
+        preflight_barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        preflight_barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        commands.PipelineBarrier(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
+                                 preflight_barrier);
+        commands.BeginRenderPass({.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+                                  .renderPass = *renderpass,
+                                  .framebuffer = *framebuffer,
+                                  .renderArea = {{0, 0}, {Width, Height}},
+                                  .clearValueCount = 1,
+                                  .pClearValues = &clear},
+                                 VK_SUBPASS_CONTENTS_INLINE);
+    }
+    const u32 draws =
+        mode == RecordingMode::SingleBatch || mode == RecordingMode::InlineSingleBatch ? 16 : 97;
+    for (u32 draw = 0; draw < draws; ++draw) {
         const VkRect2D scissor =
             draw == 0 ? VkRect2D{{1, 1}, {3, Height - 2}}
                       : VkRect2D{{static_cast<s32>(8 + draw % 13), static_cast<s32>(1 + draw % 5)},
@@ -465,7 +502,7 @@ RenderResult Render(const HeadlessDevice& device, ParallelRecorder& parallel, Re
         }
     }
     commands.EndRenderPass();
-    if (mode == RecordingMode::Query) {
+    if (first_pass_query) {
         commands.EndQuery(*query, 0);
     }
     if (continuation) {
@@ -484,18 +521,22 @@ RenderResult Render(const HeadlessDevice& device, ParallelRecorder& parallel, Re
         commands.PipelineBarrier(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
                                  continuation_barrier);
-        commands.ResetQueryPool(*query, 0, 1);
-        commands.BeginQuery(*query, 0, 0);
+        if (!query_first) {
+            commands.ResetQueryPool(*query, 0, 1);
+            commands.BeginQuery(*query, 0, 0);
+        }
         commands.BeginRenderPass({.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
                                   .renderPass = *continuation_pass,
                                   .framebuffer = *framebuffer,
                                   .renderArea = {{0, 0}, {Width, Height}}},
                                  VK_SUBPASS_CONTENTS_INLINE);
-        for (u32 draw = 0; draw < 3; ++draw) {
+        for (u32 draw = 0; draw < (query_first ? 97U : 3U); ++draw) {
             commands.Draw(3, 1, 0, 0);
         }
         commands.EndRenderPass();
-        commands.EndQuery(*query, 0);
+        if (!query_first) {
+            commands.EndQuery(*query, 0);
+        }
     }
     const VkImageMemoryBarrier download_barrier{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -532,7 +573,7 @@ RenderResult Render(const HeadlessDevice& device, ParallelRecorder& parallel, Re
                               .pCommandBuffers = raw.address()};
     REQUIRE(logical.GetQueue(device.graphics_family).Submit(submit) == VK_SUCCESS);
     REQUIRE(logical.WaitIdle() == VK_SUCCESS);
-    if (mode == RecordingMode::Query || continuation) {
+    if (first_pass_query || continuation) {
         REQUIRE(logical.GetQueryResults(*query, 0, 1, sizeof(result.query_samples),
                                         &result.query_samples, sizeof(result.query_samples),
                                         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) ==
@@ -608,6 +649,77 @@ TEST_CASE("Parallel recording matches ordered headless Vulkan rendering",
         CHECK(parallel_transition.secondaries == 4);
         CHECK(parallel_transition.passes == 1);
         CHECK(parallel_transition.query_samples > 0);
+
+        std::unique_ptr<ParallelRecorder> lazy_parallel;
+        size_t production_passes{};
+        size_t production_batches{};
+        size_t production_secondaries{};
+        u64 completed_tick{};
+        PassRecorder production_recorder{
+            [&](std::span<const ResolvedBatch> batches) {
+                ++production_passes;
+                production_batches += batches.size();
+                if (!lazy_parallel) {
+                    lazy_parallel = std::make_unique<ParallelRecorder>(
+                        fixture.logical, fixture.dispatch, fixture.graphics_family,
+                        ParallelRecordingLimits{
+                            .workers = 2, .queued_jobs = 2, .secondary_buffers = 4});
+                }
+                auto recorded = lazy_parallel->RecordPass(batches, completed_tick);
+                if (recorded) {
+                    production_secondaries += recorded->size();
+                }
+                return recorded;
+            },
+            {.minimum_batches = 2, .retain_inline_state = false}};
+        const auto run_production = [&](RecordingMode mode) {
+            production_passes = production_batches = production_secondaries = 0;
+            completed_tick = tick - 1;
+            return Render(fixture, parallel, mode, tick++, &production_recorder);
+        };
+        const auto serial_single =
+            Render(fixture, parallel, RecordingMode::InlineSingleBatch, tick++);
+        const auto production_single = run_production(RecordingMode::SingleBatch);
+        CHECK(production_single.pixels == serial_single.pixels);
+        CHECK(production_passes == 0);
+        CHECK(production_batches == 0);
+        CHECK(production_secondaries == 0);
+        CHECK_FALSE(lazy_parallel);
+        for (const auto mode :
+             {RecordingMode::EmptyFirst, RecordingMode::ShortFirst, RecordingMode::Parallel}) {
+            CAPTURE(static_cast<int>(mode));
+            const auto actual = run_production(mode);
+            CHECK(actual.pixels == serial.pixels);
+            CHECK(production_passes == 1);
+            CHECK(production_batches == 4);
+            CHECK(production_secondaries == 4);
+        }
+        const auto production_transition = run_production(RecordingMode::ParallelTransition);
+        CHECK(production_transition.pixels == serial_transition.pixels);
+        CHECK(production_transition.query_samples > 0);
+        CHECK(production_passes == 1);
+        CHECK(production_batches == 4);
+        CHECK(production_secondaries == 4);
+        const auto serial_query_first =
+            Render(fixture, parallel, RecordingMode::InlineQueryFirst, tick++);
+        const auto generic_query_first =
+            Render(fixture, parallel, RecordingMode::QueryFirst, tick++);
+        CHECK(generic_query_first.pixels == serial_query_first.pixels);
+        CHECK(generic_query_first.query_samples > 0);
+        CHECK(generic_query_first.passes == 1);
+        CHECK(generic_query_first.batches == 4);
+        CHECK(generic_query_first.secondaries == 4);
+        const auto production_query_first = run_production(RecordingMode::QueryFirst);
+        CHECK(production_query_first.pixels == serial_query_first.pixels);
+        CHECK(production_query_first.query_samples > 0);
+        CHECK(production_passes == 0);
+        CHECK(production_batches == 0);
+        CHECK(production_secondaries == 0);
+        const auto recovered = run_production(RecordingMode::Parallel);
+        CHECK(recovered.pixels == serial.pixels);
+        CHECK(production_passes == 1);
+        CHECK(production_batches == 4);
+        CHECK(production_secondaries == 4);
     }
     for (const auto& error : messages.errors) {
         INFO(error);

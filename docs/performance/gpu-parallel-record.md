@@ -100,13 +100,15 @@ encoder also reports `host parallel passes` and `host parallel batches`.
 
 ## Phase 3: parallel secondary recording
 
-The same switch now attaches two recording workers to the immutable batch boundary.
-Each worker owns its command pool and secondary buffers. VulkanWorker remains the
+The same switch enables capture and starts two recording workers only when a pass
+first qualifies for parallel recording. Each worker owns its command pool and
+secondary buffers. VulkanWorker remains the
 sole primary recorder and submitter; recording workers never call the scheduler,
 read guest memory or mutate resource caches.
 
 Passes with fewer than two batches stay inline because they offer no recording
-parallelism. An eligible pass reserves all its secondary slots before dispatch. The queue holds
+parallelism. This test runs before copying initial-state snapshots into batches.
+An eligible pass reserves all its secondary slots before dispatch. The queue holds
 at most eight waiting jobs, with 256 retained secondary buffers across the two
 workers. If a whole pass cannot fit, it replays inline instead of waiting for its
 own unsubmitted GPU tick. Each slot carries the primary submission's explicit tick
@@ -125,6 +127,30 @@ threads and waits for the last successful submission before destroying their poo
 Unsupported commands, active queries and exhausted budgets still use serial
 recording. A low eligible-pass fraction or repeated-state overhead can make the
 experiment slower; no game-speed improvement follows from compiling it.
+
+### Cheap fallback when no parallel work is available
+
+The Ocarina and Star Fox harness runs on `a1e3570839` executed no parallel batches.
+Star Fox's worker-other time increased from 0.68 to 3.68 ms/frame while it kept
+copying state for inline passes. That work is unnecessary once the production
+policy commits the current submission to serial recording.
+
+Production now stops retaining state after a known query, conditional,
+transform-feedback, unsupported-command, raw-handle, drain or budget fallback.
+The pending prefix is replayed once, then wrappers forward values directly for the
+rest of that primary submission. Inline render-pass begins forward the caller's
+clear array without copying it. A fresh primary restores capture eligibility.
+This is deliberately conservative: a later otherwise-eligible pass in that same
+submission remains serial. Empty and short passes do not disable later eligibility.
+
+The collector's `retain_inline_state` option preserves its original same-submission
+recovery contract for callers that need it; production selects the cheaper policy.
+`host resolved passes/batches` count snapshots actually constructed, so small-pass
+preflight rejection appears under `host inline single batch` without increasing
+those counts. Later bypassed passes inherit the epoch's first disabling reason.
+There is still a small recorder check before direct calls and some work before the
+first unsupported operation. A game run must measure the residual cost; the change
+does not claim a mathematically zero-cost enabled switch.
 
 ## Verification
 
@@ -214,6 +240,11 @@ For the next A/B, keep `EDEN_NX2_PARALLEL_RECORD=0` in both runs and change only
 zone measures its eligible workload. Repeat with GPU profiling unset to check
 observer overhead. The method table's 6.650 ms is an upper bound on the whole
 method family, not the expected saving from this narrower experiment.
+
+The later uninstrumented chest baseline measured 43.38 FPS and 23.05 ms mean,
+against the instrumented 23.87 ms. GPUBack and the front each used about 795 ms CPU
+per second without zones. Treat that front/back pair together; saturation in the
+instrumented GPUBack sample does not establish saturation without profiling.
 
 Upstream `nx2` was already contained in the phase-1 base `99ac3d5955`.
 Eglantine PR #134 adds producer-side profiling but does not measure actual Vulkan

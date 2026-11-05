@@ -240,6 +240,8 @@ public:
         size_t pass_bytes = 4 * 1024 * 1024;
         size_t replay_bytes = 8 * 1024 * 1024;
         size_t draws_per_batch = 32;
+        size_t minimum_batches = 1;
+        bool retain_inline_state = true;
     };
 
     explicit PassRecorder(RecordBatches record_batches = {});
@@ -266,6 +268,7 @@ public:
 
 private:
     void BeginInline();
+    void StopRetainingInlineState(InlineFallbackReason reason);
     void ReplayState() const;
     std::optional<std::vector<ResolvedBatch>> MakeBatches();
 
