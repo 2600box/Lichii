@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <tuple>
 #include <set>
+#include <span>
 #include <fstream>
 #include <mutex>
 #include <string_view>
@@ -60,6 +61,7 @@
 #include "video_core/texture_cache/texture_cache_base.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
+#include "video_core/memory_manager.h"
 #include "video_core/nx2_debug_control.h"
 #include "video_core/nx2_profile.h"
 
@@ -71,6 +73,40 @@ using VideoCommon::ImageViewType;
 
 
 namespace {
+
+/// read_gpu_memory: the first address space (the bound channel's first) that maps the whole range,
+/// read as the GPU reads it, without flushing GPU caches.
+VideoCore::Nx2Debug::GpuReadResult ReadGpuMemory(std::span<Tegra::MemoryManager* const> spaces,
+                                                 GPUVAddr address, u64 size) {
+    VideoCore::Nx2Debug::GpuReadResult result{};
+    if (spaces.empty()) {
+        result.error = "no GPU address space is bound yet";
+        return result;
+    }
+    for (Tegra::MemoryManager* const space : spaces) {
+        if (space->IsFullyMappedRange(address, size)) {
+            result.bytes.resize(size);
+            space->ReadBlockUnsafe(address, result.bytes.data(), size);
+            result.address_space = space->GetID();
+            return result;
+        }
+    }
+    constexpr u64 page_mask = 0xfff;
+    const GPUVAddr end = address + size;
+    GPUVAddr first = address;
+    while (first < end) {
+        const GPUVAddr next = (std::min)((first | page_mask) + 1, end);
+        if (!spaces.front()->IsFullyMappedRange(first, next - first)) {
+            break;
+        }
+        first = next;
+    }
+    result.error = fmt::format("GPU address {:#x} is not mapped (the first unmapped byte in the "
+                               "bound channel's address space; {} address spaces checked)",
+                               first, spaces.size());
+    return result;
+}
+
 struct DrawParams {
     u32 base_instance;
     u32 num_instances;
@@ -1875,6 +1911,22 @@ void RasterizerVulkan::TickFrame() {
         if (const auto change = VideoCore::Nx2Debug::TakeRejectChange()) {
             pipeline_cache.RefreshDebugRejections(change->unrejected);
             VideoCore::Nx2Debug::NoteRejectApplied(change->generation);
+        }
+        while (const auto read = VideoCore::Nx2Debug::TakeGpuRead()) {
+            std::vector<Tegra::MemoryManager*> spaces;
+            if (gpu_memory != nullptr) {
+                spaces.push_back(gpu_memory);
+            }
+            {
+                std::scoped_lock lock{config_mutex};
+                for (const auto& [id, space] : address_spaces) {
+                    if (space.gpu_memory != gpu_memory) {
+                        spaces.push_back(space.gpu_memory);
+                    }
+                }
+            }
+            VideoCore::Nx2Debug::FinishGpuRead(read->id,
+                                               ReadGpuMemory(spaces, read->gpu_address, read->size));
         }
     }
     frame_dump.TickFrame();
