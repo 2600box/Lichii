@@ -954,6 +954,8 @@ void EmitContext::DefineWriteStorageCasLoopFunction(const Info& info) {
     write_storage_cas_loop_func = func;
 }
 
+/// Defines the functions that route global memory accesses and atomics to the storage buffer
+/// holding the address at run time.
 void EmitContext::DefineGlobalMemoryFunctions(const IR::Program& program) {
     const Info& info{program.info};
     if (!info.uses_global_memory || !profile.support_int64) {

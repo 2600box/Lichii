@@ -118,6 +118,7 @@ void CheckCBufNVN(Info& info, IR::Inst& inst) {
     }
 }
 
+/// Records the features, types and resources an instruction needs in the shader info
 void VisitUsages(Info& info, IR::Inst& inst) {
     switch (inst.GetOpcode()) {
     case IR::Opcode::ImageRead:

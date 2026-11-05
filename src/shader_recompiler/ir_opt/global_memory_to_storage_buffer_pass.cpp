@@ -1220,6 +1220,7 @@ void ReplaceAtomic(IR::Block& block, IR::Inst& inst, const IR::U32& storage_inde
     inst.ReplaceUsesWith(value);
 }
 
+/// Replace a global compare-exchange with its storage buffer equivalent, keeping both operands
 void ReplaceAtomicCompareExchange(IR::Block& block, IR::Inst& inst, const IR::U32& storage_index,
                                   const IR::U32& offset) {
     const IR::Opcode new_opcode{GlobalToStorage(inst.GetOpcode())};

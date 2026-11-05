@@ -248,6 +248,7 @@ Id EmitStorageAtomicExchange32(EmitContext& ctx, const IR::Value& binding, const
     return StorageAtomicU32(ctx, binding, offset, value, &Sirit::Module::OpAtomicExchange);
 }
 
+/// Stores value if the storage word equals comparator; returns the old word.
 Id EmitStorageAtomicCompareExchange32(EmitContext& ctx, const IR::Value& binding,
                                       const IR::Value& offset, Id comparator, Id value) {
     const Id pointer{StoragePointer(ctx, ctx.storage_types.U32, &StorageDefinitions::U32, binding,
@@ -482,6 +483,7 @@ Id EmitGlobalAtomicExchange32(EmitContext&) {
     throw NotImplementedException("SPIR-V Instruction");
 }
 
+/// Global compare-exchange through the routing function; returns the old word.
 Id EmitGlobalAtomicCompareExchange32(EmitContext& ctx, const IR::Value& address, Id comparator,
                                      Id value) {
     if (!ctx.profile.support_int64) {

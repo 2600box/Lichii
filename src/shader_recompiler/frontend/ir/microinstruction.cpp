@@ -65,6 +65,7 @@ Inst::~Inst() {
     }
 }
 
+/// Returns true when the instruction must be kept even if its result is unused
 bool Inst::MayHaveSideEffects() const noexcept {
     switch (op) {
     case Opcode::ConditionRef:

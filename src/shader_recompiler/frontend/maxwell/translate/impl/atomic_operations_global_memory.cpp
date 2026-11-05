@@ -201,8 +201,8 @@ void TranslatorVisitor::ATOM(u64 insn) {
     GlobalAtomic(*this, atom.dest_reg, atom.operand_reg, offset, atom.size, atom.op, true);
 }
 
+/// ATOM.CAS Rd, [Ra + imm], Rb: if the word equals Rb, store Rb+1; Rd gets the old word.
 void TranslatorVisitor::ATOM_cas(u64 insn) {
-    // ATOM.CAS Rd, [Ra + imm], Rb: if the word equals Rb, store Rb+1; Rd gets the old word.
     union {
         u64 raw;
         BitField<0, 8, IR::Reg> dest_reg;
