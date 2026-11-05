@@ -110,6 +110,7 @@ public:
         bool host_alpha_to_coverage; ///< As last given to the host
         bool color0;                 ///< The fragment program writes colour 0
         bool kill;                   ///< The fragment program can discard
+        u32 zero_handles;            ///< Texture handles whose handle program gave 0
     };
     /// Ends the query; the draw index comes from BeginProbe.
     void EndProbe(u32 query, Probe probe);
@@ -208,6 +209,7 @@ private:
     std::vector<Target> pass_targets;
     std::vector<u64> pass_hashes;
     std::vector<std::pair<GPUVAddr, u32>> pass_sampled;
+    std::vector<std::pair<u32, u32>> pass_null_sampled; ///< Stage and TIC of views with no image
     /// (compute shader hash, image address, format/level/layer) already read back this frame.
     std::vector<std::tuple<u64, GPUVAddr, u32>> dispatch_sampled;
     /// (address, format, level, layer) of block-compressed textures already read back; the GPU

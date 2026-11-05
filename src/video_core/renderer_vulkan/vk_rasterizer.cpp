@@ -512,6 +512,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
                                               : alpha_to_coverage && pipeline->SupportsAlphaToCoverage(),
                 .color0 = pipeline->SupportsAlphaToCoverage(),
                 .kill = pipeline->FragmentCanDiscard(),
+                .zero_handles = pipeline->ZeroTextureHandles(),
             });
     }
     submitted = true;

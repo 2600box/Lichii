@@ -375,6 +375,7 @@ bool FrameDump::BeginPass(const void* framebuffer, std::span<ImageView* const> c
     }
     pass_hashes.clear();
     pass_sampled.clear();
+    pass_null_sampled.clear();
     pass_first_draw = draws;
     return recorded;
 }
@@ -422,7 +423,17 @@ bool FrameDump::NoteSampled(std::span<const Sampled> textures) {
     bool recorded = false;
     for (const Sampled& texture : textures) {
         const auto key = SampledKey(texture);
-        if (!key || std::ranges::find(pass_sampled, *key) != pass_sampled.end()) {
+        if (!key) {
+            const std::pair stage_tic{texture.stage, texture.tic};
+            if (std::ranges::find(pass_null_sampled, stage_tic) == pass_null_sampled.end()) {
+                pass_null_sampled.push_back(stage_tic);
+                Enqueue({.tags = fmt::format(
+                             R"({{"kind":"sampled","pass":{},"draw":{},"stage":{},"tic":{},"null":true}})",
+                             pass_index, draws - 1, texture.stage, texture.tic)});
+            }
+            continue;
+        }
+        if (std::ranges::find(pass_sampled, *key) != pass_sampled.end()) {
             continue;
         }
         const u32 index = static_cast<u32>(pass_sampled.size());
@@ -884,11 +895,11 @@ void FrameDump::TickFrame() {
             for (size_t index = 0; result == VK_SUCCESS && index < probes.size(); ++index) {
                 const Probe& probe = probes[index];
                 Enqueue({.tags = fmt::format(
-                             R"({{"kind":"draw","draw":{},"samples":{},"mesh":{},"indirect":{},"first":{},"elements":{},"instances":{},"alpha_test":{},"alpha_ref":{},"alpha_to_coverage":{},"host_alpha_to_coverage":{},"color0":{},"kill":{}}})",
+                             R"({{"kind":"draw","draw":{},"samples":{},"mesh":{},"indirect":{},"first":{},"elements":{},"instances":{},"alpha_test":{},"alpha_ref":{},"alpha_to_coverage":{},"host_alpha_to_coverage":{},"color0":{},"kill":{},"zero_handles":{}}})",
                              probe.draw, samples[index], probe.mesh, probe.indirect, probe.first,
                              probe.elements, probe.instances, probe.alpha_test, probe.alpha_ref,
                              probe.alpha_to_coverage, probe.host_alpha_to_coverage, probe.color0,
-                             probe.kill)});
+                             probe.kill, probe.zero_handles)});
             }
             if (result != VK_SUCCESS) {
                 LOG_ERROR(Render_Vulkan, "Frame dump: reading the draw probes failed ({})",
