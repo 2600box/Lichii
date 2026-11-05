@@ -33,8 +33,9 @@ caches under their existing rasterizer locks.
 Each deferred emission owns its IR pools, programs, runtime information, and stage bindings. The
 worker emits SPIR-V, creates shader modules, and performs the existing driver build. It does not
 read engine registers, guest memory, buffer or texture caches, or record scheduler commands.
-`RenderPassCache::Get` retains its existing internal lock. Pipeline completion is published with
-an atomic store and consumed with an acquire load or the existing build mutex.
+`RenderPassCache::Get` retains its existing internal lock. `PipelineBuild` releases task captures
+before publishing completion with a release store. Draws consume it with an acquire load or wait
+on its condition variable. All waiters are notified on success and on a worker exception.
 
 GPUBack records the pending draw and can prepare subsequent commands. VulkanWorker waits at that
 draw's existing build-completion command, so neither that draw nor later commands overtake the
@@ -45,6 +46,13 @@ Deferred IR jobs are capped at the existing pipeline worker count. When that bud
 the new pipeline uses the original synchronous emission path instead of retaining an unbounded
 IR backlog. Up to four released IR pools are retained for reuse. The driver workaround that
 restricts broken parallel-compilation devices to one worker is unchanged.
+
+Queued callbacks own the shared build state instead of a raw pipeline pointer. A pipeline already
+built by the scheduler can therefore be evicted before its old queued callback runs. Pipeline
+destruction waits for running work or finishes queued work before its Vulkan resources disappear.
+The pipeline cache drains its workers and explicitly destroys graphics pipelines while the IR
+pool cache and other build dependencies are still alive. Destruction may claim a queued native
+build; ordinary native draw waits never do.
 
 ## Upstream alternative
 
@@ -69,16 +77,22 @@ word against that reference, logs any mismatch as `Nx2Perf async_pipelines:`, an
 reference on a mismatch. Verification deliberately adds synchronous work and is not a performance
 measurement mode.
 
-The `[async_draw]` tests cover native no-discard behavior, the switch and backlog fallback, and
-IR ownership across a worker handoff. The worker test compares vertex and fragment SPIR-V,
-including storage writes and shared descriptor-binding numbering, with synchronous emission.
+The `[async_draw]` tests cover native no-discard behavior and exercise the production
+`PipelineBuild` and `EmissionBudget` classes. They cover delayed emission, ordered draw waits
+with out-of-order completions, saturation fallback, standard and unknown exceptions, capture
+cleanup before completion, stale queued callbacks after eviction, and queued and running builds
+during teardown. These are CPU lifecycle tests, not a Vulkan-driver or gameplay replay.
+
+Shader tests compare synchronous and worker emission through the production verification helper.
+They include storage writes, shared descriptor-binding numbering, a merged VertexA/VertexB
+program with a conditional branch and phi node, preserved stage metadata, and reference selection
+on a word mismatch. They do not cover every shader stage or native program form.
 
 The supplied A2 profile has no `CreateGraphicsPipeline`, `TranslateProgram`, or `EmitSPIRV`
 samples in its 9,677 GPUBack samples, so it cannot split the reported build cost into translation
 and emission. No Ocarina runtime measurements or Windows build are claimed for this cloud change.
 
-The reported 0.2–2.3 seconds per 10 seconds is a 2–23% wall-time upper bound, or about
-0.8–9.6 ms per frame at 24 fps. Removing all of it would ideally mean about 24.5–31.2 fps,
-not 60 fps. This implementation can remove only the emission fraction that overlaps useful
-GPUBack work, minus queue, allocation, and remaining hold costs. Its actual savings require
+The reported 0.2–2.3 seconds per 10 seconds does not establish an FPS improvement. This change
+can overlap only the emission fraction with useful GPUBack work, and queue delays, allocation,
+and remaining draw holds can reduce that benefit. Its actual savings require
 equivalent cold-cache sessions with the switch on and off, not a warmed-cache second run.

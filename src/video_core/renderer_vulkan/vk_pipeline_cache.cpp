@@ -39,6 +39,7 @@
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
+#include "video_core/renderer_vulkan/pipeline_shader_emission.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
 #include "video_core/renderer_vulkan/vertex_repack.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
@@ -341,14 +342,8 @@ vk::ShaderModule EmitShaderModule(const Device& device, const Shader::Profile& p
                                  Shader::IR::Program& program, Shader::Backend::Bindings& binding,
                                  u64 shader_hash, size_t stage_index,
                                  std::span<const u32> reference = {}) {
-    std::vector<u32> code{EmitSPIRV(profile, runtime_info, program, binding)};
-    if (!reference.empty() && !std::ranges::equal(code, reference)) {
-        LOG_ERROR(Render_Vulkan,
-                  "Nx2Perf async_pipelines: shader {:016x} worker SPIR-V differs; "
-                  "using GPU-thread SPIR-V",
-                  shader_hash);
-        code.assign(reference.begin(), reference.end());
-    }
+    const auto code =
+        EmitPipelineShader(profile, runtime_info, program, binding, shader_hash, reference);
     device.SaveShader(code);
     vk::ShaderModule module{BuildShader(device, code)};
 
@@ -380,15 +375,7 @@ vk::ShaderModule EmitShaderModule(const Device& device, const Shader::Profile& p
 }
 
 struct DeferredStages {
-    explicit DeferredStages(std::atomic<size_t>& pending_) : pending{pending_} {
-        pending.fetch_add(1, std::memory_order_relaxed);
-    }
-
-    ~DeferredStages() {
-        pending.fetch_sub(1, std::memory_order_relaxed);
-    }
-
-    std::atomic<size_t>& pending;
+    std::unique_ptr<EmissionBudget::Reservation> reservation;
     std::shared_ptr<ShaderPools> pools;
     std::array<Shader::IR::Program, Maxwell::MaxShaderProgram> programs;
     std::array<std::optional<Shader::RuntimeInfo>, Maxwell::MaxShaderStage> runtime_infos;
@@ -469,6 +456,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
                                 !DriverCachesPipelines(device_)},
       num_pipeline_workers{device.HasBrokenParallelShaderCompiling() ? 1ULL
                                                                    : GetTotalPipelineWorkers()},
+      emission_budget{num_pipeline_workers},
       workers(num_pipeline_workers,
               "VkPipelineBuilder", {}, Common::ThreadPlacement::Background),
       serialization_thread(1, "VkPipelineSerialization", {},
@@ -742,11 +730,15 @@ bool PreloadAllPipelines() {
 } // Anonymous namespace
 
 PipelineCache::~PipelineCache() {
+    workers.WaitForRequests();
+    serialization_thread.WaitForRequests();
     SaveUsedPipelines();
     if (use_vulkan_pipeline_cache && !vulkan_pipeline_cache_filename.empty()) {
         SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
                                      CACHE_VERSION);
     }
+    graphics_cache.clear();
+    evicted_pipelines.clear();
 }
 
 void PipelineCache::SaveUsedPipelines() {
@@ -1179,7 +1171,8 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const
 std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     ShaderPools& pools, const GraphicsPipelineCacheKey& key,
     std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
-    bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools) try {
+    bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools,
+    std::unique_ptr<EmissionBudget::Reservation> reservation) try {
     auto hash = key.Hash();
     LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);
     size_t env_index{0};
@@ -1324,7 +1317,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     }
     std::function<std::array<vk::ShaderModule, Maxwell::MaxShaderStage>()> emit_stages;
     if (emit_pools) {
-        auto job = std::make_shared<DeferredStages>(pending_emissions);
+        auto job = std::make_shared<DeferredStages>();
+        job->reservation = std::move(reservation);
         job->pools = emit_pools;
         job->programs = std::move(programs);
         job->runtime_infos = std::move(deferred_runtime_infos);
@@ -1443,10 +1437,10 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline() {
     GetGraphicsEnvironments(environments, graphics_key.unique_hashes);
 
     std::shared_ptr<ShaderPools> emit_pools;
-    if (DefersShaderEmission(VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::AsyncPipelines),
-                             maxwell3d->GetNativeMacroEngine().native_turing,
-                             pending_emissions.load(std::memory_order_relaxed),
-                             num_pipeline_workers)) {
+    auto reservation = emission_budget.TryAcquire(
+        VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::AsyncPipelines),
+        maxwell3d->GetNativeMacroEngine().native_turing);
+    if (reservation) {
         {
             std::scoped_lock lock{spare_pools_mutex};
             if (!spare_pools.empty()) {
@@ -1462,7 +1456,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline() {
     }
     ShaderPools& pools = emit_pools ? *emit_pools : main_pools;
     auto pipeline{CreateGraphicsPipeline(pools, graphics_key, environments.Span(), nullptr, true,
-                                         std::move(emit_pools))};
+                                         std::move(emit_pools), std::move(reservation))};
     if (!pipeline || pipeline_cache_filename.empty()) {
         return pipeline;
     }

@@ -144,7 +144,8 @@ private:
     std::unique_ptr<GraphicsPipeline> CreateGraphicsPipeline(
         ShaderPools& pools, const GraphicsPipelineCacheKey& key,
         std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
-        bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools = nullptr);
+        bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools = nullptr,
+        std::unique_ptr<EmissionBudget::Reservation> reservation = nullptr);
 
     ComputePipelineCacheEntry CreateComputePipeline(const ComputePipelineCacheKey& key,
                                                      const ShaderInfo* shader);
@@ -175,7 +176,7 @@ private:
     bool use_asynchronous_shaders{};
     bool use_vulkan_pipeline_cache{};
     const size_t num_pipeline_workers;
-    std::atomic<size_t> pending_emissions{};
+    EmissionBudget emission_budget;
 
     GraphicsPipelineCacheKey graphics_key{};
     GraphicsPipeline* current_pipeline{};

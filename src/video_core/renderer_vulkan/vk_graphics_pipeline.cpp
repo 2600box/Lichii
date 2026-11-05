@@ -17,6 +17,7 @@
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 
 #include "common/bit_field.h"
+#include "common/scope_exit.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
@@ -345,10 +346,7 @@ GraphicsPipeline::GraphicsPipeline(
     auto func{[this, shader_notify, &render_pass_cache, pipeline_statistics,
                 emit_stages = std::move(emit_stages)] {
         const auto begin = std::chrono::steady_clock::now();
-        const auto finish = [this, shader_notify] {
-            std::scoped_lock lock{build_mutex};
-            is_built = true;
-            build_condvar.notify_one();
+        SCOPE_EXIT {
             if (shader_notify) {
                 shader_notify->MarkShaderComplete();
             }
@@ -362,8 +360,7 @@ GraphicsPipeline::GraphicsPipeline(
             MakePipeline(render_pass);
         } catch (const Shader::Exception& exception) {
             LOG_ERROR(Render_Vulkan, "Graphics pipeline {:016x}: {}", key.Hash(), exception.what());
-            finish();
-            return;
+            throw;
         } catch (const vk::Exception& exception) {
             LOG_CRITICAL(Render_Vulkan,
                          "Graphics pipeline build failed: {} (stages: tcs={} tes={} geom={}, "
@@ -371,8 +368,7 @@ GraphicsPipeline::GraphicsPipeline(
                          exception.what(), spv_modules[1] ? 1 : 0, spv_modules[2] ? 1 : 0,
                          spv_modules[3] ? 1 : 0, key.state.patch_control_points_minus_one.Value() + 1,
                          device.GetMaxTessellationPatchSize());
-            finish();
-            return;
+            throw;
         }
         if (pipeline_statistics) {
             pipeline_statistics->Collect(device, *pipeline);
@@ -392,29 +388,13 @@ GraphicsPipeline::GraphicsPipeline(
                          key.Hash(), std::chrono::duration<double, std::milli>(elapsed).count());
             }
         }
-        finish();
     }};
     std::array<bool, NUM_STAGES> present_stages{};
     for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
         present_stages[stage] = infos[stage] != nullptr;
     }
     configure_func = ConfigureFunc(present_stages, stage_infos);
-    build_task = std::move(func);
-    if (worker_thread) {
-        worker_thread->QueueWork([this] { RunBuild(); });
-    } else {
-        RunBuild();
-    }
-}
-
-void GraphicsPipeline::RunBuild() {
-    // A draw or dispatch that needs the pipeline builds it on the scheduler thread instead of
-    // waiting for the worker queue, which can hold hundreds of builds, to reach it.
-    if (build_claimed.exchange(true)) {
-        return;
-    }
-    build_task();
-    build_task = nullptr;
+    build.emplace(worker_thread, std::move(func));
 }
 
 void GraphicsPipeline::AddTransition(GraphicsPipeline* transition) {
@@ -718,7 +698,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             scheduler.RequestOutsideRenderPassOperationContext();
         }
     }
-    if (IsBuilt() && !pipeline) {
+    if (IsBuilt() && (!pipeline || build->Failed())) {
         return false;
     }
     Profile::Scope scope{Profile::Zone::ConfigureDraw};
@@ -772,11 +752,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
         // Wait for the pipeline to be built
         scheduler.Record([this](vk::CommandBuffer) {
             const auto begin = std::chrono::steady_clock::now();
-            if (!worker_only_build) {
-                RunBuild();
-            }
-            std::unique_lock lock{build_mutex};
-            build_condvar.wait(lock, [this] { return is_built.load(std::memory_order::relaxed); });
+            build->Wait(!worker_only_build);
             hold_time_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                        std::chrono::steady_clock::now() - begin)
                                        .count(),
@@ -819,8 +795,8 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             cmdbuf.BindDescriptorBuffersEXT(binding_info);
         }
         if (bind_pipeline) {
-            scheduler.SetGraphicsPipelineMissing(!pipeline);
-            if (!pipeline) {
+            scheduler.SetGraphicsPipelineMissing(!pipeline || build->Failed());
+            if (!pipeline || build->Failed()) {
                 return;
             }
             cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, *pipeline);
