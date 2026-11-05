@@ -524,6 +524,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     if (record_sampled) {
         sampled_images.clear();
         size_t view_index{};
+        size_t sampler_index{};
         for (size_t stage = 0; stage < Spec::enabled_stages.size(); ++stage) {
             if (!Spec::enabled_stages[stage]) {
                 continue;
@@ -536,9 +537,9 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                 view_index += Shader::NumDescriptors(info.image_buffer_descriptors);
             }
             const u32 textures = Shader::NumDescriptors(info.texture_descriptors);
-            for (u32 texture = 0; texture < textures; ++texture, ++view_index) {
-                sampled_images.push_back(
-                    {static_cast<u32>(stage), views[view_index].index, views[view_index].id});
+            for (u32 texture = 0; texture < textures; ++texture, ++view_index, ++sampler_index) {
+                sampled_images.push_back({static_cast<u32>(stage), views[view_index].index,
+                                          views[view_index].id, samplers[sampler_index]});
             }
             if constexpr (Spec::has_images) {
                 view_index += Shader::NumDescriptors(info.image_descriptors);

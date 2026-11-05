@@ -97,6 +97,7 @@ public:
         u32 stage;
         u32 tic;
         VideoCommon::ImageViewId id;
+        VideoCommon::SamplerId sampler;
     };
 
     /// The sampled textures of the last configured draw, kept for EDEN_NX2_FRAME_DUMP_SAMPLED.
