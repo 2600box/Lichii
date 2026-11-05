@@ -22,6 +22,8 @@ struct CaptureRequest {
     u64 id;
     std::filesystem::path directory;
     bool sampled;
+    /// The uniform and storage buffers of every draw and dispatch, and dispatch group counts.
+    bool buffers;
 };
 
 struct CaptureResult {

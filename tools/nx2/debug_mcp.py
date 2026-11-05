@@ -75,13 +75,17 @@ TOOLS = [
         "name": "capture_frame",
         "description": "EDEN_NX2_FRAME_DUMP for the next frame, now: every pass colour target, "
                        "dispatch storage image and the present source as PNG and .raw.zst, plus "
-                       "manifest.jsonl. 'sampled' also reads back every sampled texture. Returns "
+                       "manifest.jsonl. 'sampled' also reads back every sampled texture with its "
+                       "sampler state; 'buffers' records every draw's and dispatch's uniform and "
+                       "storage buffers (kind: buffer, buffer_<hash>.bin.zst) and dispatch group "
+                       "counts (kind: launch). Returns "
                        "the directory, summary, entry counts and the first manifest entries. "
                        "'index' builds index.html with frame_dump_index.py.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "sampled": {"type": "boolean"},
+                "buffers": {"type": "boolean"},
                 "timeout_s": {"type": "integer", "minimum": 1, "maximum": 600},
                 "manifest_lines": {"type": "integer", "minimum": 0, "maximum": 5000},
                 "index": {"type": "boolean"},
