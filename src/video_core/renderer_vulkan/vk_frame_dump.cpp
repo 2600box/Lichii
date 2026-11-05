@@ -11,6 +11,7 @@
 #include <fmt/format.h>
 
 #include "common/cityhash.h"
+#include "common/div_ceil.h"
 #include "common/logging.h"
 #include "common/settings.h"
 #include "common/stb.h"
@@ -275,7 +276,8 @@ std::optional<FrameDump::Target> FrameDump::MakeTarget(ImageView& view, u32 slot
     if (info.type == VideoCommon::ImageType::Buffer ||
         (type != SurfaceType::ColorTexture && type != SurfaceType::Depth &&
          type != SurfaceType::DepthStencil) ||
-        DefaultBlockWidth(info.format) != 1 || DefaultBlockHeight(info.format) != 1) {
+        (DefaultBlockWidth(info.format) != 1 &&
+         True(image->flags & VideoCommon::ImageFlagBits::Converted))) {
         return std::nullopt;
     }
     DepthEncoding depth_encoding = DepthEncoding::None;
@@ -319,6 +321,13 @@ std::optional<FrameDump::Target> FrameDump::MakeTarget(ImageView& view, u32 slot
         .msaa = info.num_samples > 1,
         .depth_encoding = depth_encoding,
     };
+}
+
+size_t FrameDump::TargetBytes(const Target& target) {
+    using namespace VideoCore::Surface;
+    return size_t{Common::DivCeil(target.width, DefaultBlockWidth(target.format))} *
+           Common::DivCeil(target.height, DefaultBlockHeight(target.format)) * target.depth *
+           TexelBytes(target);
 }
 
 u32 FrameDump::TexelBytes(const Target& target) {
@@ -548,7 +557,7 @@ bool FrameDump::Record(const Target& target, std::string name, std::string tags)
         Enqueue({.tags = fmt::format(R"({{"name":"{}",{},"skipped":"msaa"}})", name, tags)});
         return false;
     }
-    const size_t size = size_t{target.width} * target.height * target.depth * TexelBytes(target);
+    const size_t size = TargetBytes(target);
     if (recorded_bytes + size > SIZE_CAP) {
         truncated = true;
         return false;
@@ -662,8 +671,7 @@ void FrameDump::Drain() {
         readback.buffer.Invalidate();
         const Target& target = readback.target;
         const auto mapped = readback.buffer.Mapped().first(
-            readback.raw ? readback.bytes
-                         : size_t{target.width} * target.height * target.depth * TexelBytes(target));
+            readback.raw ? readback.bytes : TargetBytes(target));
         Enqueue({.target = target,
                  .name = std::move(readback.name),
                  .tags = std::move(readback.tags),

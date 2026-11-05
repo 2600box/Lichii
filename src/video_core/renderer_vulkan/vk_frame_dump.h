@@ -143,6 +143,7 @@ private:
 
     std::optional<Target> MakeTarget(ImageView& view, u32 slot) const;
     static u32 TexelBytes(const Target& target);
+    static size_t TargetBytes(const Target& target);
     static int Decode(const Target& target, const u8* pixel, std::array<float, 4>& out);
     bool Record(const Target& target, std::string name, std::string tags);
     bool RecordSampled(const Sampled& texture, u32 index, std::string name, std::string tags);
