@@ -614,7 +614,7 @@ size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
     // Native storage buffers ask this for up to 8 MiB on each bind: ~90,000 times a second in
     // Ocarina's Kokiri village, at as many addresses as there are objects, so answers kept per
     // address missed and walking the pages took ~11% of the GPU back thread. The answer for any
-    // address follows from where the contiguous run through its 64 KiB page ends: keep that per
+    // address follows from where the contiguous run through its 4 KiB page ends: keep that per
     // page and thread until the page table changes.
     // EXPERIMENT (not for nx2): EDEN_NX2_RUN_CACHE=1 uses the page runs (default: the per-address
     // cache), =2 the page runs with every answer checked against a walk (differences logged).
@@ -653,11 +653,13 @@ size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
     struct Stats {
         u64 hits, misses, extends, fallbacks, last_report_ns, last_serial;
     };
-    thread_local std::array<Run, 1024> runs{};
+    thread_local std::array<Run, 4096> runs{};
     thread_local Stats stats{};
-    const GPUVAddr page = gpu_addr & ~big_page_mask;
+    // Small pages: Ocarina maps separate allocations into one 64 KiB page, so a run from the big
+    // page's start often ends before the address.
+    const GPUVAddr page = gpu_addr & ~page_mask;
     const GPUVAddr limit = gpu_addr + size;
-    Run& run = runs[(page >> big_page_bits) % runs.size()];
+    Run& run = runs[(page >> page_bits) % runs.size()];
     const auto walk = [&] {
         const size_t length = MaxContinuousRangeUncached(page, limit - page);
         run = {unique_identifier + 1, page, serial, page + length, page + length < limit};
