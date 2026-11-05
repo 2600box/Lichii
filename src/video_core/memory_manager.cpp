@@ -616,11 +616,11 @@ size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
     // address missed and walking the pages took ~11% of the GPU back thread. The answer for any
     // address follows from where the contiguous run through its 64 KiB page ends: keep that per
     // page and thread until the page table changes.
-    // EXPERIMENT (not for nx2): EDEN_NX2_RUN_CACHE=0 uses the per-address cache, =2 checks every
-    // answer against a page walk and logs differences.
+    // EXPERIMENT (not for nx2): EDEN_NX2_RUN_CACHE=1 uses the page runs (default: the per-address
+    // cache), =2 the page runs with every answer checked against a walk (differences logged).
     static const int mode = [] {
         const char* value = std::getenv("EDEN_NX2_RUN_CACHE");
-        return value == nullptr ? 1 : value[0] - '0';
+        return value == nullptr ? 0 : value[0] - '0';
     }();
     const u64 serial = map_serial.load(std::memory_order_acquire);
     if (mode == 0) {

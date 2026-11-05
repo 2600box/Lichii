@@ -247,6 +247,35 @@ std::string Report(const std::vector<Target>& targets, const std::vector<Sample>
         };
         text += fmt::format("=== thread \"{}\": {} samples\n", targets[thread].name, total);
         print("self (where the thread is)", self, 60);
+        // The hottest instructions as module offsets, for llvm-symbolizer --relative-address
+        // (which line of a function, inlined code included).
+        std::map<DWORD64, unsigned> addresses;
+        for (const Sample& sample : samples) {
+            if (sample.thread == thread && sample.depth != 0) {
+                ++addresses[sample.frames[0]];
+            }
+        }
+        std::vector<std::pair<unsigned, DWORD64>> hot;
+        for (const auto& [address, count] : addresses) {
+            hot.emplace_back(count, address);
+        }
+        std::sort(hot.rbegin(), hot.rend());
+        text += "-- self by instruction (module+offset)\n";
+        for (size_t i = 0; i < (std::min<size_t>)(hot.size(), 60); ++i) {
+            const DWORD64 address = hot[i].second;
+            HMODULE module{};
+            char module_path[MAX_PATH] = "?";
+            DWORD64 offset = address;
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   reinterpret_cast<LPCSTR>(address), &module)) {
+                GetModuleFileNameA(module, module_path, sizeof(module_path));
+                offset = address - reinterpret_cast<DWORD64>(module);
+            }
+            const char* base = std::strrchr(module_path, '\\');
+            text += fmt::format("{:6} {}+{:#x} {}\n", hot[i].first, base != nullptr ? base + 1 : module_path,
+                                offset, symbolizer.Name(address));
+        }
         print("self <- caller", self_caller, 50);
         print("inclusive (on the stack)", inclusive, 90);
         text += "\n";

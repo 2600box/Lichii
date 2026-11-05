@@ -1191,6 +1191,20 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
         memory_manager.ReadBlockUnsafe(source, diag_before.data(), read_bytes);
     }
     VideoCommon::Nx2Profile::CountDmaRead(macro);
+    // EXPERIMENT (not for nx2): EDEN_NX2_DMA_NO_DRAIN=1 reads guest memory as it is, without
+    // waiting for the back: how much the drain costs, not a correct read.
+    static const bool no_drain = std::getenv("EDEN_NX2_DMA_NO_DRAIN") != nullptr;
+    if (no_drain) {
+        for (u32 i = 0; i < words; ++i) {
+            const u32 word = memory_manager.Read<u32>(source + u64{i} * sizeof(u32));
+            if (method == 0x158) {
+                fs.parameters.push_back(word);
+            } else if (ram + i < native_data_ram.size()) {
+                native_data_ram[ram + i] = word;
+            }
+        }
+        return;
+    }
     split.Drain(VideoCommon::DrainSite::MacroDmaRead);
     if (VideoCommon::QueryDma::TraceEnabled()) {
         split.Run(
