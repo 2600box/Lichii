@@ -6,6 +6,7 @@
 
 add_executable(tests
     video_core/host_gpu_profile.cpp
+    video_core/resolved_batch.cpp
     video_core/aftermath_dump.cpp
     video_core/frame_dump_schedule.cpp
     video_core/gpu_timestamp.cpp

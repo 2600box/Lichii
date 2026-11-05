@@ -28,6 +28,22 @@ inline constexpr std::array names{
 };
 static_assert(names.size() == static_cast<size_t>(Phase::Count));
 
+enum class Counter : size_t {
+    ResolvedPasses,
+    ResolvedBatches,
+    ParallelPasses,
+    ParallelBatches,
+    InlinePasses,
+    BudgetFallbacks,
+    Count,
+};
+
+inline constexpr std::array counter_names{
+    "resolved passes",  "resolved batches", "parallel passes",
+    "parallel batches", "inline passes",    "budget fallbacks",
+};
+static_assert(counter_names.size() == static_cast<size_t>(Counter::Count));
+
 struct Sample {
     u64 nanoseconds{};
     u64 calls{};
@@ -68,6 +84,19 @@ private:
 
 inline const bool enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
 inline thread_local Accounting accounting;
+inline thread_local std::array<u64, static_cast<size_t>(Counter::Count)> counters{};
+
+inline void Add(Counter counter, u64 amount = 1) {
+    if (enabled) {
+        counters[static_cast<size_t>(counter)] += amount;
+    }
+}
+
+inline auto TakeCounters() {
+    const auto result = counters;
+    counters = {};
+    return result;
+}
 
 class Scope {
 public:

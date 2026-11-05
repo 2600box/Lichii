@@ -47,31 +47,67 @@ Submission, compute, copies, queries and uncertain dependencies will also remain
 serial in the initial experiment, so the total encoding measurement is an upper
 bound on the work eligible for graphics parallelism.
 
-## Subsequent phases
+## Phase 2: immutable batches with serial replay
 
-Phase 1 does not enable `EDEN_NX2_PARALLEL_RECORD` or change scheduling. That
-experiment switch belongs to the implementation of the following phases and must
-remain off by default. No recording-speed improvement is claimed here.
+`EDEN_NX2_PARALLEL_RECORD=1` enables immutable command capture. Unset, `0`, or any
+other value keeps the original path. This phase still records Vulkan commands
+serially. It is a correctness checkpoint, not a speedup.
 
-1. Build immutable graphics batches after ordered resolution. Each batch needs a
-   built pipeline, complete dynamic/geometry state, owned descriptor and push data,
-   a compatible render-pass instance, explicit barriers and retained allocations.
-   Handles and cache IDs alone are not resource ownership.
-2. Use worker-owned secondary pools and preserve the existing scheduler worker as
-   the sole primary recorder and submitter. Execute completed batches in guest
-   order and retire resources on the submission timeline, not worker completion.
-3. Keep unsupported draws, compute, copies, queries, conditional rendering,
-   transform feedback and capture paths serial. A secondary-only render pass
-   cannot accept an inline fallback draw. Pass transitions must preserve clear/load
-   behavior, barriers and complete state rebinding.
-4. Measure the result before adding resolution concurrency. Resolution must keep
-   guest reads, uploads, hazards and cache mutation ordered. Per-stage tasks would
-   need snapshotted inputs and must not mutate shared caches.
+GPUBack remains the sole owner of guest resource resolution and buffer/texture
+cache mutation. VulkanWorker still executes the existing callbacks in FIFO order,
+including descriptor allocation, pipeline-build waits and query bookkeeping.
+The immutable boundary follows those callbacks. Moving callbacks themselves to
+workers would race shared allocators and borrowed descriptor storage.
 
-The existing arbitrary scheduler callbacks are not immutable batches. Graphics
-callbacks can read borrowed descriptor payloads, mutate shared descriptor pools,
-wait for pipelines and read settings. Query and timestamp callbacks mutate shared
-query state. They cannot safely be handed to concurrent workers unchanged.
+`PassRecorder` captures resolved Vulkan values through the command-buffer wrapper.
+`ResolvedCommand` is a closed variant. Pointer-bearing arguments become owned
+arrays, including push-descriptor bytes whose size comes from the pipeline.
+`ResolvedBatch` contains an immutable submission epoch, sequence number, compatible
+render-pass inheritance, a complete state preamble and draw commands. It contains
+no pointer to Maxwell state, guest memory or a cache object. Uploads, layout
+transitions, barriers, compute and copies retain their original serial positions.
+
+The state preamble is an exact history of state commands in the current primary
+epoch. This preserves partial writes and pipeline/static-state interactions without
+guessing at state invalidation rules. A batch covers up to 32 draws. History,
+pending pass payload and cumulative replay cost are bounded; a budget overflow
+selects serial recording for the remainder of the epoch. History is not a final
+performance optimization: repeated state increases secondary encoding work.
+
+The adapter delays the physical render-pass begin while it captures a candidate
+pass. A late unsupported command materializes the prefix inline and keeps that
+pass inline through its end. This emits the original clear/load operation once,
+without an extra pass break. Queries, conditional rendering and transform feedback
+prevent parallel capture while active. Unsupported persistent state and raw command
+buffer escape disable capture for the entire primary epoch.
+
+`WaitWorker` places a FIFO drain marker before waiting. An unfinished captured pass
+becomes inline at that marker, so descriptor-arena reuse cannot wait for an end-pass
+command that the blocked producer has not emitted. Frame retirement also drains the
+worker before rotating payload arenas or releasing cache objects.
+
+The submission epoch is the existing primary's signal value, checked against the
+ordered submit callback. Batches never leave that submission or extend references
+past its existing GPU retirement conditions. Cache-owned resources retain their
+existing timeline/ring ownership; the batch does not pretend a raw handle is an
+owning reference. The frame/drain gates enforce CPU recording completion before
+retirement, and submission order remains unchanged.
+
+With profiling enabled, `host resolved passes`, `host resolved batches`,
+`host inline passes` and `host budget fallbacks` show the path taken. The forthcoming
+parallel encoder also reports `host parallel passes` and `host parallel batches`.
+
+## Phase 3: parallel secondary recording
+
+The next checkpoint attaches bounded worker-owned secondary pools to the same
+immutable batch boundary. VulkanWorker remains the sole primary recorder and
+submitter. It consumes results in guest order, restores logical primary state after
+executing secondaries, and preserves GPU timeline retirement. Unsupported paths
+continue to record serially.
+
+Further resolution parallelism needs separate measurements. Guest reads, uploads,
+hazards and cache mutation remain ordered; per-stage tasks would need snapshotted
+inputs and must not mutate shared caches.
 
 Upstream `nx2` was already contained in the phase-1 base `99ac3d5955`.
 Eglantine PR #134 adds producer-side profiling but does not measure actual Vulkan

@@ -20,6 +20,7 @@
 
 #include "common/common_types.h"
 #include "video_core/host_gpu_profile.h"
+#include "video_core/renderer_vulkan/vk_resolved_batch.h"
 #include "video_core/vulkan_common/vulkan.h"
 
 #ifdef _MSC_VER
@@ -226,6 +227,7 @@ struct DeviceDispatch : InstanceDispatch {
     PFN_vkCmdCopyQueryPoolResults vkCmdCopyQueryPoolResults{};
     PFN_vkCmdDispatch vkCmdDispatch{};
     PFN_vkCmdDispatchIndirect vkCmdDispatchIndirect{};
+    PFN_vkCmdExecuteCommands vkCmdExecuteCommands{};
     PFN_vkCmdDraw vkCmdDraw{};
     PFN_vkCmdDrawIndexed vkCmdDrawIndexed{};
     PFN_vkCmdDrawIndirect vkCmdDrawIndirect{};
@@ -1245,68 +1247,97 @@ class CommandBuffer {
 public:
     CommandBuffer() noexcept = default;
 
-    explicit CommandBuffer(VkCommandBuffer handle_, const DeviceDispatch& dld_) noexcept
+    explicit CommandBuffer(VkCommandBuffer handle_, const DeviceDispatch& dld_)
         : handle{handle_}, dld{&dld_} {}
 
-    const VkCommandBuffer* address() const noexcept {
+    const VkCommandBuffer* address() const {
+        if (recorder)
+            recorder->DisableCapture();
         return &handle;
     }
 
-    VkCommandBuffer operator*() const noexcept {
+    VkCommandBuffer operator*() const {
+        if (recorder)
+            recorder->DisableCapture();
         return handle;
     }
     void Begin(const VkCommandBufferBeginInfo& begin_info) const {
+        if (recorder)
+            recorder->DisableCapture();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         Check(dld->vkBeginCommandBuffer(handle, &begin_info));
     }
 
     void End() const {
+        if (recorder)
+            recorder->EndSubmission();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         Check(dld->vkEndCommandBuffer(handle));
     }
 
     void BeginRenderPass(const VkRenderPassBeginInfo& renderpass_bi,
-                         VkSubpassContents contents) const noexcept {
+                         VkSubpassContents contents) const {
+        if (recorder) {
+            recorder->BeginPass(renderpass_bi, contents);
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBeginRenderPass(handle, &renderpass_bi, contents);
     }
 
-    void EndRenderPass() const noexcept {
+    void EndRenderPass() const {
+        if (recorder) {
+            recorder->EndPass();
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdEndRenderPass(handle);
     }
 
-    void BeginQuery(VkQueryPool query_pool, u32 query, VkQueryControlFlags flags) const noexcept {
+    void BeginQuery(VkQueryPool query_pool, u32 query, VkQueryControlFlags flags) const {
+        if (recorder)
+            recorder->SetQueryActive(true);
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBeginQuery(handle, query_pool, query, flags);
     }
 
-    void EndQuery(VkQueryPool query_pool, u32 query) const noexcept {
+    void EndQuery(VkQueryPool query_pool, u32 query) const {
+        if (recorder)
+            recorder->SetQueryActive(false);
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdEndQuery(handle, query_pool, query);
     }
 
-    void ResetQueryPool(VkQueryPool query_pool, u32 first, u32 count) const noexcept {
+    void ResetQueryPool(VkQueryPool query_pool, u32 first, u32 count) const {
+        if (recorder)
+            recorder->MaterializeInline();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdResetQueryPool(handle, query_pool, first, count);
     }
 
-    void WriteTimestamp(VkPipelineStageFlagBits stage, VkQueryPool query_pool,
-                        u32 query) const noexcept {
+    void WriteTimestamp(VkPipelineStageFlagBits stage, VkQueryPool query_pool, u32 query) const {
+        if (recorder)
+            recorder->MaterializeInline();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdWriteTimestamp(handle, stage, query_pool, query);
     }
 
     void BindDescriptorSets(VkPipelineBindPoint bind_point, VkPipelineLayout layout, u32 first,
-                            Span<VkDescriptorSet> sets, Span<u32> dynamic_offsets) const noexcept {
+                            Span<VkDescriptorSet> sets, Span<u32> dynamic_offsets) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{Resolved::DescriptorSets{
+                bind_point, layout, first, Resolved::Copy(sets.data(), sets.size()),
+                Resolved::Copy(dynamic_offsets.data(), dynamic_offsets.size())}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBindDescriptorSets(handle, bind_point, layout, first, sets.size(), sets.data(),
@@ -1314,46 +1345,74 @@ public:
     }
 
     void PushDescriptorSetWithTemplateKHR(VkDescriptorUpdateTemplate update_template,
-                                          VkPipelineLayout layout, u32 set,
-                                          const void* data) const noexcept {
+                                          VkPipelineLayout layout, u32 set, const void* data,
+                                          size_t data_size) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{Resolved::PushDescriptors{
+                update_template, layout, set,
+                Resolved::Copy(static_cast<const u8*>(data), data_size)}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdPushDescriptorSetWithTemplateKHR(handle, update_template, layout, set, data);
     }
 
-    void BindPipeline(VkPipelineBindPoint bind_point, VkPipeline pipeline) const noexcept {
+    void BindPipeline(VkPipelineBindPoint bind_point, VkPipeline pipeline) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{Resolved::Pipeline{bind_point, pipeline}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBindPipeline(handle, bind_point, pipeline);
     }
 
-    void BindIndexBuffer(VkBuffer buffer, VkDeviceSize offset,
-                         VkIndexType index_type) const noexcept {
+    void BindIndexBuffer(VkBuffer buffer, VkDeviceSize offset, VkIndexType index_type) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{Resolved::IndexBuffer{buffer, offset, index_type}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBindIndexBuffer(handle, buffer, offset, index_type);
     }
 
     void BindVertexBuffers(u32 first, u32 count, const VkBuffer* buffers,
-                           const VkDeviceSize* offsets) const noexcept {
+                           const VkDeviceSize* offsets) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{Resolved::VertexBuffers{
+                first, Resolved::Copy(buffers, count), Resolved::Copy(offsets, count), std::nullopt,
+                std::nullopt, false}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBindVertexBuffers(handle, first, count, buffers, offsets);
     }
 
-    void BindVertexBuffer(u32 binding, VkBuffer buffer, VkDeviceSize offset) const noexcept {
+    void BindVertexBuffer(u32 binding, VkBuffer buffer, VkDeviceSize offset) const {
         BindVertexBuffers(binding, 1, &buffer, &offset);
     }
 
-    void Draw(u32 vertex_count, u32 instance_count, u32 first_vertex,
-              u32 first_instance) const noexcept {
+    void Draw(u32 vertex_count, u32 instance_count, u32 first_vertex, u32 first_instance) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{
+                Resolved::Draw{vertex_count, instance_count, first_vertex, first_instance}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDraw(handle, vertex_count, instance_count, first_vertex, first_instance);
     }
 
     void DrawIndexed(u32 index_count, u32 instance_count, u32 first_index, u32 vertex_offset,
-                     u32 first_instance) const noexcept {
+                     u32 first_instance) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{Resolved::DrawIndexed{
+                index_count, instance_count, first_index, vertex_offset, first_instance}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDrawIndexed(handle, index_count, instance_count, first_index, vertex_offset,
@@ -1361,27 +1420,35 @@ public:
     }
 
     void DrawIndirect(VkBuffer src_buffer, VkDeviceSize src_offset, u32 draw_count,
-                      u32 stride) const noexcept {
+                      u32 stride) const {
+        if (recorder)
+            recorder->MaterializeInline();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDrawIndirect(handle, src_buffer, src_offset, draw_count, stride);
     }
 
     void DrawIndexedIndirect(VkBuffer src_buffer, VkDeviceSize src_offset, u32 draw_count,
-                             u32 stride) const noexcept {
+                             u32 stride) const {
+        if (recorder)
+            recorder->MaterializeInline();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDrawIndexedIndirect(handle, src_buffer, src_offset, draw_count, stride);
     }
 
-    void DrawMeshTasksEXT(u32 group_count_x, u32 group_count_y, u32 group_count_z) const noexcept {
+    void DrawMeshTasksEXT(u32 group_count_x, u32 group_count_y, u32 group_count_z) const {
+        if (recorder)
+            recorder->MaterializeInline();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDrawMeshTasksEXT(handle, group_count_x, group_count_y, group_count_z);
     }
 
     void DrawIndirectCount(VkBuffer src_buffer, VkDeviceSize src_offset, VkBuffer count_buffer,
-                           VkDeviceSize count_offset, u32 draw_count, u32 stride) const noexcept {
+                           VkDeviceSize count_offset, u32 draw_count, u32 stride) const {
+        if (recorder)
+            recorder->MaterializeInline();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDrawIndirectCount(handle, src_buffer, src_offset, count_buffer, count_offset,
@@ -1390,7 +1457,9 @@ public:
 
     void DrawIndexedIndirectCount(VkBuffer src_buffer, VkDeviceSize src_offset,
                                   VkBuffer count_buffer, VkDeviceSize count_offset, u32 draw_count,
-                                  u32 stride) const noexcept {
+                                  u32 stride) const {
+        if (recorder)
+            recorder->MaterializeInline();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDrawIndexedIndirectCount(handle, src_buffer, src_offset, count_buffer,
@@ -1400,14 +1469,17 @@ public:
     void DrawIndirectByteCountEXT(u32 instance_count, u32 first_instance, VkBuffer counter_buffer,
                                   VkDeviceSize counter_buffer_offset, u32 counter_offset,
                                   u32 stride) {
+        if (recorder)
+            recorder->MaterializeInline();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDrawIndirectByteCountEXT(handle, instance_count, first_instance, counter_buffer,
                                            counter_buffer_offset, counter_offset, stride);
     }
 
-    void ClearAttachments(Span<VkClearAttachment> attachments,
-                          Span<VkClearRect> rects) const noexcept {
+    void ClearAttachments(Span<VkClearAttachment> attachments, Span<VkClearRect> rects) const {
+        if (recorder)
+            recorder->MaterializeInline();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdClearAttachments(handle, attachments.size(), attachments.data(), rects.size(),
@@ -1416,14 +1488,17 @@ public:
 
     void ClearColorImage(VkImage image, VkImageLayout layout, VkClearColorValue color,
                          Span<VkImageSubresourceRange> ranges) {
+        if (recorder)
+            recorder->MaterializeInline();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdClearColorImage(handle, image, layout, &color, ranges.size(), ranges.data());
     }
 
     void BlitImage(VkImage src_image, VkImageLayout src_layout, VkImage dst_image,
-                   VkImageLayout dst_layout, Span<VkImageBlit> regions,
-                   VkFilter filter) const noexcept {
+                   VkImageLayout dst_layout, Span<VkImageBlit> regions, VkFilter filter) const {
+        if (recorder)
+            recorder->MaterializeInline();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBlitImage(handle, src_image, src_layout, dst_image, dst_layout, regions.size(),
@@ -1432,19 +1507,25 @@ public:
 
     void ResolveImage(VkImage src_image, VkImageLayout src_layout, VkImage dst_image,
                       VkImageLayout dst_layout, Span<VkImageResolve> regions) {
+        if (recorder)
+            recorder->MaterializeInline();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdResolveImage(handle, src_image, src_layout, dst_image, dst_layout, regions.size(),
                                regions.data());
     }
 
-    void Dispatch(u32 x, u32 y, u32 z) const noexcept {
+    void Dispatch(u32 x, u32 y, u32 z) const {
+        if (recorder)
+            recorder->MaterializeInline();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDispatch(handle, x, y, z);
     }
 
-    void DispatchIndirect(VkBuffer indirect_buffer, VkDeviceSize offset) const noexcept {
+    void DispatchIndirect(VkBuffer indirect_buffer, VkDeviceSize offset) const {
+        if (recorder)
+            recorder->MaterializeInline();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDispatchIndirect(handle, indirect_buffer, offset);
@@ -1453,7 +1534,9 @@ public:
     void PipelineBarrier(VkPipelineStageFlags src_stage_mask, VkPipelineStageFlags dst_stage_mask,
                          VkDependencyFlags dependency_flags, Span<VkMemoryBarrier> memory_barriers,
                          Span<VkBufferMemoryBarrier> buffer_barriers,
-                         Span<VkImageMemoryBarrier> image_barriers) const noexcept {
+                         Span<VkImageMemoryBarrier> image_barriers) const {
+        if (recorder)
+            recorder->MaterializeInline();
         static constexpr u32 MaxBarriers = 16;
         if (dld->vkCmdPipelineBarrier2 && memory_barriers.size() <= MaxBarriers &&
             buffer_barriers.size() <= MaxBarriers && image_barriers.size() <= MaxBarriers) {
@@ -1531,29 +1614,40 @@ public:
     }
 
     void PipelineBarrier(VkPipelineStageFlags src_stage_mask, VkPipelineStageFlags dst_stage_mask,
-                         VkDependencyFlags dependency_flags = 0) const noexcept {
+                         VkDependencyFlags dependency_flags = 0) const {
         PipelineBarrier(src_stage_mask, dst_stage_mask, dependency_flags, {}, {}, {});
     }
 
     void PipelineBarrier(VkPipelineStageFlags src_stage_mask, VkPipelineStageFlags dst_stage_mask,
                          VkDependencyFlags dependency_flags,
-                         const VkMemoryBarrier& memory_barrier) const noexcept {
+                         const VkMemoryBarrier& memory_barrier) const {
         PipelineBarrier(src_stage_mask, dst_stage_mask, dependency_flags, memory_barrier, {}, {});
     }
 
     void PipelineBarrier(VkPipelineStageFlags src_stage_mask, VkPipelineStageFlags dst_stage_mask,
                          VkDependencyFlags dependency_flags,
-                         const VkBufferMemoryBarrier& buffer_barrier) const noexcept {
+                         const VkBufferMemoryBarrier& buffer_barrier) const {
         PipelineBarrier(src_stage_mask, dst_stage_mask, dependency_flags, {}, buffer_barrier, {});
     }
 
     void PipelineBarrier(VkPipelineStageFlags src_stage_mask, VkPipelineStageFlags dst_stage_mask,
                          VkDependencyFlags dependency_flags,
-                         const VkImageMemoryBarrier& image_barrier) const noexcept {
+                         const VkImageMemoryBarrier& image_barrier) const {
         PipelineBarrier(src_stage_mask, dst_stage_mask, dependency_flags, {}, {}, image_barrier);
     }
 
-    void BindDescriptorBuffersEXT(Span<VkDescriptorBufferBindingInfoEXT> bindings) const noexcept {
+    void BindDescriptorBuffersEXT(Span<VkDescriptorBufferBindingInfoEXT> bindings) const {
+        if (recorder) {
+            for (const auto& item : bindings) {
+                if (item.pNext)
+                    recorder->DisableCapture();
+            }
+        }
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{
+                Resolved::DescriptorBuffers{Resolved::Copy(bindings.data(), bindings.size())}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBindDescriptorBuffersEXT(handle, bindings.size(), bindings.data());
@@ -1561,7 +1655,14 @@ public:
 
     void SetDescriptorBufferOffsetsEXT(VkPipelineBindPoint bind_point, VkPipelineLayout layout,
                                        u32 first_set, Span<u32> buffer_indices,
-                                       Span<VkDeviceSize> offsets) const noexcept {
+                                       Span<VkDeviceSize> offsets) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{Resolved::DescriptorOffsets{
+                bind_point, layout, first_set,
+                Resolved::Copy(buffer_indices.data(), buffer_indices.size()),
+                Resolved::Copy(offsets.data(), offsets.size())}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetDescriptorBufferOffsetsEXT(handle, bind_point, layout, first_set,
@@ -1570,22 +1671,27 @@ public:
     }
 
     void CopyBufferToImage(VkBuffer src_buffer, VkImage dst_image, VkImageLayout dst_image_layout,
-                           Span<VkBufferImageCopy> regions) const noexcept {
+                           Span<VkBufferImageCopy> regions) const {
+        if (recorder)
+            recorder->MaterializeInline();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdCopyBufferToImage(handle, src_buffer, dst_image, dst_image_layout, regions.size(),
                                     regions.data());
     }
 
-    void CopyBuffer(VkBuffer src_buffer, VkBuffer dst_buffer,
-                    Span<VkBufferCopy> regions) const noexcept {
+    void CopyBuffer(VkBuffer src_buffer, VkBuffer dst_buffer, Span<VkBufferCopy> regions) const {
+        if (recorder)
+            recorder->MaterializeInline();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdCopyBuffer(handle, src_buffer, dst_buffer, regions.size(), regions.data());
     }
 
     void CopyImage(VkImage src_image, VkImageLayout src_layout, VkImage dst_image,
-                   VkImageLayout dst_layout, Span<VkImageCopy> regions) const noexcept {
+                   VkImageLayout dst_layout, Span<VkImageCopy> regions) const {
+        if (recorder)
+            recorder->MaterializeInline();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdCopyImage(handle, src_image, src_layout, dst_image, dst_layout, regions.size(),
@@ -1593,7 +1699,9 @@ public:
     }
 
     void CopyImageToBuffer(VkImage src_image, VkImageLayout src_layout, VkBuffer dst_buffer,
-                           Span<VkBufferImageCopy> regions) const noexcept {
+                           Span<VkBufferImageCopy> regions) const {
+        if (recorder)
+            recorder->MaterializeInline();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdCopyImageToBuffer(handle, src_image, src_layout, dst_buffer, regions.size(),
@@ -1602,7 +1710,9 @@ public:
 
     void CopyQueryPoolResults(VkQueryPool query_pool, u32 first_query, u32 query_count,
                               VkBuffer dst_buffer, VkDeviceSize dst_offset, VkDeviceSize stride,
-                              VkQueryResultFlags flags) const noexcept {
+                              VkQueryResultFlags flags) const {
+        if (recorder)
+            recorder->MaterializeInline();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdCopyQueryPoolResults(handle, query_pool, first_query, query_count, dst_buffer,
@@ -1610,14 +1720,21 @@ public:
     }
 
     void FillBuffer(VkBuffer dst_buffer, VkDeviceSize dst_offset, VkDeviceSize size,
-                    u32 data) const noexcept {
+                    u32 data) const {
+        if (recorder)
+            recorder->MaterializeInline();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdFillBuffer(handle, dst_buffer, dst_offset, size, data);
     }
 
     void PushConstants(VkPipelineLayout layout, VkShaderStageFlags flags, u32 offset, u32 size,
-                       const void* values) const noexcept {
+                       const void* values) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{Resolved::PushConstants{
+                layout, flags, offset, Resolved::Copy(static_cast<const u8*>(values), size)}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdPushConstants(handle, layout, flags, offset, size, values);
@@ -1625,56 +1742,105 @@ public:
 
     template <typename T>
         requires std::is_trivially_copyable_v<T>
-    void PushConstants(VkPipelineLayout layout, VkShaderStageFlags flags, const T& data) const noexcept {
+    void PushConstants(VkPipelineLayout layout, VkShaderStageFlags flags, const T& data) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{Resolved::PushConstants{
+                layout, flags, 0,
+                Resolved::Copy(reinterpret_cast<const u8*>(std::addressof(data)), sizeof(T))}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdPushConstants(handle, layout, flags, 0, u32(sizeof(T)), std::addressof(data));
     }
 
-    void SetViewport(u32 first, Span<VkViewport> viewports) const noexcept {
+    void SetViewport(u32 first, Span<VkViewport> viewports) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{
+                Resolved::Viewports{first, Resolved::Copy(viewports.data(), viewports.size())}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetViewport(handle, first, viewports.size(), viewports.data());
     }
 
-    void SetScissor(u32 first, Span<VkRect2D> scissors) const noexcept {
+    void SetScissor(u32 first, Span<VkRect2D> scissors) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{
+                Resolved::Scissors{first, Resolved::Copy(scissors.data(), scissors.size())}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetScissor(handle, first, scissors.size(), scissors.data());
     }
 
-    void SetBlendConstants(const float blend_constants[4]) const noexcept {
+    void SetBlendConstants(const float blend_constants[4]) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{Resolved::BlendConstants{
+                {blend_constants[0], blend_constants[1], blend_constants[2], blend_constants[3]}}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetBlendConstants(handle, blend_constants);
     }
 
-    void SetStencilCompareMask(VkStencilFaceFlags face_mask, u32 compare_mask) const noexcept {
+    void SetStencilCompareMask(VkStencilFaceFlags face_mask, u32 compare_mask) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{Resolved::StencilMask{
+                Resolved::StencilMaskKind::Compare, face_mask, compare_mask}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetStencilCompareMask(handle, face_mask, compare_mask);
     }
 
-    void SetStencilReference(VkStencilFaceFlags face_mask, u32 reference) const noexcept {
+    void SetStencilReference(VkStencilFaceFlags face_mask, u32 reference) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{
+                Resolved::StencilMask{Resolved::StencilMaskKind::Reference, face_mask, reference}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetStencilReference(handle, face_mask, reference);
     }
 
-    void SetStencilWriteMask(VkStencilFaceFlags face_mask, u32 write_mask) const noexcept {
+    void SetStencilWriteMask(VkStencilFaceFlags face_mask, u32 write_mask) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{
+                Resolved::StencilMask{Resolved::StencilMaskKind::Write, face_mask, write_mask}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetStencilWriteMask(handle, face_mask, write_mask);
     }
 
-    void SetDepthBias(float constant_factor, float clamp, float slope_factor) const noexcept {
+    void SetDepthBias(float constant_factor, float clamp, float slope_factor) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{
+                Resolved::DepthBias{constant_factor, clamp, slope_factor, std::nullopt, false}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetDepthBias(handle, constant_factor, clamp, slope_factor);
     }
 
     void SetDepthBias(float constant_factor, float clamp, float slope_factor,
-                      VkDepthBiasRepresentationInfoEXT* extra) const noexcept {
+                      VkDepthBiasRepresentationInfoEXT* extra) const {
+        if (recorder && extra && extra->pNext)
+            recorder->DisableCapture();
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{
+                Resolved::DepthBias{constant_factor, clamp, slope_factor,
+                                    extra ? std::optional{*extra} : std::nullopt, true}});
+            return;
+        }
         VkDepthBiasInfoEXT info{
             .sType = VK_STRUCTURE_TYPE_DEPTH_BIAS_INFO_EXT,
             .pNext = extra,
@@ -1687,13 +1853,20 @@ public:
         dld->vkCmdSetDepthBias2EXT(handle, &info);
     }
 
-    void SetDepthBounds(float min_depth_bounds, float max_depth_bounds) const noexcept {
+    void SetDepthBounds(float min_depth_bounds, float max_depth_bounds) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(
+                ResolvedCommand{Resolved::DepthBounds{min_depth_bounds, max_depth_bounds}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetDepthBounds(handle, min_depth_bounds, max_depth_bounds);
     }
 
-    void SetEvent(VkEvent event, VkPipelineStageFlags stage_flags) const noexcept {
+    void SetEvent(VkEvent event, VkPipelineStageFlags stage_flags) const {
+        if (recorder)
+            recorder->MaterializeInline();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetEvent(handle, event, stage_flags);
@@ -1702,7 +1875,9 @@ public:
     void WaitEvents(Span<VkEvent> events, VkPipelineStageFlags src_stage_mask,
                     VkPipelineStageFlags dst_stage_mask, Span<VkMemoryBarrier> memory_barriers,
                     Span<VkBufferMemoryBarrier> buffer_barriers,
-                    Span<VkImageMemoryBarrier> image_barriers) const noexcept {
+                    Span<VkImageMemoryBarrier> image_barriers) const {
+        if (recorder)
+            recorder->MaterializeInline();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdWaitEvents(handle, events.size(), events.data(), src_stage_mask, dst_stage_mask,
@@ -1712,184 +1887,340 @@ public:
 
     void BindVertexBuffers2EXT(u32 first_binding, u32 binding_count, const VkBuffer* buffers,
                                const VkDeviceSize* offsets, const VkDeviceSize* sizes,
-                               const VkDeviceSize* strides) const noexcept {
+                               const VkDeviceSize* strides) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{Resolved::VertexBuffers{
+                first_binding, Resolved::Copy(buffers, binding_count),
+                Resolved::Copy(offsets, binding_count),
+                sizes ? std::optional{Resolved::Copy(sizes, binding_count)} : std::nullopt,
+                strides ? std::optional{Resolved::Copy(strides, binding_count)} : std::nullopt,
+                true}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBindVertexBuffers2EXT(handle, first_binding, binding_count, buffers, offsets,
                                         sizes, strides);
     }
 
-    void SetCullModeEXT(VkCullModeFlags cull_mode) const noexcept {
+    void SetCullModeEXT(VkCullModeFlags cull_mode) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{
+                Resolved::Enum{Resolved::EnumKind::CullMode, static_cast<u32>(cull_mode)}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetCullModeEXT(handle, cull_mode);
     }
 
-    void SetDepthBoundsTestEnableEXT(bool enable) const noexcept {
+    void SetDepthBoundsTestEnableEXT(bool enable) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(
+                ResolvedCommand{Resolved::Boolean{Resolved::BooleanKind::DepthBoundsTest, enable}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetDepthBoundsTestEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
     }
 
-    void SetDepthCompareOpEXT(VkCompareOp compare_op) const noexcept {
+    void SetDepthCompareOpEXT(VkCompareOp compare_op) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{
+                Resolved::Enum{Resolved::EnumKind::DepthCompareOp, static_cast<u32>(compare_op)}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetDepthCompareOpEXT(handle, compare_op);
     }
 
-    void SetDepthTestEnableEXT(bool enable) const noexcept {
+    void SetDepthTestEnableEXT(bool enable) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(
+                ResolvedCommand{Resolved::Boolean{Resolved::BooleanKind::DepthTest, enable}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetDepthTestEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
     }
 
-    void SetDepthWriteEnableEXT(bool enable) const noexcept {
+    void SetDepthWriteEnableEXT(bool enable) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(
+                ResolvedCommand{Resolved::Boolean{Resolved::BooleanKind::DepthWrite, enable}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetDepthWriteEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
     }
 
-    void SetPrimitiveRestartEnableEXT(bool enable) const noexcept {
+    void SetPrimitiveRestartEnableEXT(bool enable) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{
+                Resolved::Boolean{Resolved::BooleanKind::PrimitiveRestart, enable}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetPrimitiveRestartEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
     }
 
-    void SetRasterizerDiscardEnableEXT(bool enable) const noexcept {
+    void SetRasterizerDiscardEnableEXT(bool enable) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{
+                Resolved::Boolean{Resolved::BooleanKind::RasterizerDiscard, enable}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetRasterizerDiscardEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
     }
 
-    void SetConservativeRasterizationModeEXT(VkConservativeRasterizationModeEXT mode) const noexcept
-    {
+    void SetConservativeRasterizationModeEXT(VkConservativeRasterizationModeEXT mode) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{Resolved::Enum{
+                Resolved::EnumKind::ConservativeRasterizationMode, static_cast<u32>(mode)}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetConservativeRasterizationModeEXT(handle, mode);
     }
 
-    void SetLineRasterizationModeEXT(VkLineRasterizationModeEXT mode) const noexcept
-    {
+    void SetLineRasterizationModeEXT(VkLineRasterizationModeEXT mode) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{
+                Resolved::Enum{Resolved::EnumKind::LineRasterizationMode, static_cast<u32>(mode)}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetLineRasterizationModeEXT(handle, mode);
     }
 
-    void SetLineStippleEnableEXT(bool enable) const noexcept
-    {
+    void SetLineStippleEnableEXT(bool enable) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(
+                ResolvedCommand{Resolved::Boolean{Resolved::BooleanKind::LineStipple, enable}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetLineStippleEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
     }
 
-    void SetLineStippleEXT(u32 factor, u16 pattern) const noexcept
-    {
+    void SetLineStippleEXT(u32 factor, u16 pattern) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{Resolved::LineStipple{factor, pattern}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetLineStippleEXT(handle, factor, pattern);
     }
 
-    void SetDepthBiasEnableEXT(bool enable) const noexcept {
+    void SetDepthBiasEnableEXT(bool enable) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(
+                ResolvedCommand{Resolved::Boolean{Resolved::BooleanKind::DepthBias, enable}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetDepthBiasEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
     }
 
-    void SetLogicOpEnableEXT(bool enable) const noexcept {
+    void SetLogicOpEnableEXT(bool enable) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(
+                ResolvedCommand{Resolved::Boolean{Resolved::BooleanKind::LogicOp, enable}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetLogicOpEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
     }
 
-    void SetAlphaToCoverageEnableEXT(bool enable) const noexcept {
+    void SetAlphaToCoverageEnableEXT(bool enable) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(
+                ResolvedCommand{Resolved::Boolean{Resolved::BooleanKind::AlphaToCoverage, enable}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetAlphaToCoverageEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
     }
 
-    void SetAlphaToOneEnableEXT(bool enable) const noexcept {
+    void SetAlphaToOneEnableEXT(bool enable) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(
+                ResolvedCommand{Resolved::Boolean{Resolved::BooleanKind::AlphaToOne, enable}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetAlphaToOneEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
     }
 
-    void SetDepthClampEnableEXT(bool enable) const noexcept {
+    void SetDepthClampEnableEXT(bool enable) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(
+                ResolvedCommand{Resolved::Boolean{Resolved::BooleanKind::DepthClamp, enable}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetDepthClampEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
     }
 
-    void SetFrontFaceEXT(VkFrontFace front_face) const noexcept {
+    void SetFrontFaceEXT(VkFrontFace front_face) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{
+                Resolved::Enum{Resolved::EnumKind::FrontFace, static_cast<u32>(front_face)}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetFrontFaceEXT(handle, front_face);
     }
 
-    void SetLogicOpEXT(VkLogicOp logic_op) const noexcept {
+    void SetLogicOpEXT(VkLogicOp logic_op) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{
+                Resolved::Enum{Resolved::EnumKind::LogicOp, static_cast<u32>(logic_op)}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetLogicOpEXT(handle, logic_op);
     }
 
-    void SetPatchControlPointsEXT(uint32_t patch_control_points) const noexcept {
+    void SetPatchControlPointsEXT(uint32_t patch_control_points) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{Resolved::PatchControlPoints{patch_control_points}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetPatchControlPointsEXT(handle, patch_control_points);
     }
 
-    void SetColorWriteMaskEXT(u32 first, Span<VkColorComponentFlags> masks) const noexcept {
+    void SetColorWriteMaskEXT(u32 first, Span<VkColorComponentFlags> masks) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(
+                ResolvedCommand{Resolved::ColorValues{Resolved::ColorValuesKind::WriteMask, first,
+                                                      Resolved::Copy(masks.data(), masks.size())}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetColorWriteMaskEXT(handle, first, masks.size(), masks.data());
     }
 
-    void SetColorWriteEnableEXT(Span<VkBool32> enables) const noexcept {
+    void SetColorWriteEnableEXT(Span<VkBool32> enables) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{
+                Resolved::ColorValues{Resolved::ColorValuesKind::WriteEnable, 0,
+                                      Resolved::Copy(enables.data(), enables.size())}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetColorWriteEnableEXT(handle, enables.size(), enables.data());
     }
 
-    void SetColorBlendEnableEXT(u32 first, Span<VkBool32> enables) const noexcept {
+    void SetColorBlendEnableEXT(u32 first, Span<VkBool32> enables) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{
+                Resolved::ColorValues{Resolved::ColorValuesKind::BlendEnable, first,
+                                      Resolved::Copy(enables.data(), enables.size())}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetColorBlendEnableEXT(handle, first, enables.size(), enables.data());
     }
 
-    void SetColorBlendEquationEXT(u32 first,
-                                  Span<VkColorBlendEquationEXT> equations) const noexcept {
+    void SetColorBlendEquationEXT(u32 first, Span<VkColorBlendEquationEXT> equations) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{Resolved::BlendEquations{
+                first, Resolved::Copy(equations.data(), equations.size())}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetColorBlendEquationEXT(handle, first, equations.size(), equations.data());
     }
 
-    void SetLineWidth(float line_width) const noexcept {
+    void SetLineWidth(float line_width) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{Resolved::LineWidth{line_width}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetLineWidth(handle, line_width);
     }
 
-    void SetPrimitiveTopologyEXT(VkPrimitiveTopology primitive_topology) const noexcept {
+    void SetPrimitiveTopologyEXT(VkPrimitiveTopology primitive_topology) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{Resolved::Enum{Resolved::EnumKind::PrimitiveTopology,
+                                                            static_cast<u32>(primitive_topology)}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetPrimitiveTopologyEXT(handle, primitive_topology);
     }
 
     void SetStencilOpEXT(VkStencilFaceFlags face_mask, VkStencilOp fail_op, VkStencilOp pass_op,
-                         VkStencilOp depth_fail_op, VkCompareOp compare_op) const noexcept {
+                         VkStencilOp depth_fail_op, VkCompareOp compare_op) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{
+                Resolved::StencilOp{face_mask, fail_op, pass_op, depth_fail_op, compare_op}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetStencilOpEXT(handle, face_mask, fail_op, pass_op, depth_fail_op, compare_op);
     }
 
-    void SetStencilTestEnableEXT(bool enable) const noexcept {
+    void SetStencilTestEnableEXT(bool enable) const {
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(
+                ResolvedCommand{Resolved::Boolean{Resolved::BooleanKind::StencilTest, enable}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetStencilTestEnableEXT(handle, enable ? VK_TRUE : VK_FALSE);
     }
 
-    void SetVertexInputEXT(
-        vk::Span<VkVertexInputBindingDescription2EXT> bindings,
-        vk::Span<VkVertexInputAttributeDescription2EXT> attributes) const noexcept {
+    void SetVertexInputEXT(vk::Span<VkVertexInputBindingDescription2EXT> bindings,
+                           vk::Span<VkVertexInputAttributeDescription2EXT> attributes) const {
+        if (recorder) {
+            for (const auto& item : bindings) {
+                if (item.pNext)
+                    recorder->DisableCapture();
+            }
+        }
+        if (recorder) {
+            for (const auto& item : attributes) {
+                if (item.pNext)
+                    recorder->DisableCapture();
+            }
+        }
+        if (recorder && recorder->CapturingState()) {
+            recorder->Record(ResolvedCommand{
+                Resolved::VertexInput{Resolved::Copy(bindings.data(), bindings.size()),
+                                      Resolved::Copy(attributes.data(), attributes.size())}});
+            return;
+        }
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdSetVertexInputEXT(handle, bindings.size(), bindings.data(), attributes.size(),
@@ -1898,7 +2229,9 @@ public:
 
     void BindTransformFeedbackBuffersEXT(u32 first, u32 count, const VkBuffer* buffers,
                                          const VkDeviceSize* offsets,
-                                         const VkDeviceSize* sizes) const noexcept {
+                                         const VkDeviceSize* sizes) const {
+        if (recorder)
+            recorder->DisableCapture();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBindTransformFeedbackBuffersEXT(handle, first, count, buffers, offsets, sizes);
@@ -1906,7 +2239,9 @@ public:
 
     void BeginTransformFeedbackEXT(u32 first_counter_buffer, u32 counter_buffers_count,
                                    const VkBuffer* counter_buffers,
-                                   const VkDeviceSize* counter_buffer_offsets) const noexcept {
+                                   const VkDeviceSize* counter_buffer_offsets) const {
+        if (recorder)
+            recorder->SetTransformFeedbackActive(true);
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBeginTransformFeedbackEXT(handle, first_counter_buffer, counter_buffers_count,
@@ -1915,27 +2250,34 @@ public:
 
     void EndTransformFeedbackEXT(u32 first_counter_buffer, u32 counter_buffers_count,
                                  const VkBuffer* counter_buffers,
-                                 const VkDeviceSize* counter_buffer_offsets) const noexcept {
+                                 const VkDeviceSize* counter_buffer_offsets) const {
+        if (recorder)
+            recorder->SetTransformFeedbackActive(false);
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdEndTransformFeedbackEXT(handle, first_counter_buffer, counter_buffers_count,
                                           counter_buffers, counter_buffer_offsets);
     }
 
-    void BeginConditionalRenderingEXT(
-        const VkConditionalRenderingBeginInfoEXT& info) const noexcept {
+    void BeginConditionalRenderingEXT(const VkConditionalRenderingBeginInfoEXT& info) const {
+        if (recorder)
+            recorder->SetConditionalRenderingActive(true);
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBeginConditionalRenderingEXT(handle, &info);
     }
 
-    void EndConditionalRenderingEXT() const noexcept {
+    void EndConditionalRenderingEXT() const {
+        if (recorder)
+            recorder->SetConditionalRenderingActive(false);
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdEndConditionalRenderingEXT(handle);
     }
 
-    void BeginDebugUtilsLabelEXT(const char* label, std::span<float, 4> color) const noexcept {
+    void BeginDebugUtilsLabelEXT(const char* label, std::span<float, 4> color) const {
+        if (recorder)
+            recorder->DisableCapture();
         const VkDebugUtilsLabelEXT label_info{
             .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT,
             .pNext = nullptr,
@@ -1947,15 +2289,42 @@ public:
         dld->vkCmdBeginDebugUtilsLabelEXT(handle, &label_info);
     }
 
-    void EndDebugUtilsLabelEXT() const noexcept {
+    void EndDebugUtilsLabelEXT() const {
+        if (recorder)
+            recorder->DisableCapture();
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdEndDebugUtilsLabelEXT(handle);
     }
 
+    CommandBuffer WithRecorder(PassRecorder* recorder_) const {
+        if (recorder && recorder != recorder_) {
+            recorder->DisableCapture();
+        }
+        CommandBuffer result{handle, *dld};
+        result.recorder = recorder_;
+        return result;
+    }
+
+    CommandBuffer WithoutRecorder() const {
+        if (recorder) {
+            recorder->DisableCapture();
+        }
+        return CommandBuffer{handle, *dld};
+    }
+
+    void ExecuteCommands(Span<VkCommandBuffer> commands) const {
+        if (recorder)
+            recorder->DisableCapture();
+        const VideoCommon::HostGpuProfile::Scope profile{
+            VideoCommon::HostGpuProfile::Phase::Encode};
+        dld->vkCmdExecuteCommands(handle, commands.size(), commands.data());
+    }
+
 private:
-    VkCommandBuffer handle;
-    const DeviceDispatch* dld;
+    VkCommandBuffer handle{};
+    const DeviceDispatch* dld{};
+    PassRecorder* recorder{};
 };
 
 u32 AvailableVersion(const InstanceDispatch& dld) noexcept;
