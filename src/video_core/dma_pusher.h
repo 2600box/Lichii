@@ -231,6 +231,9 @@ public:
     bool ReadGpuWrittenCommands(GPUVAddr address, u32 count);
     /// Brings command list words the GPU wrote (still only in host buffers) to guest memory.
     bool FlushGpuWrittenCommands(GPUVAddr address, size_t size);
+    /// Before a fetch from pages no GPU work wrote yet: waits for the queued work that may write
+    /// them (GpuSplit::ListTarget). Returns whether GPU work wrote them by then.
+    bool WaitForListWriters(GPUVAddr address, size_t size);
 
 private:
 

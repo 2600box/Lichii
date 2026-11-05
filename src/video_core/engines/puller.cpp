@@ -50,12 +50,25 @@ u32 ReadSemaphoreWord(DmaPusher& dma_pusher, GPUVAddr address) {
 // With the GPU thread split (gpu_split.h) the rasterizer belongs to the back thread: work that
 // only feeds it runs there in order; reads of what it wrote first wait for it (DrainBack).
 template <typename Func>
-void OnBack(const Func& func) {
+void OnBack(const Func& func,
+            VideoCommon::GpuSplit::Effect effect = VideoCommon::GpuSplit::Effect::Unknown) {
     if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
-        split.Defer(func);
+        split.Defer(func, effect);
     } else {
         func();
     }
+}
+
+// A semaphore release: it writes the payload (and timestamp) at `address` and nothing else.
+template <typename Func>
+void OnBackRelease(DmaPusher& dma_pusher, GPUVAddr address, const Func& func) {
+    auto& split = VideoCommon::GpuSplit::Get();
+    if (!split.Active()) {
+        func();
+        return;
+    }
+    split.Defer(func, VideoCommon::GpuSplit::Effect::None);
+    split.NoteWrite(dma_pusher.memory_manager, address, 16);
 }
 
 void DrainBack() {
@@ -197,13 +210,17 @@ void Puller::ProcessFenceActionMethod(DmaPusher& dma_pusher) {
     case Puller::FenceOperation::Acquire:
         // UNIMPLEMENTED_MSG("Channel Scheduling pending.");
         // WaitFence(regs.fence_action.syncpoint_id, regs.fence_value);
-        OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->ReleaseFences(); });
+        OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->ReleaseFences(); },
+               VideoCommon::GpuSplit::Effect::None);
         VideoCommon::GpuSplit::Get().NoteSync();
         break;
     case Puller::FenceOperation::Increment:
-        OnBack([rasterizer = dma_pusher.rasterizer, id = static_cast<u32>(regs.fence_action.syncpoint_id.Value())] {
-            rasterizer->SignalSyncPoint(id);
-        });
+        OnBack(
+            [rasterizer = dma_pusher.rasterizer,
+             id = static_cast<u32>(regs.fence_action.syncpoint_id.Value())] {
+                rasterizer->SignalSyncPoint(id);
+            },
+            VideoCommon::GpuSplit::Effect::None);
         break;
     default:
         UNIMPLEMENTED_MSG("Unimplemented operation {}", regs.fence_action.op.Value());
@@ -235,9 +252,11 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
         const auto properties = g_nx2_ampere && (regs.semaphore_trigger & (1U << 24)) != 0
                                     ? VideoCommon::QueryPropertiesFlags::IsAFence
                                     : VideoCommon::QueryPropertiesFlags::HasTimeout;
-        OnBack([rasterizer = dma_pusher.rasterizer, sequence_address, properties, payload] {
-            rasterizer->Query(sequence_address, VideoCommon::QueryType::Payload, properties, payload, 0);
-        });
+        OnBackRelease(dma_pusher, sequence_address,
+                      [rasterizer = dma_pusher.rasterizer, sequence_address, properties, payload] {
+                          rasterizer->Query(sequence_address, VideoCommon::QueryType::Payload,
+                                            properties, payload, 0);
+                      });
     } else if (g_nx2_ampere) {
         // Switch 2 waits on semaphores the CPU (or another channel) releases, e.g. once it has
         // written the commands this channel runs next: suspend the channel until the value is
@@ -308,10 +327,11 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
 void Puller::ProcessSemaphoreRelease(DmaPusher& dma_pusher) {
     const GPUVAddr sequence_address{regs.semaphore_address.SemaphoreAddress()};
     const u32 payload = regs.semaphore_release;
-    OnBack([rasterizer = dma_pusher.rasterizer, sequence_address, payload] {
-        rasterizer->Query(sequence_address, VideoCommon::QueryType::Payload,
-                          VideoCommon::QueryPropertiesFlags::IsAFence, payload, 0);
-    });
+    OnBackRelease(dma_pusher, sequence_address,
+                  [rasterizer = dma_pusher.rasterizer, sequence_address, payload] {
+                      rasterizer->Query(sequence_address, VideoCommon::QueryType::Payload,
+                                        VideoCommon::QueryPropertiesFlags::IsAFence, payload, 0);
+                  });
 }
 
 void Puller::ProcessSemaphoreAcquire(DmaPusher& dma_pusher) {
@@ -337,7 +357,7 @@ void Puller::ProcessSemaphoreExecute(DmaPusher& dma_pusher, u32 argument) {
     const u32 payload = regs.reg_array[0x19];
     const u32 operation = argument & 7;
     if (operation == 1) { // RELEASE
-        OnBack([rasterizer = dma_pusher.rasterizer, address, payload] {
+        OnBackRelease(dma_pusher, address, [rasterizer = dma_pusher.rasterizer, address, payload] {
             rasterizer->Query(address, VideoCommon::QueryType::Payload,
                               VideoCommon::QueryPropertiesFlags::IsAFence, payload, 0);
         });
@@ -385,13 +405,15 @@ void Puller::CallPullerMethod(DmaPusher& dma_pusher, const MethodCall& method_ca
     case BufferMethods::WrcacheFlush:
         break;
     case BufferMethods::RefCnt:
-        OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->SignalReference(); });
+        OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->SignalReference(); },
+               VideoCommon::GpuSplit::Effect::None);
         break;
     case BufferMethods::SyncpointOperation:
         ProcessFenceActionMethod(dma_pusher);
         break;
     case BufferMethods::WaitForIdle:
-        OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->WaitForIdle(); });
+        OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->WaitForIdle(); },
+               VideoCommon::GpuSplit::Effect::None);
         VideoCommon::GpuSplit::Get().NoteSync();
         break;
     case BufferMethods::SemaphoreOperation: {
@@ -408,7 +430,8 @@ void Puller::CallPullerMethod(DmaPusher& dma_pusher, const MethodCall& method_ca
     }
     case BufferMethods::MemOpB: {
         // Implement this better.
-        OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->InvalidateGPUCache(); });
+        OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->InvalidateGPUCache(); },
+               VideoCommon::GpuSplit::Effect::None);
         break;
     }
     case BufferMethods::MemOpC:

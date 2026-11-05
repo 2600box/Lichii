@@ -204,10 +204,21 @@ public:
     /// Waits for the queued functions (GPU memory maps among them) before the front translates
     /// addresses, then drops the pending writes the back has run. Returns the back's position.
     u64 SettleWrites();
+    /// Drops the pending writes the back has run. Returns the back's position.
+    u64 RetireWrites();
     /// Ring position the back must pass before a read of the device range [begin, end) on the
     /// front sees what the guest may rely on (SplitWriteTracker::ReadTarget).
     [[nodiscard]] u64 ReadTarget(u64 begin, u64 end) const {
         return writes.ReadTarget(begin, end, last_read_sync_position);
+    }
+    /// The same for a command list fetch from the device range [begin, end) on pages no GPU
+    /// work wrote yet: every unknown write, the compute and copy work (NoteWriter) before the
+    /// last host-level wait (NoteSync; the fetch runs ahead of the engines) and the noted writes
+    /// to the range.
+    [[nodiscard]] u64 ListTarget(u64 begin, u64 end) const {
+        return (std::max)({writes.LastUnknown(),
+                           (std::min)(last_writer_position, last_sync_position),
+                           writes.LastWriteTo(begin, end)});
     }
     [[nodiscard]] const SplitWriteTracker& Writes() const {
         return writes;

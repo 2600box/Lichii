@@ -103,7 +103,7 @@ inline u64 Ticks() {
 struct ThreadData {
     std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ns{};
     std::array<u64, static_cast<size_t>(Zone::Count)> count{};
-    std::array<u64, 12> counters{}; ///< See Counter
+    std::array<u64, 15> counters{}; ///< See Counter
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_ns{};
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_count{};
     u64 child_ns{};    ///< Time of the zones nested in the current one
@@ -161,6 +161,9 @@ enum class Counter : u32 {
     DmaReadsWaitUnknown, ///< Of those, waited for a write the front can't place
     DmaReadsWaitSync,    ///< waited for GPU work before the last wait for idle
     DmaReadsWaitWrite,   ///< waited for a noted write to the words' pages
+    ListChecks,          ///< Command list fetches waiting only for their writers (ListTarget)
+    ListWaits,           ///< Of those, the back still had them queued
+    ListWaitsUnknown,    ///< Of ListWaits: for a write the front can't place
 };
 
 /// Method calls on this thread by method (3D registers on the back, macros on the front), and
@@ -286,6 +289,11 @@ inline void Report(const char* thread_name = "GPU thread") {
                         static_cast<double>(data.counters[9]) * 1e9 / window,
                         static_cast<double>(data.counters[10]) * 1e9 / window,
                         static_cast<double>(data.counters[11]) * 1e9 / window);
+    line += fmt::format(" | list fetches by their writers {:.0f} ({:.0f} waited, {:.0f} for "
+                        "unknown writes)",
+                        static_cast<double>(data.counters[12]) * 1e9 / window,
+                        static_cast<double>(data.counters[13]) * 1e9 / window,
+                        static_cast<double>(data.counters[14]) * 1e9 / window);
     std::string drains;
     for (size_t i = 0; i < data.drain_count.size(); ++i) {
         if (data.drain_count[i] != 0) {
