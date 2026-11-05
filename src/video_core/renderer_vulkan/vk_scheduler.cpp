@@ -164,12 +164,14 @@ Scheduler::Scheduler(const Device& device_, StateTracker& state_tracker_)
         resolved_recorder = std::make_unique<PassRecorder>(
             [this](std::span<const ResolvedBatch> batches) {
                 if (batches.size() < 2) {
+                    resolved_recorder->NoteFallback(InlineFallbackReason::SingleBatch);
                     return std::optional<std::vector<VkCommandBuffer>>{};
                 }
                 master_semaphore->Refresh();
                 auto recorded =
                     parallel_recorder->RecordPass(batches, master_semaphore->KnownGpuTick());
                 if (!recorded) {
+                    resolved_recorder->NoteFallback(InlineFallbackReason::Budget);
                     VideoCommon::HostGpuProfile::Add(
                         VideoCommon::HostGpuProfile::Counter::BudgetFallbacks);
                 }
@@ -298,7 +300,9 @@ void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
 void Scheduler::WaitWorker() {
     const VideoCommon::HostGpuProfile::Scope profile{VideoCommon::HostGpuProfile::Phase::Wait};
     if (resolved_recorder) {
-        Record([this](vk::CommandBuffer) { resolved_recorder->MaterializeInline(); });
+        Record([this](vk::CommandBuffer) {
+            resolved_recorder->MaterializeInline(InlineFallbackReason::Drain);
+        });
     }
     DispatchWork();
 

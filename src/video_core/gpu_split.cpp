@@ -31,6 +31,11 @@ namespace VideoCommon {
 
 namespace {
 
+const bool g_method_fast = [] {
+    const char* value = std::getenv("EDEN_NX2_METHOD_FAST");
+    return value != nullptr && std::strcmp(value, "1") == 0;
+}();
+
 void Pause() {
 #if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
     _mm_pause();
@@ -120,6 +125,9 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     front_macros = mode == '2' && (jit == nullptr || jit[0] != '0');
     LOG_INFO(HW_GPU, "GPU thread split: engine methods run on a second thread{}",
              front_macros ? ", macros on the first" : "");
+    if (g_method_fast) {
+        LOG_INFO(HW_GPU, "GPU method fast path enabled for non-executable macro state writes");
+    }
 }
 
 void GpuSplit::Stop() {
@@ -305,14 +313,33 @@ size_t GpuSplit::Execute(const u64* entry) {
         const u32 argument = static_cast<u32>(head >> 32);
         auto* const engine = back_engine;
         if ((head & Direct) != 0) {
-            Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
-            engine->ConsumeSink(*system);
-            engine->CallMethod(*system, method, argument, true);
+            const bool state_method =
+                (Nx2Profile::Enabled() || g_method_fast) && !engine->execution_mask[method];
+            const auto zone = state_method
+                                  ? Nx2Profile::Zone::MethodState
+                                  : Nx2Profile::Zone::Method;
+            Nx2Profile::Scope method_scope{zone};
+            if (!engine->method_sink.empty()) {
+                Nx2Profile::Add(Nx2Profile::Counter::SinkConsumedWrites, engine->method_sink.size());
+                Nx2Profile::Scope sink_scope{Nx2Profile::Zone::MethodSink};
+                engine->ConsumeSink(*system);
+            }
+            if (g_method_fast && state_method) {
+                Nx2Profile::Add(Nx2Profile::Counter::FastStateCalls, 1);
+                engine->CallStateMethod(*system, method, argument);
+            } else {
+                engine->CallMethod(*system, method, argument, true);
+            }
         } else if (!engine->execution_mask[method]) {
+            Nx2Profile::Add(Nx2Profile::Counter::SinkQueuedWrites, 1);
             engine->method_sink.emplace_back(method, argument);
         } else {
             Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
-            engine->ConsumeSink(*system);
+            if (!engine->method_sink.empty()) {
+                Nx2Profile::Add(Nx2Profile::Counter::SinkConsumedWrites, engine->method_sink.size());
+                Nx2Profile::Scope sink_scope{Nx2Profile::Zone::MethodSink};
+                engine->ConsumeSink(*system);
+            }
             if ((head & HasSegment) != 0) {
                 engine->current_dma_segment = entry[1];
             }
@@ -325,8 +352,12 @@ size_t GpuSplit::Execute(const u64* entry) {
         const u32 amount = static_cast<u32>(head >> 32);
         const size_t data = (head & HasSegment) != 0 ? 3 : 2;
         auto* const engine = back_engine;
-        Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
-        engine->ConsumeSink(*system);
+        Nx2Profile::Scope method_scope{Nx2Profile::Zone::MethodMulti};
+        if (!engine->method_sink.empty()) {
+            Nx2Profile::Add(Nx2Profile::Counter::SinkConsumedWrites, engine->method_sink.size());
+            Nx2Profile::Scope sink_scope{Nx2Profile::Zone::MethodSink};
+            engine->ConsumeSink(*system);
+        }
         if ((head & HasSegment) != 0) {
             engine->current_dma_segment = entry[2];
         }
@@ -335,6 +366,7 @@ size_t GpuSplit::Execute(const u64* entry) {
         return data + (amount + 1) / 2;
     }
     case Kind::Call: {
+        Nx2Profile::Scope call_scope{Nx2Profile::Zone::SplitCall};
         const size_t payload = static_cast<size_t>((head >> 8) & 0xffffff);
         reinterpret_cast<void (*)(const u64*)>(entry[1])(entry + 2);
         return 2 + payload;
@@ -361,13 +393,17 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
         if (available == read_position) {
             Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
             // The front usually sends more within microseconds: spin briefly before sleeping.
-            for (u32 spins = 0; spins < 8192 && available == read_position &&
-                                !hook_requested.load(std::memory_order_relaxed);
-                 ++spins) {
-                Pause();
-                available = published.load(std::memory_order_acquire);
+            {
+                Nx2Profile::Scope spin_scope{Nx2Profile::Zone::SplitSpin};
+                for (u32 spins = 0; spins < 8192 && available == read_position &&
+                                    !hook_requested.load(std::memory_order_relaxed);
+                     ++spins) {
+                    Pause();
+                    available = published.load(std::memory_order_acquire);
+                }
             }
             if (available == read_position && idle_hook != nullptr) {
+                Nx2Profile::Scope hook_scope{Nx2Profile::Zone::SplitIdleHook};
                 hook_requested.store(false, std::memory_order_seq_cst);
                 idle_hook(idle_argument);
                 available = published.load(std::memory_order_acquire);
@@ -381,12 +417,14 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 // A request made after the hook ran (RequestIdleHook) runs it before sleeping.
                 if (available == read_position && !stop_token.stop_requested() &&
                     !hook_requested.load(std::memory_order_seq_cst)) {
+                    Nx2Profile::Scope sleep_scope{Nx2Profile::Zone::SplitSleep};
                     wake.wait(seen, std::memory_order_seq_cst);
                 }
                 back_waiting.store(false, std::memory_order_relaxed);
                 continue;
             }
         }
+        Nx2Profile::Scope dispatch_scope{Nx2Profile::Zone::SplitDispatch};
         u64 last_store = read_position;
         while (read_position != available) {
             const size_t index = read_position & RingMask;
@@ -394,6 +432,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             read_position += size != 0 ? size : RingWords - index;
             if (hook_requested.load(std::memory_order_relaxed) &&
                 idle_hook != nullptr) [[unlikely]] {
+                Nx2Profile::Scope hook_scope{Nx2Profile::Zone::SplitIdleHook};
                 hook_requested.store(false, std::memory_order_seq_cst);
                 idle_hook(idle_argument);
             }

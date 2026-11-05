@@ -217,6 +217,22 @@ struct ResolvedBatch {
 using RecordBatches =
     std::function<std::optional<std::vector<VkCommandBuffer>>(std::span<const ResolvedBatch>)>;
 
+enum class InlineFallbackReason : u8 {
+    ActiveQuery,
+    LateQuery,
+    Conditional,
+    TransformFeedback,
+    IndirectMesh,
+    TimestampCapture,
+    SerialCommand,
+    UnsupportedState,
+    Drain,
+    NoDraws,
+    Budget,
+    SingleBatch,
+    EncoderUnavailable,
+};
+
 class PassRecorder {
 public:
     struct Limits {
@@ -235,8 +251,9 @@ public:
     void BeginSubmission(u64 tick, vk::CommandBuffer primary);
     vk::CommandBuffer CommandBuffer() const;
     void EndSubmission();
-    void MaterializeInline();
-    void DisableCapture();
+    void MaterializeInline(InlineFallbackReason reason = InlineFallbackReason::SerialCommand);
+    void DisableCapture(InlineFallbackReason reason = InlineFallbackReason::UnsupportedState);
+    void NoteFallback(InlineFallbackReason reason);
     bool CapturingState() const {
         return !disabled;
     }
@@ -271,6 +288,8 @@ private:
     bool pass_open{};
     bool inline_pass{};
     bool disabled{};
+    std::optional<InlineFallbackReason> fallback_reason;
+    InlineFallbackReason disabled_reason{InlineFallbackReason::UnsupportedState};
 };
 
 } // namespace Vulkan

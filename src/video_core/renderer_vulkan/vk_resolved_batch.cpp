@@ -241,6 +241,8 @@ void PassRecorder::BeginSubmission(u64 tick, vk::CommandBuffer primary_) {
     sequence = 0;
     active_queries = 0;
     transform_feedback = conditional_rendering = inline_pass = disabled = false;
+    fallback_reason.reset();
+    disabled_reason = InlineFallbackReason::UnsupportedState;
 }
 
 vk::CommandBuffer PassRecorder::CommandBuffer() const {
@@ -263,9 +265,16 @@ void PassRecorder::BeginInline() {
     inline_pass = true;
 }
 
-void PassRecorder::MaterializeInline() {
+void PassRecorder::NoteFallback(InlineFallbackReason reason) {
+    if (Profile::enabled && pass_open && !fallback_reason) {
+        fallback_reason = reason;
+    }
+}
+
+void PassRecorder::MaterializeInline(InlineFallbackReason reason) {
     if (!pass_open || inline_pass)
         return;
+    NoteFallback(reason);
     BeginInline();
     for (const auto& command : commands)
         command.Replay(*primary);
@@ -273,8 +282,11 @@ void PassRecorder::MaterializeInline() {
     pass_bytes = 0;
 }
 
-void PassRecorder::DisableCapture() {
-    MaterializeInline();
+void PassRecorder::DisableCapture(InlineFallbackReason reason) {
+    MaterializeInline(reason);
+    if (Profile::enabled && !disabled) {
+        disabled_reason = reason;
+    }
     disabled = true;
     state.clear();
     state_bytes = 0;
@@ -285,7 +297,7 @@ void PassRecorder::Record(ResolvedCommand command) {
     if (!disabled && !command.IsDraw()) {
         if (bytes > limits.state_bytes - std::min(state_bytes, limits.state_bytes)) {
             Profile::Add(Profile::Counter::BudgetFallbacks);
-            DisableCapture();
+            DisableCapture(InlineFallbackReason::Budget);
         } else {
             state.push_back(command);
             state_bytes += bytes;
@@ -298,7 +310,7 @@ void PassRecorder::Record(ResolvedCommand command) {
             return;
         }
         Profile::Add(Profile::Counter::BudgetFallbacks);
-        DisableCapture();
+        DisableCapture(InlineFallbackReason::Budget);
     }
     command.Replay(*primary);
 }
@@ -306,10 +318,12 @@ void PassRecorder::Record(ResolvedCommand command) {
 void PassRecorder::BeginPass(const VkRenderPassBeginInfo& begin, VkSubpassContents contents) {
     if (pass_open)
         throw std::logic_error("Nested render pass capture");
+    fallback_reason.reset();
     if (begin.pNext || contents != VK_SUBPASS_CONTENTS_INLINE) {
         DisableCapture();
         primary->BeginRenderPass(begin, contents);
         pass_open = inline_pass = true;
+        NoteFallback(disabled_reason);
         return;
     }
     pass = begin;
@@ -323,19 +337,32 @@ void PassRecorder::BeginPass(const VkRenderPassBeginInfo& begin, VkSubpassConten
     pass_bytes = clears.size() * sizeof(VkClearValue);
     pass_open = true;
     inline_pass = false;
-    if (disabled || active_queries || transform_feedback || conditional_rendering ||
-        pass_bytes > limits.pass_bytes) {
-        MaterializeInline();
+    if (disabled) {
+        MaterializeInline(disabled_reason);
+    } else if (active_queries) {
+        MaterializeInline(InlineFallbackReason::ActiveQuery);
+    } else if (transform_feedback) {
+        MaterializeInline(InlineFallbackReason::TransformFeedback);
+    } else if (conditional_rendering) {
+        MaterializeInline(InlineFallbackReason::Conditional);
+    } else if (pass_bytes > limits.pass_bytes) {
+        MaterializeInline(InlineFallbackReason::Budget);
     }
 }
 
 std::optional<std::vector<ResolvedBatch>> PassRecorder::MakeBatches() {
     const size_t draws = std::count_if(commands.begin(), commands.end(),
                                        [](const auto& command) { return command.IsDraw(); });
-    if (draws == 0)
+    if (draws == 0) {
+        NoteFallback(InlineFallbackReason::NoDraws);
         return std::nullopt;
+    }
     const auto over_budget = [this]() -> std::optional<std::vector<ResolvedBatch>> {
         Profile::Add(Profile::Counter::BudgetFallbacks);
+        NoteFallback(InlineFallbackReason::Budget);
+        if (Profile::enabled && !disabled) {
+            disabled_reason = InlineFallbackReason::Budget;
+        }
         disabled = true;
         return std::nullopt;
     };
@@ -421,6 +448,7 @@ void PassRecorder::EndPass() {
                 clears.clear();
                 return;
             }
+            NoteFallback(InlineFallbackReason::EncoderUnavailable);
             BeginInline();
             for (const auto& batch : *batches) {
                 for (const auto& command : batch.commands) {
@@ -433,13 +461,34 @@ void PassRecorder::EndPass() {
     MaterializeInline();
     primary->EndRenderPass();
     Profile::Add(Profile::Counter::InlinePasses);
+    if (Profile::enabled) {
+        static constexpr std::array reason_counters{
+            Profile::Counter::InlineActiveQuery,
+            Profile::Counter::InlineLateQuery,
+            Profile::Counter::InlineConditional,
+            Profile::Counter::InlineTransformFeedback,
+            Profile::Counter::InlineIndirectMesh,
+            Profile::Counter::InlineTimestampCapture,
+            Profile::Counter::InlineSerialCommand,
+            Profile::Counter::InlineUnsupportedState,
+            Profile::Counter::InlineDrain,
+            Profile::Counter::InlineNoDraws,
+            Profile::Counter::InlineBudget,
+            Profile::Counter::InlineSingleBatch,
+            Profile::Counter::InlineEncoderUnavailable,
+        };
+        static_assert(reason_counters.size() ==
+                      static_cast<size_t>(InlineFallbackReason::EncoderUnavailable) + 1);
+        Profile::Add(reason_counters[static_cast<size_t>(
+            fallback_reason.value_or(InlineFallbackReason::SerialCommand))]);
+    }
     pass_open = inline_pass = false;
     commands.clear();
     clears.clear();
 }
 
 void PassRecorder::SetQueryActive(bool active) {
-    MaterializeInline();
+    MaterializeInline(InlineFallbackReason::LateQuery);
     if (active)
         ++active_queries;
     else if (active_queries)
@@ -447,12 +496,12 @@ void PassRecorder::SetQueryActive(bool active) {
 }
 
 void PassRecorder::SetTransformFeedbackActive(bool active) {
-    DisableCapture();
+    DisableCapture(InlineFallbackReason::TransformFeedback);
     transform_feedback = active;
 }
 
 void PassRecorder::SetConditionalRenderingActive(bool active) {
-    MaterializeInline();
+    MaterializeInline(InlineFallbackReason::Conditional);
     conditional_rendering = active;
 }
 

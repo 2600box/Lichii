@@ -7,6 +7,7 @@
 add_executable(tests
     video_core/host_gpu_profile.cpp
     video_core/resolved_batch.cpp
+    video_core/maxwell_state_method.cpp
     video_core/parallel_recorder.cpp
     video_core/parallel_recording_vulkan.cpp
     video_core/parallel_recording_shaders.h

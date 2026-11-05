@@ -473,4 +473,122 @@ TEST_CASE("A new submission discards all historical handles", "[video_core][reso
     REQUIRE(saved[0].epoch->tick == 2);
     REQUIRE(saved[0].initial_state.empty());
 }
+
+TEST_CASE("Inline fallback counters preserve the first cause and epoch inheritance",
+          "[video_core][resolved]") {
+    namespace Profile = VideoCommon::HostGpuProfile;
+    using Counter = Profile::Counter;
+    Profile::TakeCounters();
+    Fixture f;
+    PassRecorder recorder;
+    recorder.BeginSubmission(1, f.Native());
+    auto cb = recorder.CommandBuffer();
+    const auto begin_draw = [&] {
+        cb.BeginRenderPass(Fixture::Pass(), VK_SUBPASS_CONTENTS_INLINE);
+        cb.Draw(3, 1, 0, 0);
+    };
+
+    begin_draw();
+    cb.BeginQuery(Handle<VkQueryPool>(1), 0, 0);
+    recorder.MaterializeInline(InlineFallbackReason::Drain);
+    cb.EndRenderPass();
+
+    begin_draw();
+    cb.EndRenderPass();
+    cb.EndQuery(Handle<VkQueryPool>(1), 0);
+
+    begin_draw();
+    recorder.MaterializeInline(InlineFallbackReason::Drain);
+    cb.DrawIndirect(Handle<VkBuffer>(7), 0, 1, 16);
+    cb.EndRenderPass();
+
+    cb.BeginRenderPass(Fixture::Pass(), VK_SUBPASS_CONTENTS_INLINE);
+    cb.EndRenderPass();
+
+    begin_draw();
+    (void)*cb;
+    recorder.DisableCapture(InlineFallbackReason::TimestampCapture);
+    cb.EndRenderPass();
+    begin_draw();
+    cb.EndRenderPass();
+
+    recorder.EndSubmission();
+    recorder.BeginSubmission(2, f.Native());
+    cb = recorder.CommandBuffer();
+    cb.BeginRenderPass(Fixture::Pass(), VK_SUBPASS_CONTENTS_INLINE);
+    cb.EndRenderPass();
+
+    const auto counts = Profile::TakeCounters();
+    const u64 unit = Profile::enabled ? 1 : 0;
+    REQUIRE(counts[static_cast<size_t>(Counter::InlinePasses)] == 7 * unit);
+    REQUIRE(counts[static_cast<size_t>(Counter::InlineLateQuery)] == unit);
+    REQUIRE(counts[static_cast<size_t>(Counter::InlineActiveQuery)] == unit);
+    REQUIRE(counts[static_cast<size_t>(Counter::InlineDrain)] == unit);
+    REQUIRE(counts[static_cast<size_t>(Counter::InlineNoDraws)] == 2 * unit);
+    REQUIRE(counts[static_cast<size_t>(Counter::InlineUnsupportedState)] == 2 * unit);
+    u64 reasons{};
+    for (size_t i = static_cast<size_t>(Counter::InlineActiveQuery); i < counts.size(); ++i) {
+        reasons += counts[i];
+    }
+    REQUIRE(reasons == counts[static_cast<size_t>(Counter::InlinePasses)]);
+    REQUIRE(counts[static_cast<size_t>(Counter::InlineIndirectMesh)] == 0);
+    REQUIRE(counts[static_cast<size_t>(Counter::InlineTimestampCapture)] == 0);
+}
+
+TEST_CASE("Inline callback rejection distinguishes an annotated single batch",
+          "[video_core][resolved]") {
+    namespace Profile = VideoCommon::HostGpuProfile;
+    Profile::TakeCounters();
+    bool single_batch{};
+    SECTION("The callback identifies a single batch") {
+        single_batch = true;
+    }
+    SECTION("The encoder is unavailable") {}
+    Fixture f;
+    PassRecorder* active{};
+    PassRecorder recorder{
+        [&](std::span<const ResolvedBatch>) -> std::optional<std::vector<VkCommandBuffer>> {
+            if (single_batch) {
+                active->NoteFallback(InlineFallbackReason::SingleBatch);
+            }
+            return std::nullopt;
+        }};
+    active = &recorder;
+    recorder.BeginSubmission(1, f.Native());
+    auto cb = recorder.CommandBuffer();
+    cb.BeginRenderPass(Fixture::Pass(), VK_SUBPASS_CONTENTS_INLINE);
+    cb.Draw(3, 1, 0, 0);
+    cb.EndRenderPass();
+    const auto counts = Profile::TakeCounters();
+    const u64 unit = Profile::enabled ? 1 : 0;
+    REQUIRE(counts[static_cast<size_t>(Profile::Counter::InlinePasses)] == unit);
+    REQUIRE(counts[static_cast<size_t>(Profile::Counter::InlineSingleBatch)] ==
+            (single_batch ? unit : 0));
+    REQUIRE(counts[static_cast<size_t>(Profile::Counter::InlineEncoderUnavailable)] ==
+            (single_batch ? 0 : unit));
+}
+
+TEST_CASE("Budget fallback reasons persist for later passes without recounting events",
+          "[video_core][resolved]") {
+    namespace Profile = VideoCommon::HostGpuProfile;
+    Profile::TakeCounters();
+    Fixture f;
+    PassRecorder::Limits limits;
+    limits.state_bytes = 0;
+    PassRecorder recorder{{}, limits};
+    recorder.BeginSubmission(1, f.Native());
+    auto cb = recorder.CommandBuffer();
+    cb.BeginRenderPass(Fixture::Pass(), VK_SUBPASS_CONTENTS_INLINE);
+    cb.SetStencilReference(VK_STENCIL_FACE_FRONT_BIT, 4);
+    cb.Draw(3, 1, 0, 0);
+    cb.EndRenderPass();
+    cb.BeginRenderPass(Fixture::Pass(), VK_SUBPASS_CONTENTS_INLINE);
+    cb.Draw(3, 1, 0, 0);
+    cb.EndRenderPass();
+    const auto counts = Profile::TakeCounters();
+    const u64 unit = Profile::enabled ? 1 : 0;
+    REQUIRE(counts[static_cast<size_t>(Profile::Counter::InlinePasses)] == 2 * unit);
+    REQUIRE(counts[static_cast<size_t>(Profile::Counter::InlineBudget)] == 2 * unit);
+    REQUIRE(counts[static_cast<size_t>(Profile::Counter::BudgetFallbacks)] == unit);
+}
 } // namespace
