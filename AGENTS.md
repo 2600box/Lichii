@@ -82,6 +82,7 @@ Use these before guessing. All are off unless the variable is set; pass them as 
 | Video playback | `EDEN_NX2_VDEC_TRACE=1`, `EDEN_NX2_VDEC_DUMP=<dir>` | Decoder submit, decode and composite trace; decoded frames. |
 | Performance and frame pacing | `EDEN_NX2_GPU_PROFILE=1`, `EDEN_DKB_FRAME_TRACE=1` | GPU thread time per second by zone; per-present interval, CPU and fence timing. |
 | Command corruption or pop-in | `EDEN_NX2_PB_CHECK=1`; A/B with `EDEN_NX2_PB_SNAPSHOT=0` or `EDEN_NX2_FETCH_DRAIN=1` | How many pushbuffer entries change between submit and parse. |
+| Wrong instance or material data behind pointer tables (white flicker, missing foliage) | `EDEN_NX2_TABLE_POINTER_TRACE=1` | Each change of a table pointer binding's entry or bound size, per stage and slot, with whether the entry was GPU-written or CPU-written and not yet uploaded when it was bound. |
 | Split GPU thread races | `EDEN_NX2_SPLIT_CHECK=1` | Reports scheduler use from the wrong thread. |
 | Upscaler and DLSS contracts | `EDEN_NX2_DLSS_CONTRACT_TRACE=1` | Inputs and outputs of replaced upscaler networks. |
 | Service calls | `EDEN_NX2_IPC_TRACE=1` | IPC command trace. |
