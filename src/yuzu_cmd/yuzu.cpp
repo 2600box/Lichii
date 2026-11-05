@@ -252,6 +252,9 @@ struct SdlState {
     bool network_initialized{};
 };
 
+constexpr int kRestartExitCode = 75;
+static std::atomic_bool restart_requested{false};
+
 static std::atomic_bool pack_nup_cancel{false};
 static std::atomic_bool unpack_nup_cancel{false};
 static std::atomic_bool edit_nup_cancel{false};
@@ -564,6 +567,18 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     // don't do anything, SDL3 already exists for us :D
     state->system.RegisterExitCallback([] {});
 
+    // A game restarting itself (e.g. after a settings change) quits with kRestartExitCode so the
+    // launcher boots it again. shortcut: no in-process reboot, so other program indices and the
+    // user channel handed to the next program are dropped; port the Qt OnExecuteProgram if a game needs them.
+    state->system.RegisterExecuteProgramCallback([](std::size_t program_index) {
+        if (program_index != 0) {
+            LOG_CRITICAL(Frontend, "ExecuteProgram: program index {} is not supported by eden-cli", program_index);
+            return;
+        }
+        LOG_INFO(Frontend, "ExecuteProgram: the game asked to restart, exiting with code {}", kRestartExitCode);
+        restart_requested = true;
+    });
+
     // QLaunch launched applications (should) now reload shader cache.
     static std::mutex shader_cache_reload_mutex;
     state->system.RegisterApplicationChangedCallback([&state](u64 changed_program_id) {
@@ -653,6 +668,9 @@ extern "C" SDL_AppResult SDL_AppIterate(void *appstate) {
     if (state->emu_window) {
         state->emu_window->ApplyPendingTitle();
     }
+    if (restart_requested) {
+        return SDL_APP_SUCCESS;
+    }
     return state->emu_window && state->emu_window->IsOpen() ? SDL_APP_CONTINUE : SDL_APP_SUCCESS;
 }
 extern "C" SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event) {
@@ -678,6 +696,11 @@ extern "C" void SDL_AppQuit(void *appstate, SDL_AppResult result) {
     delete state;
     if (network_initialized) {
         Network::Shutdown();
+    }
+    if (restart_requested) {
+        // SDL3 maps SDL_APP_SUCCESS to exit code 0; quit SDL ourselves to return the restart code.
+        SDL_Quit();
+        std::exit(kRestartExitCode);
     }
 }
 
