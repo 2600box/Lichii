@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -15,6 +16,7 @@
 #include "memory_manager.h"
 #include "video_core/guest_memory.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_profile.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/invalidation_accumulator.h"
 #include "video_core/memory_manager.h"
@@ -645,8 +647,19 @@ size_t MemoryManager::MaxContinuousRange(GPUVAddr gpu_addr, size_t size) const {
 }
 
 size_t MemoryManager::GetMemoryLayoutSize(GPUVAddr gpu_addr, size_t max_size) const {
+    static const bool rebalance = [] {
+        const char* value = std::getenv("EDEN_NX2_SPLIT_REBALANCE");
+        return value != nullptr && value[0] == '1';
+    }();
+    VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::MemoryLayout};
     std::unique_lock<std::mutex> lock(guard);
-    return kind_map.GetContinuousSizeFrom(gpu_addr);
+    bool hit{};
+    const size_t size = kind_map.GetContinuousSizeFrom(gpu_addr, native_tiling && rebalance, &hit);
+    if (VideoCommon::Nx2Profile::Enabled()) {
+        VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::LayoutLookups, 1);
+        VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::LayoutHits, hit);
+    }
+    return size;
 }
 
 void MemoryManager::InvalidateRegion(GPUVAddr gpu_addr, size_t size,
