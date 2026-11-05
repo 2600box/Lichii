@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdlib>
@@ -141,6 +142,51 @@ enum class Counter : u32 {
     AcquireWaits,   ///< Of AcquireChecks: not met yet (the channel waits)
 };
 
+/// Method calls on this thread by method (3D registers on the back, macros on the front), and
+/// same-value writes among them; MME DMA reads by the macro that made them. The most frequent
+/// are logged with the zones.
+inline thread_local std::array<u32, 0x2000> t_method_count{};
+inline thread_local std::array<u32, 0x2000> t_method_same{};
+inline thread_local std::array<u32, 0x2000> t_dma_reads{};
+
+inline void CountMethod(u32 method, bool same) {
+    if (Enabled() && method < t_method_count.size()) {
+        ++t_method_count[method];
+        t_method_same[method] += same ? 1 : 0;
+    }
+}
+
+inline void CountDmaRead(u32 macro) {
+    if (Enabled() && macro < t_dma_reads.size()) {
+        ++t_dma_reads[macro];
+    }
+}
+
+inline std::string TopMethods(const std::array<u32, 0x2000>& counts,
+                              const std::array<u32, 0x2000>* same, u64 window) {
+    std::array<u32, 0x2000> order;
+    for (u32 i = 0; i < order.size(); ++i) {
+        order[i] = i;
+    }
+    constexpr size_t top = 24;
+    std::partial_sort(order.begin(), order.begin() + top, order.end(),
+                      [&counts](u32 a, u32 b) { return counts[a] > counts[b]; });
+    std::string text;
+    for (size_t i = 0; i < top && counts[order[i]] != 0; ++i) {
+        const u32 method = order[i];
+        text += fmt::format(" {:#x} {:.0f}/s", method,
+                            static_cast<double>(counts[method]) * 1e9 / window);
+        if (same != nullptr && (*same)[method] != 0) {
+            text += fmt::format(" ({:.0f} same)", static_cast<double>((*same)[method]) * 1e9 / window);
+        }
+        text += ',';
+    }
+    if (!text.empty()) {
+        text.pop_back();
+    }
+    return text;
+}
+
 /// Device pages (4 KiB) the native MME has DMA-read since start (GPU thread only; filled only
 /// while profiling): which buffer downloads anything on the GPU thread reads back.
 inline std::unordered_set<u64>& DmaReadPages() {
@@ -231,6 +277,15 @@ inline void Report(const char* thread_name = "GPU thread") {
                             static_cast<double>(window) / 1e6);
     }
     LOG_INFO(HW_GPU, "{} per second:{}", thread_name, line);
+    if (const std::string methods = TopMethods(t_method_count, &t_method_same, window); !methods.empty()) {
+        LOG_INFO(HW_GPU, "{} methods per second:{}", thread_name, methods);
+    }
+    if (const std::string reads = TopMethods(t_dma_reads, nullptr, window); !reads.empty()) {
+        LOG_INFO(HW_GPU, "{} MME DMA reads per second by macro:{}", thread_name, reads);
+    }
+    t_method_count = {};
+    t_method_same = {};
+    t_dma_reads = {};
     data = {};
     data.window_start = now;
     data.cpu_start_ns = cpu_now;
