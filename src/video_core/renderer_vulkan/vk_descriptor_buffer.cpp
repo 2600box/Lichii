@@ -104,6 +104,7 @@ DescriptorBufferRing::Allocation DescriptorBufferRing::Allocate(Scheduler& sched
     if (frame_reused) {
         frame_reused = false;
         scheduler.Wait(frame_ticks[frame_index]);
+        scheduler.WaitDescriptorWrites();
     }
     if (cursor + needed > chunk_capacity) {
         if (chunk_cursor + 1 < chunks_per_frame) {
@@ -111,6 +112,7 @@ DescriptorBufferRing::Allocation DescriptorBufferRing::Allocate(Scheduler& sched
         } else {
             LOG_DEBUG(Render_Vulkan, "Descriptor buffer frame exhausted, stalling on the GPU");
             scheduler.Finish();
+            scheduler.WaitDescriptorWrites();
             chunk_cursor = 0;
             ++generation;
         }

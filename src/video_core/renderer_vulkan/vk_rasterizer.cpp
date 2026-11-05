@@ -2043,6 +2043,7 @@ void RasterizerVulkan::TickFrame() {
     ComputePipeline::TickUpscalerTrace();
     draw_counter = 0;
     pending_native_work = false;
+    scheduler.WaitDescriptorWrites();
     pipeline_cache.TickFrame();
     guest_descriptor_queue.TickFrame();
     compute_pass_descriptor_queue.TickFrame();

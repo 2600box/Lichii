@@ -606,7 +606,8 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
             LOG_DEBUG(Render_Vulkan, "Failed to reserve descriptor memory, skipping dispatch");
             return false;
         }
-        WriteDescriptorBuffer(device, descriptor_buffer_layout, descriptor_data, alloc.host);
+        RecordDescriptorBufferWrite(scheduler, device, descriptor_buffer_layout,
+                                    {descriptor_data, num_descriptor_entries}, alloc.host);
         descriptor_buffer_offset = alloc.offset;
         descriptor_buffer_chunk = alloc.chunk;
     }

@@ -734,7 +734,8 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                 LOG_DEBUG(Render_Vulkan, "Failed to reserve descriptor memory, skipping draw");
                 return false;
             }
-            WriteDescriptorBuffer(device, descriptor_buffer_layout, entries, alloc.host);
+            RecordDescriptorBufferWrite(scheduler, device, descriptor_buffer_layout,
+                                        {entries, num_descriptor_entries}, alloc.host);
             descriptor_buffer_offset = alloc.offset;
             descriptor_buffer_chunk = alloc.chunk;
             last_descriptor_buffer_offset = alloc.offset;

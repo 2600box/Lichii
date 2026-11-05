@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <optional>
 
@@ -14,11 +15,14 @@
 #include "common/common_types.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/shader_info.h"
+#include "video_core/nx2_perf.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/types.h"
 #include "video_core/vulkan_common/vulkan_device.h"
+#include "video_core/renderer_vulkan/descriptor_buffer_packet.h"
+#include "video_core/renderer_vulkan/vk_scheduler.h"
 
 namespace Vulkan {
 
@@ -71,22 +75,6 @@ using Shader::Backend::SPIRV::NUM_TEXTURE_AND_IMAGE_SCALING_WORDS;
     }
 }
 
-struct DescriptorBufferBinding {
-    VkDescriptorType type;
-    u32 count;
-    VkDeviceSize offset;
-    VkDeviceSize stride;
-};
-
-struct DescriptorBufferLayout {
-    VkDeviceSize size{};
-    boost::container::small_vector<DescriptorBufferBinding, 32> bindings;
-
-    [[nodiscard]] bool Empty() const noexcept {
-        return bindings.empty();
-    }
-};
-
 inline void WriteDescriptorBuffer(const Device& device, const DescriptorBufferLayout& layout,
                                   const DescriptorUpdateEntry* payload, u8* host) {
     const vk::Device& dev = device.GetLogical();
@@ -132,6 +120,31 @@ inline void WriteDescriptorBuffer(const Device& device, const DescriptorBufferLa
                                  host + binding.offset + index * binding.stride);
         }
     }
+}
+
+inline void RecordDescriptorBufferWrite(Scheduler& scheduler, const Device& device,
+                                        const DescriptorBufferLayout& layout,
+                                        std::span<const DescriptorUpdateEntry> entries, u8* host) {
+    const auto encode = [&device](const DescriptorBufferLayout& packet_layout,
+                                  const DescriptorUpdateEntry* payload, u8* destination) {
+        WriteDescriptorBuffer(device, packet_layout, payload, destination);
+    };
+#ifdef YUZU_LEGACY
+    constexpr bool enabled = false;
+#else
+    const bool enabled = VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::DescriptorWorkers) &&
+                         !device.HasDebuggingToolAttached() &&
+                         !Settings::values.enable_renderdoc_hotkey.GetValue();
+#endif
+    RecordDescriptorBufferPacket(
+        scheduler, layout, entries, host, enabled, VideoCommon::Nx2Perf::Verify(), encode, [] {
+            static std::atomic_flag reported;
+            if (!reported.test_and_set(std::memory_order_relaxed)) {
+                LOG_WARNING(Render_Vulkan,
+                            "Nx2Perf descriptor_workers: opaque descriptor bytes differ; "
+                            "padding or encoding may differ, using owner bytes");
+            }
+        });
 }
 
 [[nodiscard]] inline u32 NumDescriptorEntries(const Shader::Info& info) {

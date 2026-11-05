@@ -94,21 +94,6 @@ void ReportSubmitCounts() {
 }
 }
 
-void Scheduler::CommandChunk::ExecuteAll(vk::CommandBuffer cmdbuf,
-                                         vk::CommandBuffer upload_cmdbuf) {
-    auto command = first;
-    while (command != nullptr) {
-        auto next = command->GetNext();
-        command->Execute(cmdbuf, upload_cmdbuf);
-        command->~Command();
-        command = next;
-    }
-    submit = false;
-    command_offset = 0;
-    first = nullptr;
-    last = nullptr;
-}
-
 Scheduler::Scheduler(const Device& device_, StateTracker& state_tracker_)
     : device{device_}, state_tracker{state_tracker_},
       master_semaphore{std::make_unique<MasterSemaphore>(device)},
@@ -272,6 +257,7 @@ void Scheduler::WaitWorker() {
 
     // Now wait for execution to finish.
     std::scoped_lock el{execution_mutex};
+    descriptor_packet_budget.Reset();
 }
 
 void Scheduler::MarkFrameEnd(u64 frame) {

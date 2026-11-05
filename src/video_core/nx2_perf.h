@@ -37,6 +37,7 @@ enum class Opt : unsigned {
     WriteIntersections,
     SortedPageBatches,
     AsyncPipelines,    ///< Native graphics SPIR-V emitted by the pipeline worker, not the back
+    DescriptorWorkers,
     Count,
 };
 
@@ -44,7 +45,7 @@ inline constexpr std::array<std::string_view, static_cast<size_t>(Opt::Count)> o
     "bounds",         "method",          "cb_batch",    "clean_words",   "index_rebind",
     "usage_tracker",  "bank_check",      "split_overlap", "front_sleep", "submit_budget",
     "fragment_barrier", "fence_flush",   "frames_ahead", "pipeline_retention",
-    "write_intersections", "sorted_page_batches", "async_pipelines",
+    "write_intersections", "sorted_page_batches", "async_pipelines", "descriptor_workers",
 };
 
 inline bool Enabled() {
