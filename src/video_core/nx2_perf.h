@@ -33,13 +33,14 @@ enum class Opt : unsigned {
     FenceFlush,        ///< 5 ms DeferFlush, command list copies submitted at once
     FramesAhead,       ///< Ocarina presents a frame ahead
     PipelineRetention, ///< Sixteen sessions of used pipelines, saved every 15 s
+    AsyncPipelines,    ///< Native graphics SPIR-V emitted by the pipeline worker, not the back
     Count,
 };
 
 inline constexpr std::array<std::string_view, static_cast<size_t>(Opt::Count)> opt_names{
     "bounds",         "method",          "cb_batch",    "clean_words",   "index_rebind",
     "usage_tracker",  "bank_check",      "split_overlap", "front_sleep", "submit_budget",
-    "fragment_barrier", "fence_flush",   "frames_ahead", "pipeline_retention",
+    "fragment_barrier", "fence_flush",   "frames_ahead", "pipeline_retention", "async_pipelines",
 };
 
 inline bool Enabled() {
