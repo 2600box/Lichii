@@ -74,6 +74,16 @@ using VideoCommon::ImageViewType;
 
 namespace {
 
+// EXPERIMENT EDEN_NX2_INVALIDATE_BEFORE_DISPATCH=1: apply collected guest CPU writes before every
+// dispatch and draw (=list does it once per command list, in DmaPusher).
+bool InvalidateBeforeUse() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_INVALIDATE_BEFORE_DISPATCH");
+        return value != nullptr && value[0] != '0' && std::string_view{value} != "list";
+    }();
+    return enabled;
+}
+
 /// read_gpu_memory: the first address space (the bound channel's first) that maps the whole range,
 /// read as the GPU reads it, without flushing GPU caches.
 VideoCore::Nx2Debug::GpuReadResult ReadGpuMemory(std::span<Tegra::MemoryManager* const> spaces,
@@ -403,6 +413,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         }
     };
     namespace Profile = VideoCommon::Nx2Profile;
+    if (InvalidateBeforeUse()) {
+        gpu.InvalidateGPUCache();
+    }
     {
         Profile::Scope scope{Profile::Zone::FlushWork};
         FlushWork();
@@ -1345,6 +1358,9 @@ void RasterizerVulkan::Clear(u32 layer_count) {
 
 void RasterizerVulkan::DispatchCompute() {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Compute};
+    if (InvalidateBeforeUse()) {
+        gpu.InvalidateGPUCache();
+    }
     FlushWork();
     gpu_memory->FlushCaching();
     if (frame_dump.Capturing()) {
