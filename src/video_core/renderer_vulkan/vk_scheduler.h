@@ -25,6 +25,7 @@
 #include "common/polyfill_thread.h"
 #include "common/settings.h"
 #include "video_core/gpu_split.h"
+#include "video_core/renderer_vulkan/fragment_barrier_state.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
@@ -119,11 +120,11 @@ public:
         std::source_location location = std::source_location::current());
 
     void DeferFragmentBarrier() {
-        fragment_barrier_pending = state.renderpass != VK_NULL_HANDLE;
+        fragment_barrier.Defer(state.renderpass != VK_NULL_HANDLE);
     }
 
-    bool TakeFragmentBarrier() {
-        return std::exchange(fragment_barrier_pending, false);
+    bool HasFragmentBarrier() const {
+        return fragment_barrier.Pending();
     }
 
     void NoteRenderPassStores() {
@@ -440,7 +441,7 @@ private:
     StateTracker& state_tracker;
 
     std::unique_ptr<MasterSemaphore> master_semaphore;
-    bool fragment_barrier_pending{};
+    FragmentBarrierState fragment_barrier;
     bool render_pass_has_stores{};
     bool graphics_pipeline_missing{};
     std::unique_ptr<CommandPool> command_pool;
