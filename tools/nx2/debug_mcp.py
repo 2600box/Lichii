@@ -30,6 +30,15 @@ STICK = {"type": "array", "items": {"type": "number", "minimum": -1, "maximum": 
 
 TOOLS = [
     {
+        "name": "event_wait",
+        "description": "Experimental Windows Event timed-wait A/B. Changes apply to subsequent "
+                       "waits; existing waits finish normally. Omit high_resolution to query.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"high_resolution": {"type": "boolean"}},
+        },
+    },
+    {
         "name": "status",
         "description": "Game title, program id, build, renderer, paused state, presented frame "
                        "count and fps (measured over fps_window_ms), dump directory, live log "

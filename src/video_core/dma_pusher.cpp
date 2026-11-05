@@ -463,7 +463,7 @@ void DmaPusher::CallMethod(u32 argument) {
                             engine_type == Engines::EngineTypes::MaxwellDMA;
         SCOPE_EXIT {
             if (writer) {
-                split.NoteWriter();
+                split.NoteWriter(static_cast<u32>(engine_type), dma_state.method);
             }
         };
         if (split.Active()) {
@@ -522,7 +522,7 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
                             engine_type == Engines::EngineTypes::MaxwellDMA;
         SCOPE_EXIT {
             if (writer) {
-                split.NoteWriter();
+                split.NoteWriter(static_cast<u32>(engine_type), dma_state.method);
             }
         };
         if (split.Active()) {

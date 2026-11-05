@@ -33,6 +33,8 @@ class FakeEmulator:
 
     def answer(self, request):
         method = request["method"]
+        if method == "event_wait":
+            return {"result": {"high_resolution": request["params"].get("high_resolution", False)}}
         if method == "status":
             return {"result": {"title": "Test", "presents": 3}}
         if method == "screenshot":
@@ -96,7 +98,7 @@ class AdapterTest(unittest.TestCase):
         self.assertIsNone(self.adapter.handle({"method": "notifications/initialized"}))
         names = [tool["name"] for tool in self.adapter.handle({"id": 2, "method": "tools/list"})
                  ["result"]["tools"]]
-        self.assertEqual(names, ["status", "screenshot", "log_tail", "log_filter", "capture_frame",
+        self.assertEqual(names, ["event_wait", "status", "screenshot", "log_tail", "log_filter", "capture_frame",
                                  "capture_image", "reject_shaders", "read_memory",
                                  "search_memory", "read_gpu_memory", "input",
                                  "input_sequence"])
@@ -107,6 +109,12 @@ class AdapterTest(unittest.TestCase):
         self.assertFalse(result["isError"])
         self.assertEqual(json.loads(result["content"][0]["text"])["title"], "Test")
         self.assertEqual(self.fake.requests[-1]["params"], {"fps_window_ms": 0})
+
+    def test_event_wait_is_forwarded(self):
+        for enabled in (True, False):
+            result = self.call("event_wait", {"high_resolution": enabled})
+            self.assertFalse(result["isError"])
+            self.assertEqual(json.loads(result["content"][0]["text"])["high_resolution"], enabled)
 
     def test_memory_reads_are_forwarded(self):
         arguments = {"address": "0x8000001000", "size": 4, "as": "hex"}

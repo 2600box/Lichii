@@ -5,7 +5,9 @@
 // SPDX-FileCopyrightText: 2014 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <limits>
 #include <string>
 #include <thread>
@@ -437,6 +439,7 @@ void RememberCurrentThreadNice(pid_t tid, s32 nice_value) {
 } // Anonymous namespace
 #endif
 
+#ifdef _WIN32
 #include "common/cpu_features.h"
 #ifdef ARCHITECTURE_x86_64
 #ifdef _MSC_VER
@@ -447,7 +450,24 @@ void RememberCurrentThreadNice(pid_t tid, s32 nice_value) {
 #include "common/x64/rdtsc.h"
 #endif
 
+#endif
+
 namespace Common {
+
+namespace {
+std::atomic<bool> high_resolution_event_waits{[] {
+    const char* value = std::getenv("EDEN_TIMING_HIGH_RES");
+    return value != nullptr && value[0] == '1';
+}()};
+}
+
+bool HighResolutionEventWaitsEnabled() {
+    return high_resolution_event_waits.load(std::memory_order_relaxed);
+}
+
+bool SetHighResolutionEventWaitsEnabled(bool enabled) {
+    return high_resolution_event_waits.exchange(enabled, std::memory_order_relaxed);
+}
 
 void SetCurrentThreadPriority(ThreadPriority new_priority) {
 #ifdef _WIN32
@@ -629,6 +649,106 @@ void PollThreadPolicies() {
 #endif
 }
 
+#ifdef _WIN32
+Event::~Event() {
+    if (timed_wait_event) {
+        CloseHandle(timed_wait_event);
+    }
+}
+
+void Event::WakeTimedWaiters() {
+    if (timed_wait_event) {
+        SetEvent(timed_wait_event);
+    }
+}
+#endif
+
+bool Event::WaitFor(const std::chrono::nanoseconds time) {
+#ifdef _WIN32
+    if (!HighResolutionEventWaitsEnabled()) {
+        return WaitForLegacy(time);
+    }
+#endif
+    std::unique_lock lk{mutex};
+#ifdef _WIN32
+    using Clock = std::chrono::steady_clock;
+    const auto now = Clock::now();
+    const auto deadline = time > Clock::time_point::max() - now
+                              ? Clock::time_point::max()
+                              : now + time;
+    while (!is_set.load()) {
+        if (Clock::now() >= deadline) {
+            return false;
+        }
+
+        // Each waiting host thread owns its timer, so concurrent waits cannot rearm
+        // each other's deadlines. Reuse the handle across the host timing loop.
+        struct Timer {
+            Timer() {
+                handle = CreateWaitableTimerExW(nullptr, nullptr,
+                    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_MODIFY_STATE | SYNCHRONIZE);
+                if (!handle) {
+                    handle = CreateWaitableTimerExW(nullptr, nullptr, 0,
+                                                   TIMER_MODIFY_STATE | SYNCHRONIZE);
+                }
+            }
+            ~Timer() {
+                if (handle) {
+                    CloseHandle(handle);
+                }
+            }
+            HANDLE handle{};
+        };
+        static thread_local Timer timer;
+        if (!timed_wait_event) {
+            timed_wait_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        }
+        const auto remaining = deadline - Clock::now();
+        if (remaining <= Clock::duration::zero()) {
+            return false;
+        }
+
+        // The event is reset while holding the predicate lock. Set() cannot race
+        // between this reset and the wait without leaving a persistent wake signal.
+        if (timed_wait_event) {
+            ResetEvent(timed_wait_event);
+            using TimerTicks = std::chrono::duration<s64, std::ratio<1, 10'000'000>>;
+            LARGE_INTEGER due{};
+            due.QuadPart = -std::chrono::ceil<TimerTicks>(remaining).count();
+            const bool armed = timer.handle &&
+                SetWaitableTimerEx(timer.handle, &due, 0, nullptr, nullptr, nullptr, 0);
+            const HANDLE handles[]{timed_wait_event, timer.handle};
+            const auto milliseconds = std::chrono::ceil<std::chrono::milliseconds>(remaining);
+            const DWORD timeout = static_cast<DWORD>(
+                (std::min<s64>)(milliseconds.count(), INFINITE - 1));
+            lk.unlock();
+            const DWORD result = armed ? WaitForMultipleObjects(2, handles, FALSE, INFINITE)
+                                       : WaitForSingleObject(timed_wait_event, timeout);
+            if (armed) {
+                CancelWaitableTimer(timer.handle);
+            }
+            lk.lock();
+            if (result != WAIT_FAILED) {
+                continue;
+            }
+        }
+
+        // Retain a blocking fallback if Windows cannot allocate or wait on handles.
+        const auto fallback = std::chrono::ceil<std::chrono::milliseconds>(deadline - Clock::now());
+        if (fallback > std::chrono::milliseconds::zero()) {
+            condvar.wait_for(lk, fallback, [this] { return is_set.load(); });
+        }
+    }
+#else
+    if (!condvar.wait_for(lk, time, [this] { return is_set.load(); })) {
+        return false;
+    }
+#endif
+    is_set = false;
+    return true;
+}
+
+#ifdef _WIN32
 #ifdef ARCHITECTURE_x86_64
 // On Linux and UNIX systems, a futex would nominally be used to cover the costs
 // the idea is that it's intuitivelly cheaper to use a direct instruction as opposed to a full futex call
@@ -644,7 +764,7 @@ __attribute__((target("waitpkg,mwaitx")))
 #pragma GCC target("waitpkg")
 #pragma GCC target("mwaitx")
 #endif
-bool Event::WaitFor(const std::chrono::nanoseconds time) {
+bool Event::WaitForLegacy(const std::chrono::nanoseconds time) {
 #ifdef _WIN32
     auto const start = Common::X64::FencedRDTSC();
     auto const& caps = Common::g_cpu_caps;
@@ -709,7 +829,7 @@ bool Event::WaitFor(const std::chrono::nanoseconds time) {
 #endif
 }
 #else
-bool Event::WaitFor(const std::chrono::nanoseconds time) {
+bool Event::WaitForLegacy(const std::chrono::nanoseconds time) {
 #ifdef _WIN32
     auto const end = Common::g_wall_clock.GetTimeNS() + time;
     while (!is_set.load() && end > Common::g_wall_clock.GetTimeNS())
@@ -725,6 +845,7 @@ bool Event::WaitFor(const std::chrono::nanoseconds time) {
     return true;
 #endif
 }
+#endif
 #endif
 
 } // namespace Common

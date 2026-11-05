@@ -20,6 +20,7 @@
 #include "common/scm_rev.h"
 #include "common/settings.h"
 #include "common/stb.h"
+#include "common/thread.h"
 #include "core/core.h"
 #include "core/debugger/nx2_debug_server.h"
 #include "core/debugger/nx2_debug_tools.h"
@@ -202,6 +203,18 @@ json Status(ToolState& state, const json& params) {
         {"log_filter", state.log_filter},
         {"rejected", HexList(VideoCore::Nx2Debug::RejectedHashes())},
     };
+}
+
+json EventWait(ToolState&, const json& params) {
+#ifdef _WIN32
+    const bool previous = Common::HighResolutionEventWaitsEnabled();
+    const bool enabled = params.value("high_resolution", previous);
+    Common::SetHighResolutionEventWaitsEnabled(enabled);
+    LOG_INFO(Core, "Event wait experiment: high_resolution={} (previous={})", enabled, previous);
+    return {{"high_resolution", enabled}, {"previous", previous}};
+#else
+    throw std::runtime_error{"event_wait is a Windows-only experiment"};
+#endif
 }
 
 json Screenshot(ToolState& state, const json& params) {
@@ -564,6 +577,7 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
     };
     return {
         {"status", handler(Status)},
+        {"event_wait", handler(EventWait)},
         {"screenshot", handler(Screenshot)},
         {"log_tail", handler(LogTail)},
         {"log_filter", handler(LogFilter)},

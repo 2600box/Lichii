@@ -18,12 +18,21 @@
 
 namespace Common {
 
+bool HighResolutionEventWaitsEnabled();
+bool SetHighResolutionEventWaitsEnabled(bool enabled);
+
 class Event {
 public:
+#ifdef _WIN32
+    ~Event();
+#endif
     void Set() {
         std::scoped_lock lk{mutex};
         if (!is_set) {
             is_set = true;
+#ifdef _WIN32
+            WakeTimedWaiters();
+#endif
             condvar.notify_one();
         }
     }
@@ -57,9 +66,16 @@ public:
     }
 
 private:
+#ifdef _WIN32
+    void WakeTimedWaiters();
+    bool WaitForLegacy(std::chrono::nanoseconds time);
+#endif
     alignas(64) std::atomic<bool> is_set{false};
     std::condition_variable condvar;
     std::mutex mutex;
+#ifdef _WIN32
+    void* timed_wait_event{};
+#endif
 };
 
 class Barrier {

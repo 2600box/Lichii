@@ -159,8 +159,10 @@ public:
     void Drain(DrainSite site = DrainSite::Other);
 
     /// Compute or copy work was just sent: what can write GPU-written command lists.
-    void NoteWriter() {
+    void NoteWriter(u32 engine, u32 method) {
         last_writer_position = write_position;
+        last_writer_engine = engine;
+        last_writer_method = method;
     }
     /// Waits until the back executed the compute and copy work sent so far (not what came after).
     /// Returns whether any of it was still queued.
@@ -233,6 +235,8 @@ private:
     // Front side.
     u64 write_position{};
     u64 last_writer_position{};
+    u32 last_writer_engine{};
+    u32 last_writer_method{};
     u64 last_sync_position{};
     u64 published_local{};
     u64 consumed_cache{};

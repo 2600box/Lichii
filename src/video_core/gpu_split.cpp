@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cstdlib>
 #include <thread>
+#include <unordered_map>
+#include <vector>
 
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -220,7 +222,44 @@ void GpuSplit::Drain(DrainSite site) {
 }
 
 bool GpuSplit::WaitForWriters() {
-    return WaitFor(std::min(last_writer_position, write_position), DrainSite::ListWriters);
+    static const bool trace = std::getenv("EDEN_NX2_WRITER_TRACE") != nullptr;
+    const u64 target = std::min(last_writer_position, write_position);
+    if (!trace) {
+        return WaitFor(target, DrainSite::ListWriters);
+    }
+    const u64 start = Nx2Profile::Now();
+    const u64 before = consumed.load(std::memory_order_acquire);
+    const bool waited = WaitFor(target, DrainSite::ListWriters);
+    const u64 end = Nx2Profile::Now();
+    struct Entry {
+        u64 ns{};
+        u64 count{};
+        u64 words{};
+    };
+    static thread_local std::unordered_map<u64, Entry> entries;
+    static thread_local u64 window_start = start;
+    if (waited) {
+        auto& entry = entries[(u64{last_writer_engine} << 32) | last_writer_method];
+        entry.ns += end - start;
+        ++entry.count;
+        entry.words += target > before ? target - before : 0;
+    }
+    if (end - window_start >= 10'000'000'000ULL) {
+        std::vector<std::pair<u64, Entry>> ordered(entries.begin(), entries.end());
+        std::ranges::sort(ordered, {}, [](const auto& entry) { return ~entry.second.ns; });
+        const double seconds = static_cast<double>(end - window_start) / 1e9;
+        for (size_t i = 0; i < std::min<size_t>(ordered.size(), 8); ++i) {
+            const auto& [key, entry] = ordered[i];
+            LOG_INFO(HW_GPU,
+                     "Writer barrier per second: engine={} method={:#x} wait_ms={:.3f} "
+                     "waits={:.1f} queued_ring_words={:.0f}",
+                     key >> 32, key & 0xffffffff, entry.ns / 1e6 / seconds,
+                     entry.count / seconds, entry.words / seconds);
+        }
+        entries.clear();
+        window_start = end;
+    }
+    return waited;
 }
 
 bool GpuSplit::WaitForSync() {
