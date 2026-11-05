@@ -388,6 +388,8 @@ json SampleThreads(ToolState& state, const json& params) {
     std::string report = Nx2Sampler::Sample(threads.c_str(), seconds, path.string());
     report.resize((std::min)(report.size(), Param<size_t>(params, "max_chars", 60000, 0, 4000000)));
     return {{"file", path.generic_string()}, {"report", std::move(report)}};
+}
+
 json ReadMemory(ToolState& state, const json& params) {
     const u64 address = AddressParam(params, "address");
     const u64 size = ReadSize(params, address);
