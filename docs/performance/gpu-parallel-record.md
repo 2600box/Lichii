@@ -155,6 +155,66 @@ Further resolution parallelism needs separate measurements. Guest reads, uploads
 hazards and cache mutation remain ordered; per-stage tasks would need snapshotted
 inputs and must not mutate shared caches.
 
+## Phase 4: attribute and reduce GPUBack work
+
+Ocarina's stationary Kokiri chest run on package `a1e3570839` measured 41.882 FPS
+with recording off and 41.816 FPS with it on. The ON run produced about 83 resolved
+passes and 83 resolved batches per second, but zero parallel batches. Every eligible
+pass was a single batch, so the minimum-two-batch rule excluded all of them. There
+were no budget fallbacks. The draw trace reported no indirect draws and substantial
+occlusion-query activity, but the original counters could not assign each remaining
+inline pass to its cause.
+
+The profiler now assigns each completed inline pass one first-cause counter:
+active/late query, conditional rendering, transform feedback, indirect/mesh,
+timestamp/capture, serial command, unsupported state, explicit drain, no draws,
+budget, single batch or unavailable encoder. These reason counts sum to
+`host inline passes`; they do not change eligibility or thresholds.
+
+Five complete OFF windows ending at 106.56–146.56 seconds, normalized by 41.815
+presents/second, give this ordering. These are exclusive elapsed times, not CPU
+samples or promises of savings.
+
+| Work | ms/present | Safe direction |
+| --- | ---: | --- |
+| Method processing | 6.650 | Reduce redundant dispatch for proven state-only writes; preserve executable methods and shadow/deferred-draw semantics. |
+| Other | 4.951 | Separate deferred callbacks and ring/profiler overhead before changing them; mappings, cache flushes and completion signals must stay ordered. |
+| Split wait | 2.832 | Separate spin, idle-hook work and sleeping; removing spin may save CPU without improving latency. |
+| Compute preparation | 1.381 | Keep shared cache mutation and guest-memory dependencies ordered. |
+| Stage-buffer binding | 1.367 | Coordinate with the buffer-cache work; do not parallelize mutable bindings. |
+| Fence preparation | 1.263 | Reduce unnecessary download work without weakening visibility. |
+| Buffer updates | 0.891 | Avoid redundant cache work rather than introduce concurrent mutation. |
+| Flush work | 0.867 | Preserve submission and writer visibility when reducing publication overhead. |
+| Handle reads | 0.624 | Snapshot live inputs before considering parallel evaluation. |
+| Remaining zones | 3.088 | Measure their individual shares before adding complexity. |
+
+The sum is 23.914 ms elapsed per present, against 22.516 ms of measured thread CPU.
+The broad `host resolve` field overlaps this table and must not be added again.
+The profiler does not rescale elapsed values to manufacture a CPU breakdown.
+Native CPU sampling is needed for fine-grained CPU attribution; per-method OS CPU
+clock reads would be too expensive at roughly 3.35 million calls per second.
+
+New exclusive zones separate `method state`, `method multi`, `method sink`,
+`split call`, `split dispatch`, `split spin`, `split idle hook` and `split sleep`.
+Compare the sum of all method zones with the old `method` total. `split dispatch`
+includes ring processing, sink enqueueing and nested-scope bookkeeping not charged
+to child scopes. The deferred-call zone ports the attribution from Eglantine
+PR #134, commit `a21c9b5d9f`. The split's waits and publication ordering are unchanged.
+
+`EDEN_NX2_METHOD_FAST=1` selects a specialized entrypoint only for non-executable
+Direct macro state writes after the pending method sink is consumed. It removes
+redundant macro/execution dispatch checks, not guest commands. Write history,
+profiling counters, shadow RAM, unchanged-value filtering, dirty flags and deferred
+draw flushing remain equivalent to `CallMethod`. Executable writes, including
+constant-buffer data, query and semaphore methods, stay on the original path.
+Unset or any value other than `1` leaves the experiment disabled.
+
+For the next A/B, keep `EDEN_NX2_PARALLEL_RECORD=0` in both runs and change only
+`EDEN_NX2_METHOD_FAST`. `fast state calls` reports its use; the new `method state`
+zone measures its eligible workload. Repeat with GPU profiling unset to check
+observer overhead. The method table's 6.650 ms is an upper bound on the whole
+method family, not the expected saving from this narrower experiment.
+
 Upstream `nx2` was already contained in the phase-1 base `99ac3d5955`.
 Eglantine PR #134 adds producer-side profiling but does not measure actual Vulkan
 encoding or submission separately. Its diff and PR #593's split-drain changes

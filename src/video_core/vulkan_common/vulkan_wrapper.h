@@ -1316,7 +1316,7 @@ public:
 
     void ResetQueryPool(VkQueryPool query_pool, u32 first, u32 count) const {
         if (recorder)
-            recorder->MaterializeInline();
+            recorder->MaterializeInline(InlineFallbackReason::LateQuery);
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdResetQueryPool(handle, query_pool, first, count);
@@ -1324,7 +1324,7 @@ public:
 
     void WriteTimestamp(VkPipelineStageFlagBits stage, VkQueryPool query_pool, u32 query) const {
         if (recorder)
-            recorder->MaterializeInline();
+            recorder->MaterializeInline(InlineFallbackReason::TimestampCapture);
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdWriteTimestamp(handle, stage, query_pool, query);
@@ -1422,7 +1422,7 @@ public:
     void DrawIndirect(VkBuffer src_buffer, VkDeviceSize src_offset, u32 draw_count,
                       u32 stride) const {
         if (recorder)
-            recorder->MaterializeInline();
+            recorder->MaterializeInline(InlineFallbackReason::IndirectMesh);
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDrawIndirect(handle, src_buffer, src_offset, draw_count, stride);
@@ -1431,7 +1431,7 @@ public:
     void DrawIndexedIndirect(VkBuffer src_buffer, VkDeviceSize src_offset, u32 draw_count,
                              u32 stride) const {
         if (recorder)
-            recorder->MaterializeInline();
+            recorder->MaterializeInline(InlineFallbackReason::IndirectMesh);
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDrawIndexedIndirect(handle, src_buffer, src_offset, draw_count, stride);
@@ -1439,7 +1439,7 @@ public:
 
     void DrawMeshTasksEXT(u32 group_count_x, u32 group_count_y, u32 group_count_z) const {
         if (recorder)
-            recorder->MaterializeInline();
+            recorder->MaterializeInline(InlineFallbackReason::IndirectMesh);
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDrawMeshTasksEXT(handle, group_count_x, group_count_y, group_count_z);
@@ -1448,7 +1448,7 @@ public:
     void DrawIndirectCount(VkBuffer src_buffer, VkDeviceSize src_offset, VkBuffer count_buffer,
                            VkDeviceSize count_offset, u32 draw_count, u32 stride) const {
         if (recorder)
-            recorder->MaterializeInline();
+            recorder->MaterializeInline(InlineFallbackReason::IndirectMesh);
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDrawIndirectCount(handle, src_buffer, src_offset, count_buffer, count_offset,
@@ -1459,7 +1459,7 @@ public:
                                   VkBuffer count_buffer, VkDeviceSize count_offset, u32 draw_count,
                                   u32 stride) const {
         if (recorder)
-            recorder->MaterializeInline();
+            recorder->MaterializeInline(InlineFallbackReason::IndirectMesh);
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDrawIndexedIndirectCount(handle, src_buffer, src_offset, count_buffer,
@@ -1470,7 +1470,7 @@ public:
                                   VkDeviceSize counter_buffer_offset, u32 counter_offset,
                                   u32 stride) {
         if (recorder)
-            recorder->MaterializeInline();
+            recorder->MaterializeInline(InlineFallbackReason::IndirectMesh);
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdDrawIndirectByteCountEXT(handle, instance_count, first_instance, counter_buffer,
@@ -1701,7 +1701,7 @@ public:
     void CopyImageToBuffer(VkImage src_image, VkImageLayout src_layout, VkBuffer dst_buffer,
                            Span<VkBufferImageCopy> regions) const {
         if (recorder)
-            recorder->MaterializeInline();
+            recorder->MaterializeInline(InlineFallbackReason::TimestampCapture);
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdCopyImageToBuffer(handle, src_image, src_layout, dst_buffer, regions.size(),
@@ -1712,7 +1712,7 @@ public:
                               VkBuffer dst_buffer, VkDeviceSize dst_offset, VkDeviceSize stride,
                               VkQueryResultFlags flags) const {
         if (recorder)
-            recorder->MaterializeInline();
+            recorder->MaterializeInline(InlineFallbackReason::LateQuery);
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdCopyQueryPoolResults(handle, query_pool, first_query, query_count, dst_buffer,
@@ -2231,7 +2231,7 @@ public:
                                          const VkDeviceSize* offsets,
                                          const VkDeviceSize* sizes) const {
         if (recorder)
-            recorder->DisableCapture();
+            recorder->DisableCapture(InlineFallbackReason::TransformFeedback);
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdBindTransformFeedbackBuffersEXT(handle, first, count, buffers, offsets, sizes);
@@ -2277,7 +2277,7 @@ public:
 
     void BeginDebugUtilsLabelEXT(const char* label, std::span<float, 4> color) const {
         if (recorder)
-            recorder->DisableCapture();
+            recorder->DisableCapture(InlineFallbackReason::TimestampCapture);
         const VkDebugUtilsLabelEXT label_info{
             .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT,
             .pNext = nullptr,
@@ -2291,7 +2291,7 @@ public:
 
     void EndDebugUtilsLabelEXT() const {
         if (recorder)
-            recorder->DisableCapture();
+            recorder->DisableCapture(InlineFallbackReason::TimestampCapture);
         const VideoCommon::HostGpuProfile::Scope profile{
             VideoCommon::HostGpuProfile::Phase::Encode};
         dld->vkCmdEndDebugUtilsLabelEXT(handle);
