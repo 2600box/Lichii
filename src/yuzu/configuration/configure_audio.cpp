@@ -35,6 +35,7 @@ ConfigureAudio::ConfigureAudio(const Core::System& system_,
 
 ConfigureAudio::~ConfigureAudio() = default;
 
+/// Build audio settings, leaving global microphone selection to the Controls tab.
 void ConfigureAudio::Setup(const ConfigurationShared::Builder& builder) {
     auto& layout = *ui->audio_widget->layout();
 
@@ -225,6 +226,7 @@ void ConfigureAudio::SetOutputDevicesFromDeviceID() {
     output_device_combo_box->setCurrentIndex(new_device_index);
 }
 
+/// Restore the saved input selection when this configuration page owns an input selector.
 void ConfigureAudio::SetInputDevicesFromDeviceID() {
     if (!input_device_combo_box) {
         return;
@@ -242,6 +244,7 @@ void ConfigureAudio::SetInputDevicesFromDeviceID() {
     input_device_combo_box->setCurrentIndex(new_device_index);
 }
 
+/// Save this page's audio settings without overwriting the separate microphone selector.
 void ConfigureAudio::ApplyConfiguration() {
     const bool is_powered_on = system.IsPoweredOn();
     for (const auto& apply_func : apply_funcs) {
@@ -278,6 +281,7 @@ void ConfigureAudio::changeEvent(QEvent* event) {
     QWidget::changeEvent(event);
 }
 
+/// Refresh available devices for a backend, updating input choices only when present here.
 void ConfigureAudio::UpdateAudioDevices(int sink_index) {
     updating_devices = true;
     output_device_combo_box->clear();

@@ -66,6 +66,7 @@ struct Nx2SysmixStreams {
         return stream->SetEngaged(engaged);
     }
 
+    /// Engage an owned stream only when its direction matches the device functionality.
     Result Attach(u32 id, u32 functionality, const Kernel::KProcess* process) {
         std::shared_ptr<SysmixOutput> stream;
         {
@@ -136,6 +137,7 @@ private:
         std::memcpy(out, name.data(), std::min(name.size(), NameSize - 1));
     }
 
+    /// List the virtual microphone for input functionality, or the virtual playback device.
     void ListVirtualOutputDevices(HLERequestContext& ctx) {
         IPC::RequestParser rp{ctx};
         const auto functionality = rp.Pop<u32>();
@@ -151,6 +153,7 @@ private:
         rb.Push(count);
     }
 
+    /// Return the default virtual device name for the requested stream direction.
     void GetDefaultVirtualOutputDevice(HLERequestContext& ctx) {
         IPC::RequestParser rp{ctx};
         const auto functionality = rp.Pop<u32>();
@@ -161,6 +164,7 @@ private:
         rb.Push(ResultSuccess);
     }
 
+    /// Reject formats or functionalities that the corresponding host stream cannot handle.
     void IsStreamFormatSupported(HLERequestContext& ctx) {
         IPC::RequestParser rp{ctx};
         const auto type = rp.Pop<u32>();
@@ -179,10 +183,12 @@ private:
         rb.Push(result);
     }
 
-    // Property block: name (0x000), u32 type (0x100, 3), u32 (0x104, 2), u32 channel count
-    // (0x108), u32 sample rate (0x10c), physical output name (0x110), its id (0x210), u64 latency
-    // in ns (0x218), u32 device id (0x220). The sdk's output streams pass the device id to
-    // sysmix CreateStream, which refuses 0 (Switch Sports failed with 2153-1604 on a zero there).
+    /**
+     * Return the direction's properties: name (0x000), type (0x100, 3), u32 (0x104, 2),
+     * channels (0x108), rate (0x10c), physical name (0x110), physical ID (0x210),
+     * latency in ns (0x218), device ID (0x220). CreateStream requires a nonzero device ID
+     * (Switch Sports failed with 2153-1604 on a zero there).
+     */
     void GetVirtualOutputDeviceProperties(HLERequestContext& ctx) {
         IPC::RequestParser rp{ctx};
         const auto functionality = rp.Pop<u32>();
@@ -217,6 +223,7 @@ private:
         rb.PushCopyObjects(ctx, state_event->GetReadableEvent());
     }
 
+    /// Validate stream ownership and direction before attaching it and starting host audio.
     void AttachStream(HLERequestContext& ctx) {
         IPC::RequestParser rp{ctx};
         const auto stream_id = rp.Pop<u32>();
@@ -378,6 +385,7 @@ private:
         rb.Push(result);
     }
 
+    /// Discard requested input frames and return only the count actually purged.
     void PurgeStream(HLERequestContext& ctx) {
         IPC::RequestParser rp{ctx};
         const auto frames = rp.Pop<u32>();
@@ -418,6 +426,7 @@ public:
     }
 
 private:
+    /// Create an owned input or output stream after validating its device and guest ring region.
     void CreateStream(HLERequestContext& ctx) {
         IPC::RequestParser rp{ctx};
         const auto device = rp.Pop<u32>();

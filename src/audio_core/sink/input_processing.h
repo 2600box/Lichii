@@ -11,10 +11,12 @@
 
 namespace AudioCore::Sink {
 
+/// Apply microphone gain with saturation to the signed 16-bit PCM range.
 inline s16 ScaleInputSample(s16 sample, float gain) {
     return static_cast<s16>(std::clamp(static_cast<float>(sample) * gain, -32768.0f, 32767.0f));
 }
 
+/// Measure the largest absolute sample after gain, including the full negative PCM range.
 inline u32 InputPeak(std::span<const s16> samples, float gain) {
     u32 peak{};
     for (const auto sample : samples) {
@@ -24,7 +26,7 @@ inline u32 InputPeak(std::span<const s16> samples, float gain) {
     return peak;
 }
 
-// Keep the requested guest buffer size even when host capture underruns.
+/// Convert capture to the guest layout and gain, padding missing samples with silence.
 inline std::vector<s16> ConvertInputSamples(std::span<const s16> captured, u64 num_samples,
                                             u32 device_channels, u32 system_channels, float gain) {
     std::vector<s16> samples(num_samples, 0);

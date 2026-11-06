@@ -45,6 +45,7 @@ std::string_view System::GetDefaultUacDeviceName() {
     return "Uac";
 }
 
+/// Validate the guest device name and sample rate without allocating a capture session.
 Result System::IsConfigValid(const std::string_view device_name,
                              const AudioInParameter& in_params) {
     if ((device_name.size() > 0) &&
@@ -82,6 +83,7 @@ Result System::Initialize(std::string device_name, const AudioInParameter& in_pa
     return ResultSuccess;
 }
 
+/// Initialize and start capture, retaining the stopped state if either step fails.
 Result System::Start() {
     if (state != State::Stopped) {
         return Service::Audio::ResultOperationFailed;

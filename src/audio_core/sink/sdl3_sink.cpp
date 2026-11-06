@@ -239,6 +239,7 @@ private:
     SDL_AudioStream* stream{};
 };
 
+/// Configure the selected device name for both playback and capture streams.
 SDLSink::SDLSink(std::string_view target_device_name) {
     if (InitializeAudio()) {
         if (target_device_name != auto_device_name && !target_device_name.empty()) {

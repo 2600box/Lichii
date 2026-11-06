@@ -63,6 +63,7 @@ ConfigureInput::ConfigureInput(Core::System& system_, QWidget* parent)
 
 ConfigureInput::~ConfigureInput() = default;
 
+/// Initialize controller and microphone pages, sharing the active system with host capture preview.
 void ConfigureInput::Initialize(InputCommon::InputSubsystem* input_subsystem,
                                 std::size_t max_players) {
     const bool is_powered_on = system.IsPoweredOn();
@@ -211,6 +212,7 @@ QList<QWidget*> ConfigureInput::GetSubTabs() const {
     };
 }
 
+/// Apply all Controls pages, including the saved microphone device and gain.
 void ConfigureInput::ApplyConfiguration() {
     const bool was_global = Settings::values.players.UsingGlobal();
     Settings::values.players.SetGlobal(true);

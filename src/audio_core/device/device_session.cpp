@@ -30,6 +30,7 @@ DeviceSession::~DeviceSession() {
     Finalize();
 }
 
+/// Acquire the host stream and process reference, unwinding both if capture is unavailable.
 Result DeviceSession::Initialize(std::string_view name_, SampleFormat sample_format_,
                                  u16 channel_count_, size_t session_id_, Kernel::KProcess* handle_,
                                  u64 applet_resource_user_id_, Sink::StreamType type_) {
@@ -62,6 +63,7 @@ Result DeviceSession::Initialize(std::string_view name_, SampleFormat sample_for
     return ResultSuccess;
 }
 
+/// Release the host stream and process reference, including after a failed initialization.
 void DeviceSession::Finalize() {
     if (initialized) {
         Stop();
@@ -76,6 +78,7 @@ void DeviceSession::Finalize() {
     }
 }
 
+/// Start the host stream before scheduling audio ticks; propagate backend failures.
 Result DeviceSession::Start() {
     if (stream) {
         stream->Start();
@@ -122,6 +125,7 @@ void DeviceSession::AppendBuffers(std::span<const AudioBuffer> buffers) {
     }
 }
 
+/// Copy captured PCM to the guest, padding short or odd-sized buffers with silence.
 void DeviceSession::ReleaseBuffer(const AudioBuffer& buffer) const {
     if (type == Sink::StreamType::In) {
         auto samples{stream->ReleaseBuffer(buffer.size / sizeof(s16))};

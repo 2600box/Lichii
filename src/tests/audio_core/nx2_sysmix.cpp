@@ -3,7 +3,9 @@
 
 #include <array>
 #include <limits>
+#include <thread>
 #include <catch2/catch_test_macros.hpp>
+#include "common/atomic_ops.h"
 #include "common/scope_exit.h"
 #include "core/core_timing.h"
 #include "core/hle/kernel/k_readable_event.h"
@@ -92,6 +94,43 @@ TEST_CASE("sysmix input applies gain to float capture and protects producer owne
     stream.Pump();
     REQUIRE(stream.GetState() == 0);
     REQUIRE(stream.GetCounters().faults == 1);
+}
+
+TEST_CASE("sysmix input purge preserves capture during concurrent guest consumption",
+          "[sysmix][input]") {
+    Context context;
+    constexpr u32 frames = 2048;
+    SysmixOutput stream{
+        context.system, *context.process, context.sink, 2, Context::Base, Context::Size, 2, true};
+    REQUIRE(stream.Open(2, 2, 48000, frames, 0, 0).IsSuccess());
+    REQUIRE(stream.SetEngaged(true).IsSuccess());
+    auto* read_cursor = reinterpret_cast<u32_le*>(context.backing + 0x44);
+    auto* write_cursor = reinterpret_cast<u32_le*>(context.backing + 0x1004);
+    std::jthread guest{[&](std::stop_token stop) {
+        while (!stop.stop_requested()) {
+            u32_le read{}, write{};
+            static_cast<void>(Common::AtomicCompareAndSwap(read_cursor, u32_le{0}, u32_le{0}, read));
+            static_cast<void>(Common::AtomicCompareAndSwap(write_cursor, u32_le{0}, u32_le{0}, write));
+            if (read != write) {
+                static_cast<void>(Common::AtomicCompareAndSwap(
+                    read_cursor, u32_le{(static_cast<u32>(read) + 1) % (frames + 1)}, read));
+            }
+        }
+    }};
+    const std::array<s16, 480> samples{};
+    for (u32 iteration = 0; iteration < 4096; ++iteration) {
+        context.sink.last->ProcessAudioIn(samples, 240);
+        stream.Pump();
+        u32 purged = 99;
+        const auto result = stream.Purge(iteration % 2 == 0 ? 1 : 0, purged);
+        REQUIRE(stream.GetState() == 2);
+        REQUIRE(stream.GetCounters().faults == 0);
+        if (result.IsFailure()) {
+            REQUIRE(result == Service::Audio::ResultOperationFailed);
+            REQUIRE(purged == 0);
+        }
+    }
+    REQUIRE(stream.GetCounters().accepted_frames > 0);
 }
 
 namespace {

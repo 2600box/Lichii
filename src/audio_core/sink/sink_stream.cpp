@@ -102,6 +102,7 @@ bool SinkStream::TryAppendOutputBlock(SinkBuffer& buffer, std::span<s16> samples
     return true;
 }
 
+/// Return a guest-sized capture buffer with gain, channel conversion, and underrun padding.
 std::vector<s16> SinkStream::ReleaseBuffer(u64 num_samples) {
     const auto frames = num_samples / system_channels;
     const auto captured = samples_buffer.Pop(frames * device_channels);
@@ -110,6 +111,7 @@ std::vector<s16> SinkStream::ReleaseBuffer(u64 num_samples) {
     return ConvertInputSamples(captured, num_samples, device_channels, system_channels, volume);
 }
 
+/// Consume fresh input without inventing frames during capture underruns.
 std::vector<s16> SinkStream::DrainInputSamples(u64 max_frames) {
     const auto captured = samples_buffer.Pop(max_frames * device_channels);
     const auto frames = captured.size() / device_channels;
@@ -131,6 +133,7 @@ void SinkStream::ClearQueue() {
     playing_buffer.consumed = true;
 }
 
+/// Update a preview peak or queue guest capture; previews also run while emulation is paused.
 void SinkStream::ProcessAudioIn(std::span<const s16> input_buffer, std::size_t num_frames) {
     if (input_preview) {
         const auto peak = InputPeak(input_buffer, input_preview_gain.load());

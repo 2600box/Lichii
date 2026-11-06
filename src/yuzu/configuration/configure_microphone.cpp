@@ -18,6 +18,7 @@
 #include "core/core.h"
 #include "yuzu/configuration/configure_microphone.h"
 
+/// Build device, gain, and level controls; keep device selection fixed during emulation.
 ConfigureMicrophone::ConfigureMicrophone(Core::System& system_, QWidget* parent)
     : QWidget{parent}, system{system_} {
     setAccessibleName(tr("Microphone"));
@@ -89,6 +90,7 @@ ConfigureMicrophone::~ConfigureMicrophone() {
     StopTest();
 }
 
+/// Refresh inputs while retaining the selected device, even if temporarily unavailable.
 void ConfigureMicrophone::RefreshDevices() {
     StopTest();
     auto selected = devices->currentData().toString();
@@ -111,6 +113,7 @@ void ConfigureMicrophone::RefreshDevices() {
     devices->setCurrentIndex(index < 0 ? 0 : index);
 }
 
+/// Start independent capture for the level meter, reporting device or permission failures.
 void ConfigureMicrophone::StartTest() {
     using namespace AudioCore::Sink;
     const auto available = GetDeviceListForSink(Settings::values.sink_id.GetValue(), true);
@@ -139,6 +142,7 @@ void ConfigureMicrophone::StartTest() {
     timer->start();
 }
 
+/// Stop metering and release preview capture before its controls or device selection change.
 void ConfigureMicrophone::StopTest() {
     timer->stop();
     preview_sink.reset();
@@ -148,6 +152,7 @@ void ConfigureMicrophone::StopTest() {
     status->clear();
 }
 
+/// Save gain and, when emulation is stopped, the input device; release any active preview.
 void ConfigureMicrophone::ApplyConfiguration() {
     StopTest();
     if (!system.IsPoweredOn()) {

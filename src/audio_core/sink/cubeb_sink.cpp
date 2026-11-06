@@ -224,6 +224,7 @@ private:
     cubeb_stream* stream_backend{};
 };
 
+/// Resolve enabled input and output devices independently, using defaults when unspecified.
 CubebSink::CubebSink(std::string_view target_device_name) {
     // Cubeb requires COM to be initialized on the thread calling cubeb_init on Windows
 #ifdef _WIN32
@@ -281,12 +282,14 @@ CubebSink::~CubebSink() {
 #endif
 }
 
+/// Open a unidirectional stream with only its matching device ID and channel layout.
 SinkStream* CubebSink::AcquireSinkStream(Core::System& system, u32 system_channels_,
                                          const std::string& name, StreamType type) {
     system_channels = system_channels_;
     SinkStreamPtr& stream = sink_streams.emplace_back(std::make_unique<CubebSinkStream>(
-        ctx, type == StreamType::In ? 2U : device_channels, system_channels, output_device,
-        input_device, name, type, system));
+        ctx, type == StreamType::In ? 2U : device_channels, system_channels,
+        type == StreamType::In ? nullptr : output_device,
+        type == StreamType::In ? input_device : nullptr, name, type, system));
     stream->SetDeviceVolume(device_volume);
 
     return stream.get();

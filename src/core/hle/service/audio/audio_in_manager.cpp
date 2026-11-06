@@ -72,6 +72,7 @@ Result IAudioInManager::ListAudioInsAutoFiltered(
     R_SUCCEED();
 }
 
+/// Validate input configuration before allocating a session or retaining its process reference.
 Result IAudioInManager::OpenAudioInProtocolSpecified(
     Out<AudioInParameterInternal> out_parameter_internal, Out<SharedPointer<IAudioIn>> out_audio_in,
     OutArray<AudioDeviceName, BufferAttr_HipcAutoSelect> out_name,
