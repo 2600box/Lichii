@@ -24,6 +24,7 @@
 #include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_debug_control.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace Tegra::Engines {
@@ -87,6 +88,15 @@ bool Puller::PendingAcquire::Matches(u32 current) const {
 
 bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
     if (!pending_acquire) {
+        return true;
+    }
+    using VideoCommon::Nx2Profile::Counter;
+    VideoCommon::Nx2Profile::Add(Counter::AcquirePolls, 1);
+    const int mode = VideoCore::Nx2Debug::SwitchValue(VideoCore::Nx2Debug::g_sem_fast,
+                                                    "EDEN_NX2_SEM_FAST", 0);
+    if (mode > 0 && VideoCommon::GpuSplit::Get().Active() &&
+        Nx2SemaphoreWaiters::Get().Latched(this)) {
+        VideoCommon::Nx2Profile::Add(Counter::AcquirePollsLatched, 1);
         return true;
     }
     // The release may still be queued for the split GPU thread's back half (and the caches
