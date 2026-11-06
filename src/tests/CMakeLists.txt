@@ -5,6 +5,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 add_executable(tests
+    video_core/buffer_cache_ports.cpp
     video_core/unswizzle_workers.cpp
     video_core/aftermath_dump.cpp
     video_core/frame_dump_schedule.cpp

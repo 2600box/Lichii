@@ -8,6 +8,8 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstdio>
+#include <span>
+#include <vector>
 
 #include "common/scope_exit.h"
 #include "common/settings.h"
@@ -708,7 +710,19 @@ bool DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {
     const GPUVAddr end_page = (address + size + 0xfff) & ~GPUVAddr{0xfff};
     const bool dirty = memory_manager.IsMemoryDirty(first_page, end_page - first_page,
                                                     VideoCommon::CacheType::BufferCache);
-    if (dirty) {
+    if (rasterizer != nullptr) {
+        std::vector<DAddr> pages;
+        for (GPUVAddr page = first_page; page < end_page; page += 0x1000) {
+            if (const auto device = memory_manager.GpuToCpuAddress(page)) {
+                pages.push_back(*device);
+            }
+        }
+        VideoCommon::GpuSplit::Get().Run(
+            [rasterizer = rasterizer, pages = std::span<const DAddr>{pages}] {
+                rasterizer->FlushGpuWrittenCommandListPages(pages);
+            },
+            VideoCommon::DrainSite::ListFlush);
+    } else if (dirty) {
         VideoCommon::GpuSplit::Get().Run(
             [memory = &memory_manager, first_page, size = end_page - first_page] {
                 memory->FlushRegion(first_page, size, VideoCommon::CacheType::BufferCache);
