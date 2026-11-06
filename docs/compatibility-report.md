@@ -18,6 +18,8 @@ Each graphics backend copies its device identity during construction while its s
 
 Mods and updates use the add-on catalog's enabled entries at launch. Only their display names and version/type labels enter the draft, never their locations or file contents. Disabled entries and DLC are excluded. These are configured enabled entries, not proof that every patch applied successfully. Summaries longer than the API's 500-character limit are explicitly marked as truncated for review.
 
+NUP packages select their embedded update internally, outside that catalog. Their effective game version comes from the loaded package's display-version metadata and is included as **Loaded NUP package** in the updates field. This does not guess whether a base-only package contains a separate update.
+
 `CompatibilityReporting::Dialog` owns the catalog confirmation, consent state, payload validation and asynchronous network requests. Its normal constructor creates a dedicated network manager. Requests disable cookie loading/saving, credential reuse, caching and redirects, and have a 20-second deadline and 256 KiB response bound. Only an explicit Search or Submit starts a request. Server errors are shown as local messages and known field names, never arbitrary HTML. Receipt links must match the approved HTTPS origin and report UUID path.
 
 A separate controller/view design was considered. The dialog-owned implementation avoids a second mutable representation of one fixed-purpose form. The tests inject a network manager through a private construction seam and exercise the same widgets and state transitions as production, without emulator startup.

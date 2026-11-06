@@ -2075,7 +2075,8 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
             }
         }
         FileSys::VirtualFile update_raw;
-        QtCommon::system->GetAppLoader().ReadUpdateRaw(update_raw);
+        auto& report_loader = QtCommon::system->GetAppLoader();
+        report_loader.ReadUpdateRaw(update_raw);
         QList<CompatibilityReporting::Addon> mods;
         QList<CompatibilityReporting::Addon> updates;
         for (const auto& patch : pm.GetPatches(update_raw)) {
@@ -2085,6 +2086,15 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
             if (entries) {
                 entries->push_back({QString::fromStdString(patch.name),
                                     QString::fromStdString(patch.version), patch.enabled});
+            }
+        }
+        if (report_loader.GetFileType() == Loader::FileType::NUP) {
+            std::string version;
+            if (report_loader.ReadDisplayVersion(version) == Loader::ResultStatus::Success &&
+                !version.empty()) {
+                session.game_version = QString::fromStdString(version);
+                updates.push_back(
+                    {QStringLiteral("Loaded NUP package"), session.game_version, true});
             }
         }
         session.mods = CompatibilityReporting::SummarizeEnabledAddons(mods);
