@@ -43,9 +43,9 @@ class RunnerExitCodes(unittest.TestCase):
     def tearDown(self):
         self.work.cleanup()
 
-    def run_runner(self, **environment):
+    def run_runner(self, *arguments, **environment):
         env = dict(os.environ, **environment)
-        return subprocess.run([sys.executable, "-I", RUNNER, "--cxx", self.compiler],
+        return subprocess.run([sys.executable, "-I", RUNNER, "--cxx", self.compiler, *arguments],
                               capture_output=True, text=True, env=env, timeout=120)
 
     def test_both_cases_wake(self):
@@ -69,6 +69,14 @@ class RunnerExitCodes(unittest.TestCase):
 
     def test_build_failure(self):
         self.assertEqual(self.run_runner(STUB_BUILD_FAILS="1").returncode, 2)
+
+    def test_missing_compiler(self):
+        missing = os.path.join(self.work.name, "missing-cxx")
+        self.assertEqual(self.run_runner("--cxx", missing, STUB_RESULT="woke").returncode, 2)
+
+    def test_unknown_revision(self):
+        run = self.run_runner("--rev", "does-not-exist", STUB_RESULT="woke")
+        self.assertEqual(run.returncode, 2)
 
 
 if __name__ == "__main__":

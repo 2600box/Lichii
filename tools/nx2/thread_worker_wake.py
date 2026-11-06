@@ -53,17 +53,25 @@ def main():
 
     with tempfile.TemporaryDirectory() as work:
         includes = []
-        if args.rev:
-            header = subprocess.run(["git", "-C", ROOT, "show", f"{args.rev}:{HEADER}"],
-                                    check=True, capture_output=True).stdout
-            os.makedirs(os.path.join(work, "include", "common"))
-            with open(os.path.join(work, "include", "common", "thread_worker.h"), "wb") as file:
-                file.write(header)
-            includes.append("-I" + os.path.join(work, "include"))
         binary = os.path.join(work, "thread_worker_wake")
-        build = subprocess.run([args.cxx, "-std=c++20", "-O2", "-pthread", *WARNINGS, *includes,
-                                "-I" + os.path.join(ROOT, "src"), SOURCE, "-ldl", "-o", binary],
-                               capture_output=True, text=True)
+        try:
+            if args.rev:
+                show = subprocess.run(["git", "-C", ROOT, "show", f"{args.rev}:{HEADER}"],
+                                      capture_output=True)
+                if show.returncode != 0:
+                    print(show.stderr.decode(errors="replace").strip())
+                    return 2
+                os.makedirs(os.path.join(work, "include", "common"))
+                with open(os.path.join(work, "include", "common", "thread_worker.h"), "wb") as file:
+                    file.write(show.stdout)
+                includes.append("-I" + os.path.join(work, "include"))
+            build = subprocess.run([args.cxx, "-std=c++20", "-O2", "-pthread", *WARNINGS,
+                                    *includes, "-I" + os.path.join(ROOT, "src"), SOURCE, "-ldl",
+                                    "-o", binary],
+                                   capture_output=True, text=True)
+        except OSError as error:
+            print(f"harness: {error}")
+            return 2
         if build.returncode != 0:
             print(build.stdout + build.stderr)
             return 2
