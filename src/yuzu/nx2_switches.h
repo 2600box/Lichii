@@ -81,12 +81,24 @@ static void LoadNx2Switches(const char* argv0) {
         }
     }
 #endif
+    std::erase_if(entries, [](const auto& entry) {
+        const auto& name = entry.first;
+        return !(name.starts_with("EDEN_NX2_") || name == "EDEN_DKB_FRAME_TRACE" ||
+                 name == "EDEN_DKB_INDIRECT_READBACK" || name == "EDEN_NATIVE_DRAW_CAPTURE" ||
+                 name == "EDEN_NATIVE_DRAW_DIAGNOSTICS" || name == "EDEN_NATIVE_FRAME_CAPTURE" ||
+                 name == "EDEN_NATIVE_SHADER_OVERRIDE_DIR" || name == "EDEN_PUNCH_HOLE" ||
+                 name == "EDEN_STARFOX_WINDOW_TRACE" || name == "EDEN_VI2_MAX_RESOLUTION_MODE" ||
+                 name == "EGLANTINE_EXPERIMENTAL_STATIC_VERTEX_REPACK" ||
+                 name == "EGLANTINE_TEST_VERTEX_REPACK");
+    });
 #ifdef _WIN32
-    const auto config_dir = Common::FS::GetAppDataRoamingDirectory() / EDEN_DIR;
+    const auto config_base = Common::FS::GetAppDataRoamingDirectory();
 #else
-    const auto config_dir = Common::FS::GetDataDirectory("XDG_CONFIG_HOME") / EDEN_DIR;
+    const auto config_base = Common::FS::GetDataDirectory("XDG_CONFIG_HOME");
 #endif
-    ParseSwitchFile(config_dir / "nx2_switches.txt", entries);
+    if (config_base.is_absolute()) {
+        ParseSwitchFile(config_base / EDEN_DIR / "nx2_switches.txt", entries);
+    }
     for (const auto& [name, value] : entries) {
         if (std::getenv(name.c_str()) != nullptr) {
             continue;
