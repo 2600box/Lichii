@@ -471,6 +471,8 @@ void DialogTest::isolatedHttpTransport() {
     Dialog dialog(Seed(), &network, nullptr);
     QTest::qWait(20);
     QCOMPARE(network.count, 0);
+    const auto query_text = QStringLiteral("Café + %2B & #?");
+    dialog.query->setText(QStringLiteral("  %1  ").arg(query_text));
     dialog.search->click();
     QTRY_COMPARE(dialog.games->count(), 1);
     dialog.confirm->click();
@@ -487,6 +489,14 @@ void DialogTest::isolatedHttpTransport() {
     QTRY_COMPARE(dialog.state, Dialog::State::Finished);
     QCOMPARE(network.count, 2);
     QCOMPARE(wire_requests.size(), 2);
+    const auto target = wire_requests.first().split(' ').value(1);
+    QByteArray encoded_query;
+    for (const auto& item : target.mid(target.indexOf('?') + 1).split('&')) {
+        if (item.startsWith("q=")) {
+            encoded_query = item.mid(2);
+        }
+    }
+    QCOMPARE(QUrl::fromPercentEncoding(encoded_query.replace('+', ' ')), query_text);
     for (const auto& request : wire_requests) {
         const auto headers = request.left(request.indexOf("\r\n\r\n")).toLower();
         QVERIFY(!headers.contains("\r\ncookie:"));

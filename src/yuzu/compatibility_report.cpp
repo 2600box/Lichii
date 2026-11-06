@@ -470,7 +470,8 @@ void Dialog::Request(bool submission, const QByteArray& payload) {
                                                      : QStringLiteral("/api/games")));
     if (!submission) {
         QUrlQuery params;
-        params.addQueryItem(QStringLiteral("q"), query->text().trimmed());
+        params.addQueryItem(QStringLiteral("q"),
+                            QString::fromLatin1(QUrl::toPercentEncoding(query->text().trimmed())));
         params.addQueryItem(QStringLiteral("page"), QString::number(page));
         params.addQueryItem(QStringLiteral("sort"), QStringLiteral("title"));
         url.setQuery(params);
