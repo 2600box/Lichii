@@ -1650,6 +1650,19 @@ void Device::RemoveUnsuitableExtensions() {
     RemoveExtensionFeatureIfUnsuitable(extensions.robustness_2, features.robustness2,
                                        robustness2_extension_name);
 
+    // VK_EXT_shader_atomic_float: only 32-bit float adds on storage buffers are used.
+    {
+        const VkBool32 buffer_add = features.shader_atomic_float.shaderBufferFloat32AtomicAdd;
+        void* const next_feature = features.shader_atomic_float.pNext;
+        features.shader_atomic_float = {};
+        features.shader_atomic_float.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT;
+        features.shader_atomic_float.pNext = next_feature;
+        features.shader_atomic_float.shaderBufferFloat32AtomicAdd = buffer_add;
+        RemoveExtensionFeatureIfUnsuitable(buffer_add == VK_TRUE, features.shader_atomic_float,
+                                           VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME);
+    }
+
     // Image robustness
     extensions.robust_image_access = features.robust_image_access.robustImageAccess;
     RemoveExtensionFeatureIfUnsuitable(extensions.robust_image_access,
