@@ -243,6 +243,7 @@ SDLSink::SDLSink(std::string_view target_device_name) {
     if (InitializeAudio()) {
         if (target_device_name != auto_device_name && !target_device_name.empty()) {
             output_device = target_device_name;
+            input_device = target_device_name;
         } else {
             output_device.clear();
         }

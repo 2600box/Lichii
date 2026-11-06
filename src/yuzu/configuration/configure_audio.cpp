@@ -59,6 +59,11 @@ void ConfigureAudio::Setup(const ConfigurationShared::Builder& builder) {
     push_ui_settings(Settings::Category::UiAudio);
 
     for (auto* setting : settings) {
+        // Global microphone selection lives in Controls.
+        if (Settings::IsConfiguringGlobal() &&
+            setting->Id() == Settings::values.audio_input_device_id.Id()) {
+            continue;
+        }
         auto* widget = builder.BuildWidget(setting, apply_funcs);
 
         if (widget == nullptr) {
@@ -221,6 +226,9 @@ void ConfigureAudio::SetOutputDevicesFromDeviceID() {
 }
 
 void ConfigureAudio::SetInputDevicesFromDeviceID() {
+    if (!input_device_combo_box) {
+        return;
+    }
     int new_device_index = 0;
     const QString input_device_id =
         QString::fromStdString(Settings::values.audio_input_device_id.GetValue());
@@ -256,8 +264,10 @@ void ConfigureAudio::ApplyConfiguration() {
     Settings::values.sink_id.SetValue(Settings::AudioEngine(new_sink_id));
     Settings::values.audio_output_device_id.SetValue(
         output_device_combo_box->itemText(output_device_combo_box->currentIndex()).toStdString());
-    Settings::values.audio_input_device_id.SetValue(
-        input_device_combo_box->itemText(input_device_combo_box->currentIndex()).toStdString());
+    if (input_device_combo_box) {
+        Settings::values.audio_input_device_id.SetValue(
+            input_device_combo_box->itemText(input_device_combo_box->currentIndex()).toStdString());
+    }
 }
 
 void ConfigureAudio::changeEvent(QEvent* event) {
@@ -279,10 +289,12 @@ void ConfigureAudio::UpdateAudioDevices(int sink_index) {
         output_device_combo_box->addItem(QString::fromStdString(device));
     }
 
-    input_device_combo_box->clear();
-    input_device_combo_box->addItem(QString::fromUtf8(AudioCore::Sink::auto_device_name));
-    for (const auto& device : AudioCore::Sink::GetDeviceListForSink(sink_id, true)) {
-        input_device_combo_box->addItem(QString::fromStdString(device));
+    if (input_device_combo_box) {
+        input_device_combo_box->clear();
+        input_device_combo_box->addItem(QString::fromUtf8(AudioCore::Sink::auto_device_name));
+        for (const auto& device : AudioCore::Sink::GetDeviceListForSink(sink_id, true)) {
+            input_device_combo_box->addItem(QString::fromStdString(device));
+        }
     }
     updating_devices = false;
 }

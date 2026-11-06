@@ -66,6 +66,19 @@ struct Nx2SysmixStreams {
         return stream->SetEngaged(engaged);
     }
 
+    Result Attach(u32 id, u32 functionality, const Kernel::KProcess* process) {
+        std::shared_ptr<SysmixOutput> stream;
+        {
+            std::scoped_lock lock{mutex};
+            const auto it = streams.find(id);
+            R_UNLESS(it != streams.end(), ResultNotFound);
+            stream = it->second;
+        }
+        R_UNLESS(stream->IsOwnedBy(process), ResultInvalidHandle);
+        R_UNLESS(functionality == (stream->IsInput() ? 2U : 1U), ResultNotSupported);
+        return stream->SetEngaged(true);
+    }
+
     std::mutex mutex;
     std::map<u32, std::shared_ptr<SysmixOutput>> streams;
     u32 next_id{1};
@@ -116,27 +129,33 @@ private:
     static constexpr std::size_t NameSize = 0x100;
     static constexpr std::string_view DeviceName = "AudioVirtualOutput0";
     static constexpr std::string_view PhysicalDeviceName = "AudioTvOutput";
+    static constexpr std::string_view InputDeviceName = "AudioVirtualInput0";
+    static constexpr std::string_view PhysicalInputDeviceName = "AudioBuiltInMicrophone";
 
     static void CopyName(u8* out, std::string_view name) {
         std::memcpy(out, name.data(), std::min(name.size(), NameSize - 1));
     }
 
     void ListVirtualOutputDevices(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const auto functionality = rp.Pop<u32>();
         std::array<u8, NameSize> names{};
-        CopyName(names.data(), DeviceName);
+        CopyName(names.data(), functionality == 2 ? InputDeviceName : DeviceName);
         const u32 count = ctx.GetWriteBufferSize() >= NameSize ? 1 : 0;
         if (count) {
             ctx.WriteBuffer(names);
         }
-        LOG_DEBUG(Service_Audio, "called, {} device", count);
+        LOG_INFO(Service_Audio, "list devices: functionality {}, count {}", functionality, count);
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(ResultSuccess);
         rb.Push(count);
     }
 
     void GetDefaultVirtualOutputDevice(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const auto functionality = rp.Pop<u32>();
         std::array<u8, NameSize> name{};
-        CopyName(name.data(), DeviceName);
+        CopyName(name.data(), functionality == 2 ? InputDeviceName : DeviceName);
         ctx.WriteBuffer(name);
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
@@ -148,9 +167,12 @@ private:
         const auto channels = rp.Pop<u32>();
         const auto rate = rp.Pop<u32>();
         const auto functionality = rp.Pop<u32>();
-        const auto result = SysmixOutput::IsFormatSupported(type, channels, rate) && functionality == 1
-                                ? ResultSuccess : ResultNotSupported;
-        LOG_DEBUG(Service_Audio,
+        const auto supported =
+            functionality == 2
+                ? SysmixOutput::IsInputFormatSupported(type, channels, rate)
+                : functionality == 1 && SysmixOutput::IsFormatSupported(type, channels, rate);
+        const auto result = supported ? ResultSuccess : ResultNotSupported;
+        LOG_INFO(Service_Audio,
                   "format support: sample type {}, {} channels, {} Hz, functionality {}, result {:#x}",
                   type, channels, rate, functionality, result.raw);
         IPC::ResponseBuilder rb{ctx, 2};
@@ -162,9 +184,15 @@ private:
     // in ns (0x218), u32 device id (0x220). The sdk's output streams pass the device id to
     // sysmix CreateStream, which refuses 0 (Switch Sports failed with 2153-1604 on a zero there).
     void GetVirtualOutputDeviceProperties(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const auto functionality = rp.Pop<u32>();
+        const bool input = functionality == 2;
         std::array<u8, 0x228> block{};
         const auto name = ctx.ReadBuffer(0);
         std::memcpy(block.data(), name.data(), std::min(name.size(), NameSize - 1));
+        if (block[0] == 0) {
+            CopyName(block.data(), input ? InputDeviceName : DeviceName);
+        }
         const auto put32 = [&](std::size_t offset, u32 value) {
             std::memcpy(block.data() + offset, &value, sizeof(value));
         };
@@ -172,12 +200,13 @@ private:
         put32(0x104, 2);
         put32(0x108, 2);     // stereo
         put32(0x10c, 48000); // Hz
-        CopyName(block.data() + 0x110, PhysicalDeviceName);
+        CopyName(block.data() + 0x110, input ? PhysicalInputDeviceName : PhysicalDeviceName);
         const u64 latency_ns = 10'000'000;
         std::memcpy(block.data() + 0x218, &latency_ns, sizeof(latency_ns));
-        put32(0x220, 1);
+        put32(0x220, input ? 2 : 1);
         ctx.WriteBuffer(block);
-        LOG_DEBUG(Service_Audio, "called for {}", Common::StringFromBuffer(name));
+        LOG_INFO(Service_Audio, "properties: functionality {}, device {}", functionality,
+                 Common::StringFromBuffer(name));
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
     }
@@ -194,9 +223,8 @@ private:
         const auto functionality = rp.Pop<u32>();
         LOG_INFO(Service_Audio, "attach stream {} to {} (functionality {})", stream_id,
                  Common::StringFromBuffer(ctx.ReadBuffer(0)), functionality);
-        const auto result = functionality == 1
-            ? streams->SetEngaged(stream_id, true, ctx.GetThread().GetOwnerProcess())
-            : ResultNotSupported;
+        const auto result =
+            streams->Attach(stream_id, functionality, ctx.GetThread().GetOwnerProcess());
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(result);
     }
@@ -265,7 +293,7 @@ public:
             {8, &INx2SysmixStreamSession::ReleaseDataEvent, "ReleaseStreamDataEvent"},
             {9, &INx2SysmixStreamSession::Unsupported, "ClockStream"},
             {10, &INx2SysmixStreamSession::Unsupported, "PrimeStream"},
-            {11, &INx2SysmixStreamSession::Unsupported, "PurgeStream"},
+            {11, &INx2SysmixStreamSession::PurgeStream, "PurgeStream"},
             {12, &INx2SysmixStreamSession::Succeed, "RenameStream"},
         };
         RegisterHandlers(functions);
@@ -350,6 +378,16 @@ private:
         rb.Push(result);
     }
 
+    void PurgeStream(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const auto frames = rp.Pop<u32>();
+        u32 purged{};
+        const auto result = stream->Purge(frames, purged);
+        IPC::ResponseBuilder rb{ctx, 3};
+        rb.Push(result);
+        rb.Push(purged);
+    }
+
     void Unsupported(HLERequestContext& ctx) {
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultNotSupported);
@@ -388,8 +426,9 @@ private:
         const auto buffer = rp.Pop<u64>();
         const auto size = rp.Pop<u64>();
         Result result = ResultInvalidArgument;
-        if (device == 1 && ctx.GetThread().GetOwnerProcess() == process.GetPointerUnsafe()) {
-            result = SysmixOutput::ValidateRegion(*process, buffer, size, flags);
+        if ((device == 1 || device == 2) &&
+            ctx.GetThread().GetOwnerProcess() == process.GetPointerUnsafe()) {
+            result = SysmixOutput::ValidateRegion(*process, buffer, size, flags, device == 2);
         }
         if (result.IsFailure()) {
             IPC::ResponseBuilder rb{ctx, 2};
@@ -402,7 +441,8 @@ private:
             id = streams->next_id++;
         }
         auto stream = std::make_shared<SysmixOutput>(system, *process,
-            system.AudioCore().GetOutputSink(), id, buffer, size, flags);
+            device == 2 ? system.AudioCore().GetInputSink() : system.AudioCore().GetOutputSink(),
+            id, buffer, size, flags, device == 2);
         {
             std::scoped_lock lock{streams->mutex};
             streams->streams.emplace(id, stream);

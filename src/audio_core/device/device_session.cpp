@@ -51,6 +51,13 @@ Result DeviceSession::Initialize(std::string_view name_, SampleFormat sample_for
         sink = &system.AudioCore().GetOutputSink();
     }
     stream = sink->AcquireSinkStream(system, channel_count, name, type);
+    if (type == Sink::StreamType::In && !stream->IsReady()) {
+        sink->CloseStream(stream);
+        stream = nullptr;
+        handle->Close(system.Kernel());
+        handle = nullptr;
+        return Service::Audio::ResultOperationFailed;
+    }
     initialized = true;
     return ResultSuccess;
 }
@@ -60,6 +67,7 @@ void DeviceSession::Finalize() {
         Stop();
         sink->CloseStream(stream);
         stream = nullptr;
+        initialized = false;
     }
 
     if (handle) {
@@ -68,12 +76,17 @@ void DeviceSession::Finalize() {
     }
 }
 
-void DeviceSession::Start() {
+Result DeviceSession::Start() {
     if (stream) {
         stream->Start();
+        if (!stream->IsReady()) {
+            return Service::Audio::ResultOperationFailed;
+        }
         system.CoreTiming().ScheduleLoopingEvent(std::chrono::nanoseconds::zero(), INCREMENT_TIME,
                                                  thread_event);
+        return ResultSuccess;
     }
+    return Service::Audio::ResultOperationFailed;
 }
 
 void DeviceSession::Stop() {
@@ -112,6 +125,7 @@ void DeviceSession::AppendBuffers(std::span<const AudioBuffer> buffers) {
 void DeviceSession::ReleaseBuffer(const AudioBuffer& buffer) const {
     if (type == Sink::StreamType::In) {
         auto samples{stream->ReleaseBuffer(buffer.size / sizeof(s16))};
+        samples.resize(buffer.size / sizeof(s16) + (buffer.size % sizeof(s16) != 0), 0);
         handle->GetMemory().WriteBlockUnsafe(buffer.samples, samples.data(), buffer.size);
     }
 }

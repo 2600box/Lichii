@@ -14,6 +14,7 @@
 
 #include "audio_core/audio_core.h"
 #include "audio_core/common/common.h"
+#include "audio_core/sink/input_processing.h"
 #include "audio_core/sink/sink_stream.h"
 #include "common/common_types.h"
 #include "common/fixed_point.h"
@@ -102,22 +103,20 @@ bool SinkStream::TryAppendOutputBlock(SinkBuffer& buffer, std::span<s16> samples
 }
 
 std::vector<s16> SinkStream::ReleaseBuffer(u64 num_samples) {
-    auto samples{samples_buffer.Pop(num_samples)};
+    const auto frames = num_samples / system_channels;
+    const auto captured = samples_buffer.Pop(frames * device_channels);
+    const auto volume{system_volume * device_volume *
+                      (Settings::values.microphone_volume.GetValue() / 100.0f)};
+    return ConvertInputSamples(captured, num_samples, device_channels, system_channels, volume);
+}
 
-    // TODO: Up-mix to 6 channels if the game expects it.
-    // For audio input this is unlikely to ever be the case though.
-
-    // Incoming mic volume seems to always be very quiet, so multiply by an additional 8 here.
-    // TODO: Play with this and find something that works better.
-    constexpr s32 min = (std::numeric_limits<s16>::min)();
-    constexpr s32 max = (std::numeric_limits<s16>::max)();
-    auto volume{system_volume * device_volume * 8};
-    for (u32 i = 0; i < samples.size(); i++)
-        samples[i] = s16(std::clamp(s32(f32(samples[i]) * volume), min, max));
-
-    if (samples.size() < num_samples)
-        samples.resize(num_samples, 0);
-    return samples;
+std::vector<s16> SinkStream::DrainInputSamples(u64 max_frames) {
+    const auto captured = samples_buffer.Pop(max_frames * device_channels);
+    const auto frames = captured.size() / device_channels;
+    const auto volume = system_volume * device_volume *
+                        (Settings::values.microphone_volume.GetValue() / 100.0f);
+    return ConvertInputSamples(captured, frames * system_channels, device_channels, system_channels,
+                               volume);
 }
 
 void SinkStream::ClearQueue() {
@@ -133,6 +132,13 @@ void SinkStream::ClearQueue() {
 }
 
 void SinkStream::ProcessAudioIn(std::span<const s16> input_buffer, std::size_t num_frames) {
+    if (input_preview) {
+        const auto peak = InputPeak(input_buffer, input_preview_gain.load());
+        auto previous = input_peak.load();
+        while (previous < peak && !input_peak.compare_exchange_weak(previous, peak)) {
+        }
+        return;
+    }
     const std::size_t num_channels = GetDeviceChannels();
     const std::size_t frame_size = num_channels;
     const std::size_t frame_size_bytes = frame_size * sizeof(s16);

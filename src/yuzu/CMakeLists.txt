@@ -106,6 +106,8 @@ add_executable(yuzu
     configuration/configure_mouse_panning.cpp
     configuration/configure_mouse_panning.h
     configuration/configure_mouse_panning.ui
+    configuration/configure_microphone.cpp
+    configuration/configure_microphone.h
     configuration/configure_motion_touch.cpp
     configuration/configure_motion_touch.h
     configuration/configure_motion_touch.ui
