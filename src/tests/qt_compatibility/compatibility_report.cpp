@@ -477,8 +477,15 @@ void DialogTest::isolatedHttpTransport() {
         QVERIFY(!headers.contains("\r\norigin:"));
         QVERIFY(!headers.contains("\r\nsec-fetch-"));
     }
-    QVERIFY(wire_requests.last().contains("X-Lichii-Client: desktop/1"));
     const auto request = wire_requests.last();
+    QMap<QByteArray, QByteArray> headers;
+    for (const auto& line : request.left(request.indexOf("\r\n\r\n")).split('\n')) {
+        const auto colon = line.indexOf(':');
+        if (colon > 0) {
+            headers.insert(line.left(colon).trimmed().toLower(), line.mid(colon + 1).trimmed());
+        }
+    }
+    QCOMPARE(headers.value("x-lichii-client"), QByteArray("desktop/1"));
     const auto body = request.mid(request.indexOf("\r\n\r\n") + 4);
     QCOMPARE(body, dialog.submitted_payload);
     QVERIFY(!body.contains("must-not-be-sent"));
