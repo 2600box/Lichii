@@ -111,6 +111,22 @@ private:
         u32 mask;
     };
 
+    template <typename Func>
+    static void ForEachRun(const TransformAddress& transform, Func&& callback) {
+        size_t offset = 0;
+        u64 mask = transform.mask;
+        while (mask != 0) {
+            const size_t empty_bits = std::countr_zero(mask);
+            offset += empty_bits << align_bits;
+            mask = mask >> empty_bits;
+            const size_t continuous_bits = std::countr_one(mask);
+            callback((static_cast<PAddr>(transform.address) << page_bits) + offset,
+                     continuous_bits << align_bits);
+            mask = continuous_bits < align_size ? (mask >> continuous_bits) : 0;
+            offset += continuous_bits << align_bits;
+        }
+    }
+
     constexpr static size_t page_bits = DEVICE_PAGEBITS - 1;
     constexpr static size_t page_size = 1ULL << page_bits;
     constexpr static size_t page_mask = page_size - 1;
