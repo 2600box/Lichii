@@ -238,7 +238,7 @@ struct MacroEngine {
     }
     // Clear the code associated with a method.
     inline void ClearCode(u32 method) noexcept {
-        if (native_turing) { native_write_offset = method * 3 < native_code.size() ? method * 3 : static_cast<u32>(native_code.size()); return; }
+        if (native_turing) { native_write_offset = u64{method} * 3 < native_code.size() ? method * 3 : static_cast<u32>(native_code.size()); return; }
         macro_cache.erase(method);
         uploaded_macro_code.erase(method);
     }
