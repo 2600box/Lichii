@@ -111,7 +111,11 @@ struct GPU::Impl {
 
     /// Synchronizes CPU writes with Host GPU memory.
     void InvalidateGPUCache() {
-        std::vector<std::pair<DAddr, u64>> writes;
+        // Runs at every fence (~17k/s), on more than one thread: keep each thread's buffer.
+        thread_local std::vector<std::pair<DAddr, u64>> thread_writes;
+        std::vector<std::pair<DAddr, u64>> local_writes;
+        auto& writes = VideoCommon::Nx2Egla66Sweep3::gather ? thread_writes : local_writes;
+        writes.clear();
         std::function<void(PAddr, size_t)> callback_writes(
             [&writes](PAddr address, size_t size) { writes.emplace_back(address, size); });
         system.GatherGPUDirtyMemory(callback_writes);

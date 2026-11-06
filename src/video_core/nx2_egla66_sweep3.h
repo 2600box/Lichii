@@ -31,6 +31,11 @@ inline bool tickwork{};
 
 inline std::atomic<u64> g_tickwork_skipped{0};
 
+/// GPUDirtyMemoryManager::Gather returns before its locks when nothing was collected, and
+/// InvalidateGPUCache keeps one write buffer per thread (AManWithAPlan e073cc0b9e). Exact: no
+/// verify mode, the [gpu_dirty_memory] test runs both ways.
+inline bool gather{};
+
 inline void ReadSwitches() {
     const auto read = [](const char* name) {
         const char* const value = std::getenv(name);
@@ -38,7 +43,9 @@ inline void ReadSwitches() {
     };
     vstream = read("EDEN_NX2_EGLA66_VSTREAM");
     tickwork = read("EDEN_NX2_EGLA66_TICKWORK");
-    LOG_INFO(HW_GPU, "EGLA66 sweep 3 gates: vstream {}, tickwork {}", vstream, tickwork);
+    gather = read("EDEN_NX2_EGLA66_GATHER");
+    LOG_INFO(HW_GPU, "EGLA66 sweep 3 gates: vstream {}, tickwork {}, gather {}", vstream,
+             tickwork, gather);
 }
 
 /// For counters one thread writes: a plain load and store, not a locked add.
