@@ -2068,6 +2068,27 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
             session.title = QString::fromStdString(metadata.first->GetApplicationName());
             session.game_version = QString::fromStdString(metadata.first->GetVersionString());
         }
+        if (session.title.trimmed().isEmpty()) {
+            std::string title;
+            if (QtCommon::system->GetGameName(title) == Loader::ResultStatus::Success) {
+                session.title = QString::fromStdString(title);
+            }
+        }
+        FileSys::VirtualFile update_raw;
+        QtCommon::system->GetAppLoader().ReadUpdateRaw(update_raw);
+        QList<CompatibilityReporting::Addon> mods;
+        QList<CompatibilityReporting::Addon> updates;
+        for (const auto& patch : pm.GetPatches(update_raw)) {
+            auto* entries = patch.type == FileSys::PatchType::Mod      ? &mods
+                            : patch.type == FileSys::PatchType::Update ? &updates
+                                                                       : nullptr;
+            if (entries) {
+                entries->push_back({QString::fromStdString(patch.name),
+                                    QString::fromStdString(patch.version), patch.enabled});
+            }
+        }
+        session.mods = CompatibilityReporting::SummarizeEnabledAddons(mods);
+        session.updates = CompatibilityReporting::SummarizeEnabledAddons(updates);
         session.build = QStringLiteral("Lichii %1 (%2)")
                             .arg(QString::fromUtf8(Common::g_build_version),
                                  QString::fromUtf8(Common::g_scm_rev).left(12));

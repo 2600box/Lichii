@@ -60,6 +60,37 @@ bool HasControls(const QString& value) {
 }
 } // namespace
 
+QString SummarizeEnabledAddons(const QList<Addon>& addons) {
+    QStringList labels;
+    for (const auto& addon : addons) {
+        if (!addon.enabled || addon.name.trimmed().isEmpty()) {
+            continue;
+        }
+        auto label = addon.name.trimmed();
+        if (!addon.version.trimmed().isEmpty()) {
+            label += QStringLiteral(" (%1)").arg(addon.version.trimmed());
+        }
+        if (!labels.contains(label)) {
+            labels.append(std::move(label));
+        }
+    }
+    if (labels.isEmpty()) {
+        return QStringLiteral("None listed as enabled at launch.");
+    }
+    const QString summary =
+        QStringLiteral("Enabled at launch: ") + labels.join(QStringLiteral("; "));
+    constexpr int limit = 500;
+    if (summary.size() <= limit) {
+        return summary;
+    }
+    const auto suffix = QStringLiteral("… (list truncated; review)");
+    auto shortened = summary.left(limit - suffix.size());
+    if (!shortened.isEmpty() && shortened.back().isHighSurrogate()) {
+        shortened.chop(1);
+    }
+    return shortened + suffix;
+}
+
 Dialog::Dialog(const Session& session, QWidget* parent) : Dialog(session, nullptr, parent) {}
 
 Dialog::Dialog(const Session& session, QNetworkAccessManager* network_, QWidget* parent)
@@ -170,8 +201,8 @@ Dialog::Dialog(const Session& session, QNetworkAccessManager* network_, QWidget*
     graphics_api->setCurrentText(Known(session.graphics_api));
     setup->addRow(tr("Graphics API"), graphics_api);
     paragraph(setup, QStringLiteral("settings"), tr("Launch settings"), Known(session.settings));
-    paragraph(setup, QStringLiteral("updates"), tr("Updates (optional)"));
-    paragraph(setup, QStringLiteral("mods"), tr("Mods (optional)"));
+    paragraph(setup, QStringLiteral("updates"), tr("Updates (optional)"), session.updates);
+    paragraph(setup, QStringLiteral("mods"), tr("Mods (optional)"), session.mods);
     preview = new QPlainTextEdit(this);
     preview->setObjectName(QStringLiteral("preview"));
     preview->setReadOnly(true);

@@ -120,6 +120,7 @@ private slots:
     void cooldownPreservesPreviewSelection();
     void dialogTranslationContext();
     void machinePrefillsRemainEditable();
+    void enabledAddonPrefills();
 };
 
 Session DialogTest::Seed() {
@@ -133,7 +134,9 @@ Session DialogTest::Seed() {
             .os = QStringLiteral("Example OS"),
             .ram = QStringLiteral("16 GiB"),
             .graphics_api = QStringLiteral("Vulkan"),
-            .settings = QStringLiteral("Launch settings: handheld mode; resolution scale 1x.")};
+            .settings = QStringLiteral("Launch settings: handheld mode; resolution scale 1x."),
+            .mods = {},
+            .updates = {}};
 }
 
 QByteArray DialogTest::Catalog(int page, int pages) {
@@ -184,6 +187,7 @@ int DialogTest::Preview(QApplication& app, const QString& screenshot) {
 void DialogTest::noImplicitTraffic() {
     FakeNetwork network;
     Dialog dialog(Seed(), &network, nullptr);
+    QCOMPARE(dialog.query->text(), Seed().title);
     QVERIFY(network.requests.empty());
     QVERIFY(!dialog.public_consent->isChecked());
     QVERIFY(!dialog.safe_files_consent->isChecked());
@@ -641,6 +645,38 @@ void DialogTest::machinePrefillsRemainEditable() {
              QStringLiteral("Corrected driver"));
     QCOMPARE(payload.value(QStringLiteral("gpu")).toString(),
              QStringLiteral("Active rendering GPU"));
+    QCOMPARE(network.requests.size(), 0);
+}
+
+void DialogTest::enabledAddonPrefills() {
+    auto session = Seed();
+    session.mods = SummarizeEnabledAddons({
+        {QStringLiteral("Dynamic FPS"), QStringLiteral("IPS"), true},
+        {QStringLiteral("Max Resolution"), QStringLiteral("IPS"), false},
+        {QStringLiteral("Dynamic FPS"), QStringLiteral("IPS"), true},
+    });
+    session.updates = SummarizeEnabledAddons({
+        {QStringLiteral("Update"), QStringLiteral("2.0.0"), true},
+        {QStringLiteral("Update"), QStringLiteral("1.0.0"), false},
+    });
+    QCOMPARE(session.mods, QStringLiteral("Enabled at launch: Dynamic FPS (IPS)"));
+    QCOMPARE(session.updates, QStringLiteral("Enabled at launch: Update (2.0.0)"));
+    QCOMPARE(SummarizeEnabledAddons({}), QStringLiteral("None listed as enabled at launch."));
+    const auto long_summary = SummarizeEnabledAddons({{QString(700, QLatin1Char('x')), {}, true}});
+    QVERIFY(long_summary.size() <= 500);
+    QVERIFY(long_summary.endsWith(QStringLiteral("(list truncated; review)")));
+    FakeNetwork network;
+    Dialog dialog(session, &network, nullptr);
+    QCOMPARE(dialog.paragraphs[QStringLiteral("mods")]->toPlainText(), session.mods);
+    QCOMPARE(dialog.paragraphs[QStringLiteral("updates")]->toPlainText(), session.updates);
+    const auto object = QJsonDocument::fromJson(dialog.Payload()).object();
+    QCOMPARE(object.value(QStringLiteral("mods")).toString(), session.mods);
+    QCOMPARE(object.value(QStringLiteral("updates")).toString(), session.updates);
+    dialog.public_consent->setChecked(true);
+    dialog.safe_files_consent->setChecked(true);
+    dialog.paragraphs[QStringLiteral("mods")]->setPlainText(QStringLiteral("Corrected mod list"));
+    QVERIFY(!dialog.public_consent->isChecked());
+    QVERIFY(!dialog.safe_files_consent->isChecked());
     QCOMPARE(network.requests.size(), 0);
 }
 

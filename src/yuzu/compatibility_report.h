@@ -4,6 +4,7 @@
 
 #include <QByteArray>
 #include <QDialog>
+#include <QList>
 #include <QMap>
 #include <QPointer>
 #include <QString>
@@ -21,6 +22,14 @@ class QTabWidget;
 
 namespace CompatibilityReporting {
 
+struct Addon {
+    QString name;
+    QString version;
+    bool enabled;
+};
+
+QString SummarizeEnabledAddons(const QList<Addon>& addons);
+
 struct Session {
     quint64 program_id{};
     QString title;
@@ -33,6 +42,8 @@ struct Session {
     QString ram;
     QString graphics_api;
     QString settings;
+    QString mods;
+    QString updates;
 };
 
 class Dialog final : public QDialog {
