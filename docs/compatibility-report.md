@@ -4,7 +4,7 @@ After stopping a Switch 2 game, right-click that game and choose **Submit compat
 
 Search the website catalog, select the exact game, and press **Confirm game**. Search is explicit and supports catalog pages. A Nintendo title ID is never used as a catalog ID. Missing title metadata leaves the search blank rather than using a filename.
 
-Review the editable experience and setup tabs, then the public JSON preview. Build, CPU, OS, RAM, title version and launch settings are prefilled when available. GPU and driver are Unknown because the current renderer interface does not provide reliable model and driver accessors. Prefills are not performance measurements. Compatibility and progress require the player's judgment. Settings changed during gameplay must be corrected by the player.
+Review the editable experience and setup tabs, then the public JSON preview. Build, CPU, OS, RAM, title version, active renderer identity and launch settings are prefilled when available. Vulkan supplies the selected physical device model and its driver name/version using the existing vendor-specific version formatter. OpenGL supplies the active context's renderer and complete implementation/version string, not a guessed standalone driver version. Missing values remain Unknown. Prefills are not performance measurements. Compatibility and progress require the player's judgment. Settings changed during gameplay must be corrected by the player.
 
 Both attestations start unchecked and reset after an edit or submission attempt. The player must affirm them and press **Submit report**. There is no account or embedded secret. Names, handles, report text, hardware and settings are public. The service sees the client's IP address and uses it for rate limiting. Logs and files are never read or uploaded by this feature.
 
@@ -13,6 +13,8 @@ Both attestations start unchecked and reset after an edit or submission attempt.
 ## Implementation boundary
 
 `MainWindow::BootGame` captures one allowlisted value snapshot after successful core loading and before starting the emulation thread. `OnEmulationStopped` enables the context action for that snapshot's exact local program ID. Application changes invalidate it. The dialog receives copied values, not a core object, filesystem object, settings serializer or log path.
+
+Each graphics backend copies its device identity during construction while its selected device/context is available. The session then copies those strings before teardown; it performs no GL calls, adapter enumeration or log reading. The null backend leaves the identity empty. No session performance measurements are collected by the reporting feature.
 
 `CompatibilityReporting::Dialog` owns the catalog confirmation, consent state, payload validation and asynchronous network requests. Its normal constructor creates a dedicated network manager. Requests disable cookie loading/saving, credential reuse, caching and redirects, and have a 20-second deadline and 256 KiB response bound. Only an explicit Search or Submit starts a request. Server errors are shown as local messages and known field names, never arbitrary HTML. Receipt links must match the approved HTTPS origin and report UUID path.
 

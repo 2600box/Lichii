@@ -159,8 +159,8 @@ Dialog::Dialog(const Session& session, QNetworkAccessManager* network_, QWidget*
     line(setup, QStringLiteral("build"), tr("Lichii build"), Known(session.build));
     line(setup, QStringLiteral("gameVersion"), tr("Game version"), Known(session.game_version));
     line(setup, QStringLiteral("cpu"), tr("CPU"), Known(session.cpu));
-    line(setup, QStringLiteral("gpu"), tr("GPU"), QStringLiteral("Unknown"));
-    line(setup, QStringLiteral("driver"), tr("GPU driver"), QStringLiteral("Unknown"));
+    line(setup, QStringLiteral("gpu"), tr("GPU"), Known(session.gpu));
+    line(setup, QStringLiteral("driver"), tr("GPU driver / OpenGL version"), Known(session.driver));
     line(setup, QStringLiteral("os"), tr("Operating system"), Known(session.os));
     line(setup, QStringLiteral("ram"), tr("RAM (optional)"), session.ram);
     graphics_api = new QComboBox(this);
@@ -375,8 +375,11 @@ void Dialog::Refresh() {
     submit->setEnabled(editing && !cooling_down && validation.isEmpty() &&
                        public_consent->isChecked() && safe_files_consent->isChecked());
     submit->setToolTip(validation);
-    preview->setPlainText(
-        QString::fromUtf8(QJsonDocument::fromJson(Payload()).toJson(QJsonDocument::Indented)));
+    const auto content =
+        QString::fromUtf8(QJsonDocument::fromJson(Payload()).toJson(QJsonDocument::Indented));
+    if (preview->toPlainText() != content) {
+        preview->setPlainText(content);
+    }
 }
 
 void Dialog::Search() {
@@ -398,6 +401,9 @@ void Dialog::Search() {
 
 void Dialog::ConfirmGame() {
     if (state != State::Editing || games->currentIndex() < 0) {
+        return;
+    }
+    if (confirmed_game == games->currentData().toLongLong()) {
         return;
     }
     confirmed_game = games->currentData().toLongLong();

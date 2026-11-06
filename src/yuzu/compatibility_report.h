@@ -27,6 +27,8 @@ struct Session {
     QString build;
     QString game_version;
     QString cpu;
+    QString gpu;
+    QString driver;
     QString os;
     QString ram;
     QString graphics_api;
@@ -34,6 +36,8 @@ struct Session {
 };
 
 class Dialog final : public QDialog {
+    Q_OBJECT
+
 public:
     explicit Dialog(const Session& session, QWidget* parent = nullptr);
     ~Dialog() override;

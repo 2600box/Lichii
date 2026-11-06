@@ -19,10 +19,13 @@
 #include <QNetworkReply>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QScrollBar>
 #include <QTabWidget>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTest>
+#include <QTextCursor>
+#include <QTranslator>
 #include <QUrlQuery>
 
 namespace CompatibilityReporting {
@@ -113,6 +116,10 @@ private slots:
     void isolatedHttpTransport();
     void serverRejections_data();
     void serverRejections();
+    void reconfirmationKeepsRetryIdentity();
+    void cooldownPreservesPreviewSelection();
+    void dialogTranslationContext();
+    void machinePrefillsRemainEditable();
 };
 
 Session DialogTest::Seed() {
@@ -121,6 +128,8 @@ Session DialogTest::Seed() {
             .build = QStringLiteral("Lichii prototype (synthetic)"),
             .game_version = QStringLiteral("1.0.0"),
             .cpu = QStringLiteral("Example CPU"),
+            .gpu = {},
+            .driver = {},
             .os = QStringLiteral("Example OS"),
             .ram = QStringLiteral("16 GiB"),
             .graphics_api = QStringLiteral("Vulkan"),
@@ -156,12 +165,16 @@ void DialogTest::Prepare(Dialog& dialog, FakeNetwork& network) {
 
 int DialogTest::Preview(QApplication& app, const QString& screenshot) {
     FakeNetwork network;
-    Dialog dialog(Seed(), &network, nullptr);
+    auto session = Seed();
+    session.gpu = QStringLiteral("Example active GPU");
+    session.driver = QStringLiteral("Example driver 1.2.3");
+    Dialog dialog(session, &network, nullptr);
     Prepare(dialog, network);
     dialog.status->setText(
         QStringLiteral("LOCAL MOCK ONLY. No report or catalog request reaches the Internet."));
     dialog.show();
     if (!screenshot.isEmpty()) {
+        dialog.tabs->setCurrentIndex(1);
         QTest::qWait(100);
         return dialog.grab().save(screenshot) ? 0 : 1;
     }
@@ -518,6 +531,117 @@ void DialogTest::serverRejections() {
     if (code == 400) {
         QVERIFY(dialog.status->text().contains(QStringLiteral("summary")));
     }
+}
+
+void DialogTest::reconfirmationKeepsRetryIdentity() {
+    FakeNetwork network;
+    Dialog dialog(Seed(), &network, nullptr);
+    Prepare(dialog, network);
+    dialog.public_consent->setChecked(true);
+    dialog.safe_files_consent->setChecked(true);
+    dialog.Submit();
+    const auto original = network.requests.last();
+    original.reply->Complete(503, "{}");
+    dialog.confirm->click();
+    QCOMPARE(network.requests.size(), 2);
+    QCOMPARE(dialog.submission_key, original.request.rawHeader("Idempotency-Key"));
+    QCOMPARE(dialog.submitted_payload, original.body);
+    dialog.public_consent->setChecked(true);
+    dialog.safe_files_consent->setChecked(true);
+    dialog.Submit();
+    QCOMPARE(network.requests.last().request.rawHeader("Idempotency-Key"),
+             original.request.rawHeader("Idempotency-Key"));
+    QCOMPARE(network.requests.last().body, original.body);
+    network.requests.last().reply->Complete(503, "{}");
+    dialog.games->addItem(QStringLiteral("Different catalog game"), 98765);
+    dialog.games->setCurrentIndex(1);
+    dialog.confirm->click();
+    QVERIFY(dialog.submission_key.isEmpty());
+    QVERIFY(!dialog.public_consent->isChecked());
+    QVERIFY(!dialog.safe_files_consent->isChecked());
+    dialog.public_consent->setChecked(true);
+    dialog.safe_files_consent->setChecked(true);
+    dialog.Submit();
+    QVERIFY(network.requests.last().request.rawHeader("Idempotency-Key") !=
+            original.request.rawHeader("Idempotency-Key"));
+}
+
+void DialogTest::cooldownPreservesPreviewSelection() {
+    FakeNetwork network;
+    Dialog dialog(Seed(), &network, nullptr);
+    Prepare(dialog, network);
+    dialog.public_consent->setChecked(true);
+    dialog.safe_files_consent->setChecked(true);
+    dialog.Submit();
+    network.requests.last().reply->Complete(429, "{}", "60");
+    dialog.tabs->setCurrentWidget(dialog.preview);
+    dialog.show();
+    QTest::qWait(20);
+    auto cursor = dialog.preview->textCursor();
+    cursor.setPosition(20);
+    cursor.setPosition(80, QTextCursor::KeepAnchor);
+    dialog.preview->setTextCursor(cursor);
+    auto* scroll = dialog.preview->verticalScrollBar();
+    scroll->setValue(scroll->maximum());
+    const auto position = scroll->value();
+    const auto selected = cursor.selectedText();
+    QTest::qWait(1200);
+    QCOMPARE(dialog.preview->textCursor().selectedText(), selected);
+    QCOMPARE(scroll->value(), position);
+    QVERIFY(!dialog.submit->isEnabled());
+    QCOMPARE(network.requests.size(), 2);
+}
+
+void DialogTest::dialogTranslationContext() {
+    class Translator final : public QTranslator {
+    public:
+        QString translate(const char* context, const char* source, const char*,
+                          int) const override {
+            if (QByteArray(context) == "CompatibilityReporting::Dialog" &&
+                QByteArray(source) == "Submit compatibility report") {
+                return QStringLiteral("Translated report title");
+            }
+            return {};
+        }
+        bool isEmpty() const override {
+            return false;
+        }
+    } translator;
+    QCoreApplication::installTranslator(&translator);
+    FakeNetwork network;
+    Dialog dialog(Seed(), &network, nullptr);
+    const auto title = dialog.windowTitle();
+    QCoreApplication::removeTranslator(&translator);
+    QCOMPARE(title, QStringLiteral("Translated report title"));
+}
+
+void DialogTest::machinePrefillsRemainEditable() {
+    FakeNetwork network;
+    auto session = Seed();
+    session.gpu = QStringLiteral(" Active rendering GPU ");
+    session.driver = QStringLiteral(" Driver 123.45 ");
+    Dialog dialog(session, &network, nullptr);
+    QCOMPARE(network.requests.size(), 0);
+    QCOMPARE(dialog.fields[QStringLiteral("gpu")]->text(), QStringLiteral("Active rendering GPU"));
+    QCOMPARE(dialog.fields[QStringLiteral("driver")]->text(), QStringLiteral("Driver 123.45"));
+    QCOMPARE(dialog.graphics_api->currentText(), QStringLiteral("Vulkan"));
+    QCOMPARE(dialog.fields[QStringLiteral("cpu")]->text(), session.cpu);
+    QCOMPARE(dialog.fields[QStringLiteral("ram")]->text(), session.ram);
+    QCOMPARE(dialog.fields[QStringLiteral("os")]->text(), session.os);
+    session.gpu.clear();
+    session.driver.clear();
+    QCOMPARE(dialog.fields[QStringLiteral("gpu")]->text(), QStringLiteral("Active rendering GPU"));
+    dialog.public_consent->setChecked(true);
+    dialog.safe_files_consent->setChecked(true);
+    dialog.fields[QStringLiteral("driver")]->setText(QStringLiteral("Corrected driver"));
+    QVERIFY(!dialog.public_consent->isChecked());
+    QVERIFY(!dialog.safe_files_consent->isChecked());
+    const auto payload = QJsonDocument::fromJson(dialog.Payload()).object();
+    QCOMPARE(payload.value(QStringLiteral("driver")).toString(),
+             QStringLiteral("Corrected driver"));
+    QCOMPARE(payload.value(QStringLiteral("gpu")).toString(),
+             QStringLiteral("Active rendering GPU"));
+    QCOMPARE(network.requests.size(), 0);
 }
 
 } // namespace CompatibilityReporting

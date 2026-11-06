@@ -2083,19 +2083,10 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
             session.ram =
                 QStringLiteral("%1 GiB").arg(double(memory) / (1024 * 1024 * 1024), 0, 'f', 1);
         }
-        switch (Settings::values.renderer_backend.GetValue()) {
-        case Settings::RendererBackend::Vulkan:
-            session.graphics_api = QStringLiteral("Vulkan");
-            break;
-        case Settings::RendererBackend::OpenGL_GLSL:
-        case Settings::RendererBackend::OpenGL_GLASM:
-        case Settings::RendererBackend::OpenGL_SPIRV:
-            session.graphics_api = QStringLiteral("OpenGL");
-            break;
-        default:
-            session.graphics_api = QStringLiteral("Unknown");
-            break;
-        }
+        const auto& device_info = QtCommon::system->Renderer().GetDeviceInfo();
+        session.gpu = QString::fromStdString(device_info.model);
+        session.driver = QString::fromStdString(device_info.driver);
+        session.graphics_api = QString::fromStdString(device_info.api);
         session.settings =
             QStringLiteral("Launch settings: %1 mode; resolution scale %2x; "
                            "GPU accuracy %3; asynchronous shaders %4.")
