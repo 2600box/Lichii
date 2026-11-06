@@ -80,8 +80,14 @@ public:
         std::chrono::steady_clock::time_point since;
         std::chrono::steady_clock::time_point last_fences; ///< When it last released fences
         bool reported;
+        u32 unmet_polls{};
+        /// When the back was last drained for this acquire: registration, then every drained poll.
+        std::chrono::steady_clock::time_point last_drain{};
 
         [[nodiscard]] bool Matches(u32 current) const;
+        [[nodiscard]] bool CanDeferPoll(std::chrono::steady_clock::time_point now) {
+            return ++unmet_polls < 16 && now - last_drain < std::chrono::milliseconds{1};
+        }
     };
 
     [[nodiscard]] bool HasPendingAcquire() const {

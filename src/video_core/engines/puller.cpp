@@ -99,9 +99,19 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
         VideoCommon::Nx2Profile::Add(Counter::AcquirePollsLatched, 1);
         return true;
     }
+    if (mode == 2 && VideoCommon::GpuSplit::Get().Active() &&
+        pending_acquire->CanDeferPoll(std::chrono::steady_clock::now())) {
+        VideoCommon::GpuSplit::Get().Publish();
+        VideoCommon::GpuSplit::Get().RequestIdleHook();
+        VideoCommon::Nx2Profile::Add(Counter::AcquirePollsDeferred, 1);
+        return false;
+    }
     // The release may still be queued for the split GPU thread's back half (and the caches
     // ReadSemaphoreWord asks are its state).
     DrainBack();
+    pending_acquire->last_drain = std::chrono::steady_clock::now();
+    pending_acquire->unmet_polls = 0;
+    VideoCommon::Nx2Profile::Add(Counter::AcquirePollsDrained, 1);
     const u32 current = ReadSemaphoreWord(dma_pusher, pending_acquire->address);
     if (Nx2SemaphoreWaiters::Get().Latched(this)) {
         if (static std::atomic<u32> rescued{};
@@ -126,6 +136,7 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
         delayed && now - pending_acquire->last_fences >= std::chrono::milliseconds{1}) {
         pending_acquire->last_fences = now;
         ReleaseFences(dma_pusher);
+        VideoCommon::Nx2Profile::Add(Counter::AcquireFenceRetries, 1);
         if (Nx2SemaphoreWaiters::Get().Latched(this) ||
             pending_acquire->Matches(ReadSemaphoreWord(dma_pusher, pending_acquire->address))) {
             return true;
@@ -295,6 +306,7 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
         ReleaseFences(dma_pusher);
         if (!waiters.Latched(this) && !acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address))) {
             pending_acquire = acquire;
+            pending_acquire->last_drain = std::chrono::steady_clock::now();
             dma_pusher.suspensions.fetch_add(1, std::memory_order_release);
             VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireWaits, 1);
         } else {

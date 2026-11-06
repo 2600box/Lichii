@@ -103,7 +103,7 @@ inline u64 Ticks() {
 struct ThreadData {
     std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ns{};
     std::array<u64, static_cast<size_t>(Zone::Count)> count{};
-    std::array<u64, 10> counters{}; ///< See Counter
+    std::array<u64, 13> counters{}; ///< See Counter
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_ns{};
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_count{};
     u64 child_ns{};    ///< Time of the zones nested in the current one
@@ -159,6 +159,9 @@ enum class Counter : u32 {
     AcquireWaits,   ///< Of AcquireChecks: not met yet (the channel waits)
     AcquirePolls,
     AcquirePollsLatched,
+    AcquirePollsDeferred,
+    AcquirePollsDrained,
+    AcquireFenceRetries,
 };
 
 /// Method calls on this thread by method (3D registers on the back, macros on the front), and
@@ -280,6 +283,10 @@ inline void Report(const char* thread_name = "GPU thread") {
                         static_cast<double>(data.counters[7]) * 1e9 / window,
                         static_cast<double>(data.counters[8]) * 1e9 / window,
                         static_cast<double>(data.counters[9]) * 1e9 / window);
+    line += fmt::format(" | acquire polls deferred {:.0f}, drained {:.0f}, fence retries {:.0f}",
+                        static_cast<double>(data.counters[10]) * 1e9 / window,
+                        static_cast<double>(data.counters[11]) * 1e9 / window,
+                        static_cast<double>(data.counters[12]) * 1e9 / window);
     std::string drains;
     for (size_t i = 0; i < data.drain_count.size(); ++i) {
         if (data.drain_count[i] != 0) {
