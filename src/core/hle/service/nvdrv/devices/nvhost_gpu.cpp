@@ -476,6 +476,7 @@ NvResult nvhost_gpu::SubmitGPFIFOImpl(IoctlSubmitGpfifo& params, Tegra::CommandL
                 }
                 offset += entry.size;
             }
+            entries.submitted_at = std::chrono::steady_clock::now();
         }
     }
 
