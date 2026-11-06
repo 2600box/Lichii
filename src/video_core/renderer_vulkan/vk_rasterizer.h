@@ -171,6 +171,9 @@ public:
                                                             u32 pixel_stride);
 
 private:
+    /// False when no page of the range was ever written by the GPU through the buffer cache.
+    bool MayBeGpuModified(DAddr addr, u64 size);
+
     static constexpr const u64 NEEDS_D24[] = {
         0x01006A800016E000ULL, // SSBU
         0x0100E95004038000ULL, // XC2
