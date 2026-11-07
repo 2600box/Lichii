@@ -1717,7 +1717,8 @@ void Device::RemoveUnsuitableExtensions() {
     // VK_KHR_cooperative_matrix
     // Used only for the guest's HMMA.16816.F16: the same M=16 N=8 K=16 shape with 16-bit floats
     // in every matrix, as a subgroup operation of compute shaders whose subgroups are the guest's
-    // 32-lane warp. The matrices hold 16-bit floats, so the device needs shaderFloat16.
+    // 32-lane warp. The matrices hold 16-bit floats, so the device needs shaderFloat16. Shaders
+    // with them use the Vulkan memory model and run with full subgroups.
     {
         const bool has_shape = std::ranges::any_of(
             physical.GetCooperativeMatrixPropertiesKHR(),
@@ -1739,9 +1740,12 @@ void Device::RemoveUnsuitableExtensions() {
             properties.subgroup_properties.subgroupSize == GuestWarpSize &&
             // Compute subgroups may vary between these sizes (always with SPIR-V 1.6), and the
             // per-lane matrix layout needs exactly the guest's 32 lanes.
-            (properties.subgroup_size_control.sType == VkStructureType{} ||
-             (properties.subgroup_size_control.minSubgroupSize == GuestWarpSize &&
-              properties.subgroup_size_control.maxSubgroupSize == GuestWarpSize)) &&
+            extensions.subgroup_size_control &&
+            properties.subgroup_size_control.minSubgroupSize == GuestWarpSize &&
+            properties.subgroup_size_control.maxSubgroupSize == GuestWarpSize &&
+            features.subgroup_size_control.computeFullSubgroups &&
+            features.vulkan_memory_model.vulkanMemoryModel &&
+            features.vulkan_memory_model.vulkanMemoryModelDeviceScope &&
             features.shader_float16_int8.shaderFloat16;
         features.cooperative_matrix.cooperativeMatrixRobustBufferAccess = VK_FALSE;
         RemoveExtensionFeatureIfUnsuitable(extensions.cooperative_matrix,

@@ -15,13 +15,31 @@ namespace {
 
 constexpr u32 GUEST_WARP_LANES = 32;
 
+// A cooperative matrix needs its whole subgroup: every row of the workgroup fills whole warps and
+// the pipeline is created with full subgroups. Cooperative matrices also need the Vulkan memory
+// model, which has no Coherent decoration, so a program that needs coherent memory keeps the
+// emulation.
+bool SupportsCooperativeHmma(const IR::Program& program) {
+    return program.stage == Stage::Compute && program.workgroup_size[0] != 0 &&
+           program.workgroup_size[0] % GUEST_WARP_LANES == 0 &&
+           !program.info.requires_coherent_global_memory &&
+           !program.info.requires_coherent_image_memory;
+}
+
 // Sirit lacks the two cooperative matrix instructions. They are emitted as an OpTypeStruct and an
 // OpSelect, which have the same word layout, and PatchCooperativeHmma replaces the opcodes after
 // assembly. The operands are constants that no real structure has as members.
-CooperativeHmmaTypes DefineCooperativeHmmaTypes(Sirit::Module& module, Id u32_type) {
+CooperativeHmmaTypes DefineCooperativeHmmaTypes(Sirit::Module& module, Id u32_type,
+                                                u32 spirv_version) {
     module.AddExtension("SPV_KHR_cooperative_matrix");
     module.AddCapability(spv::Capability::CooperativeMatrixKHR);
     module.AddCapability(spv::Capability::Float16);
+    if (spirv_version < 0x00010500) {
+        module.AddExtension("SPV_KHR_vulkan_memory_model");
+    }
+    module.AddCapability(spv::Capability::VulkanMemoryModel);
+    module.AddCapability(spv::Capability::VulkanMemoryModelDeviceScope);
+    module.SetMemoryModel(spv::AddressingModel::Logical, spv::MemoryModel::Vulkan);
     const Id float16{module.TypeFloat(16)};
     const auto constant{[&](u32 value) { return module.Constant(u32_type, value); }};
     const Id scope{constant(static_cast<u32>(spv::Scope::Subgroup))};
@@ -80,12 +98,7 @@ Id EmitCooperativeHmma(Sirit::Module& module, const CooperativeHmmaTypes& types,
 } // Anonymous namespace
 
 void DefineSoftwareMatrixFunctions(EmitContext& ctx, const IR::Program& program) {
-    // A cooperative matrix needs its whole subgroup, so a workgroup must fill whole warps.
-    const u32 invocations{program.workgroup_size[0] * program.workgroup_size[1] *
-                          program.workgroup_size[2]};
-    const bool cooperative{ctx.profile.support_cooperative_hmma &&
-                           program.stage == Stage::Compute && invocations != 0 &&
-                           invocations % GUEST_WARP_LANES == 0};
+    const bool cooperative{ctx.profile.support_cooperative_hmma && SupportsCooperativeHmma(program)};
     std::array<bool, 2> needed{};
     for (const auto* block : program.blocks) {
         for (const auto& inst : block->Instructions()) {
@@ -94,7 +107,8 @@ void DefineSoftwareMatrixFunctions(EmitContext& ctx, const IR::Program& program)
             if (depth != 8 && depth != 16) throw LogicError("Invalid software HMMA depth");
             if (depth == 16 && cooperative) {
                 if (!ctx.cooperative_hmma) {
-                    ctx.cooperative_hmma = DefineCooperativeHmmaTypes(ctx, ctx.U32[1]);
+                    ctx.cooperative_hmma =
+                        DefineCooperativeHmmaTypes(ctx, ctx.U32[1], ctx.profile.supported_spirv);
                 }
                 continue;
             }
@@ -260,13 +274,12 @@ std::vector<u32> EmitCooperativeHmmaTest(u32 spirv_version) {
     Sirit::Module module{spirv_version};
     module.AddCapability(spv::Capability::Shader);
     module.AddCapability(spv::Capability::GroupNonUniform);
-    module.SetMemoryModel(spv::AddressingModel::Logical, spv::MemoryModel::GLSL450);
 
     const Id void_type{module.TypeVoid()};
     const Id u32_type{module.TypeUInt(32)};
     const Id u32x2_type{module.TypeVector(u32_type, 2)};
     const Id u32x4_type{module.TypeVector(u32_type, 4)};
-    const CooperativeHmmaTypes types{DefineCooperativeHmmaTypes(module, u32_type)};
+    const CooperativeHmmaTypes types{DefineCooperativeHmmaTypes(module, u32_type, spirv_version)};
 
     const Id words_type{module.TypeRuntimeArray(u32_type)};
     module.Decorate(words_type, spv::Decoration::ArrayStride, 4U);

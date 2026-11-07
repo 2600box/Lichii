@@ -217,6 +217,8 @@ constexpr u32 OP_TYPE_COOPERATIVE_MATRIX = 4456;
 constexpr u32 OP_COOPERATIVE_MATRIX_MUL_ADD = 4459;
 constexpr u32 CAPABILITY_COOPERATIVE_MATRIX = 6022;
 constexpr u32 CAPABILITY_FLOAT16 = 9;
+constexpr u32 CAPABILITY_VULKAN_MEMORY_MODEL = 5345;
+constexpr u32 CAPABILITY_VULKAN_MEMORY_MODEL_DEVICE_SCOPE = 5346;
 
 std::map<u32, u32> Constants(const std::vector<u32>& code) {
     std::map<u32, u32> constants;
@@ -240,6 +242,21 @@ void RequireHmmaMatrixTypes(const std::vector<u32>& code) {
     REQUIRE(columns_by_use == std::array<u32, 3>{16, 8, 8}); // A, B, accumulator
 }
 
+// SPV_KHR_cooperative_matrix requires the Vulkan memory model, which spirv-val does not check.
+void RequireVulkanMemoryModel(const std::vector<u32>& code) {
+    REQUIRE(HasCapability(code, CAPABILITY_VULKAN_MEMORY_MODEL));
+    REQUIRE(HasCapability(code, CAPABILITY_VULKAN_MEMORY_MODEL_DEVICE_SCOPE));
+    const auto models = Instructions(code, 14); // OpMemoryModel
+    REQUIRE(models.size() == 1);
+    REQUIRE(models[0][1] == 3); // Vulkan
+    bool extension = false;
+    for (const auto& words : Instructions(code, 10)) { // OpExtension
+        extension |= std::string{reinterpret_cast<const char*>(words.data())} ==
+                     "SPV_KHR_vulkan_memory_model";
+    }
+    REQUIRE(extension == (code[1] < 0x00010500));
+}
+
 } // namespace
 
 TEST_CASE("Cooperative HMMA replaces the K16 software helper", "[video_core][tensor][ampere]") {
@@ -248,6 +265,8 @@ TEST_CASE("Cooperative HMMA replaces the K16 software helper", "[video_core][ten
     const auto code = fixture.Emit("cooperative-k16");
     REQUIRE(HasCapability(code, CAPABILITY_COOPERATIVE_MATRIX));
     REQUIRE(HasCapability(code, CAPABILITY_FLOAT16));
+    RequireVulkanMemoryModel(code);
+    REQUIRE(fixture.program.info.uses_cooperative_matrix);
     RequireHmmaMatrixTypes(code);
     REQUIRE(Instructions(code, OP_COOPERATIVE_MATRIX_MUL_ADD).size() == 3);
     REQUIRE(Instructions(code, 246).empty()); // OpLoopMerge
@@ -257,6 +276,23 @@ TEST_CASE("Cooperative HMMA replaces the K16 software helper", "[video_core][ten
         for (const auto& type : Instructions(code, OP_TYPE_COOPERATIVE_MATRIX)) {
             REQUIRE(words[0] != type[0]);
         }
+    }
+}
+
+TEST_CASE("Cooperative HMMA keeps barriers valid under the Vulkan memory model",
+          "[video_core][tensor][ampere]") {
+    for (const u32 version : {0x00010400U, 0x00010600U}) {
+        TensorProgram fixture{1, 16};
+        fixture.profile.supported_spirv = version;
+        fixture.profile.support_cooperative_hmma = true;
+        IR::IREmitter ir{fixture.block};
+        ir.Barrier();
+        ir.WorkgroupMemoryBarrier();
+        ir.DeviceMemoryBarrier();
+        const auto code = fixture.Emit("cooperative-k16-barriers-" + std::to_string(version));
+        REQUIRE(code[1] == version);
+        RequireVulkanMemoryModel(code);
+        REQUIRE(Instructions(code, OP_COOPERATIVE_MATRIX_MUL_ADD).size() == 1);
     }
 }
 
@@ -302,6 +338,7 @@ TEST_CASE("Cooperative HMMA falls back to the software helper", "[video_core][te
         REQUIRE_FALSE(HasCapability(code, CAPABILITY_COOPERATIVE_MATRIX));
         REQUIRE(Instructions(code, OP_TYPE_COOPERATIVE_MATRIX).empty());
         REQUIRE(Instructions(code, 57).size() == 1); // OpFunctionCall
+        REQUIRE_FALSE(fixture.program.info.uses_cooperative_matrix);
     };
     SECTION("unsupported by the device") {
         TensorProgram fixture{1, 16};
@@ -318,6 +355,18 @@ TEST_CASE("Cooperative HMMA falls back to the software helper", "[video_core][te
         fixture.program.workgroup_size = {48, 1, 1};
         require_software(fixture);
     }
+    SECTION("a workgroup row that leaves a warp unfilled") {
+        TensorProgram fixture{1, 16};
+        fixture.profile.support_cooperative_hmma = true;
+        fixture.program.workgroup_size = {16, 2, 1};
+        require_software(fixture);
+    }
+    SECTION("coherent memory, which the Vulkan memory model has no decoration for") {
+        TensorProgram fixture{1, 16};
+        fixture.profile.support_cooperative_hmma = true;
+        fixture.program.info.requires_coherent_global_memory = true;
+        require_software(fixture);
+    }
 }
 
 TEST_CASE("Cooperative HMMA self-test shader runs one lowering on one warp",
@@ -326,6 +375,7 @@ TEST_CASE("Cooperative HMMA self-test shader runs one lowering on one warp",
         const auto code = Backend::SPIRV::EmitCooperativeHmmaTest(version);
         REQUIRE(code[1] == version);
         REQUIRE(HasCapability(code, CAPABILITY_COOPERATIVE_MATRIX));
+        RequireVulkanMemoryModel(code);
         RequireHmmaMatrixTypes(code);
         REQUIRE(Instructions(code, OP_COOPERATIVE_MATRIX_MUL_ADD).size() == 1);
         const auto modes = Instructions(code, 16); // OpExecutionMode
