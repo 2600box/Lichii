@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <span>
 
+#include "common/logging.h"
 #include "shader_recompiler/frontend/ampere/program_override.h"
 
 namespace VideoCommon {
@@ -21,6 +23,15 @@ inline bool ApplyMkwZeroDepthFallback(std::span<const Shader::Ampere::Instructio
     const size_t insert = program.source_instruction_offsets[next_source];
     if (insert > program.instructions.size() ||
         (next_source != 0 && program.source_instruction_offsets[next_source - 1] > insert)) {
+        return false;
+    }
+    // The insertion moves every later instruction, so it needs a lowering without branches, calls
+    // or SSY/PBK/PCNT pushes (Maxwell opcodes 0xe20-0xe2b), whose targets would no longer match.
+    if (std::ranges::any_of(program.instructions, [](u64 instruction) {
+            const u64 opcode = instruction >> 52;
+            return opcode >= 0xe20 && opcode <= 0xe2b;
+        })) {
+        LOG_WARNING(Shader, "Mario Kart World wave fallback skipped: the lowered program branches");
         return false;
     }
     // At this point R8=(water-ground)*20, R9=water and R4=saturate(R8).

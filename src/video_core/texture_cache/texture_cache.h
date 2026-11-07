@@ -531,7 +531,8 @@ bool TextureCache<P>::PublishComputeCollisionImage(u32 index) {
     if (!view_id || !slot_image_views[view_id].image_id) {
         return false;
     }
-    Image& image = slot_images[slot_image_views[view_id].image_id];
+    const ImageId image_id = slot_image_views[view_id].image_id;
+    Image& image = slot_images[image_id];
     const auto& info = image.info;
     // The title writes a CPU-readable 256x256 pitch-linear SNORM height map.
     if (info.type != ImageType::Linear || info.format != PixelFormat::R16G16B16A16_SNORM ||
@@ -541,14 +542,12 @@ bool TextureCache<P>::PublishComputeCollisionImage(u32 index) {
         !gpu_memory->IsFullyMappedRange(image.gpu_addr, image.guest_size_bytes)) {
         return false;
     }
-    const auto copies = FullDownloadCopies(info);
-    auto map = runtime.DownloadStagingBuffer(image.unswizzled_size_bytes);
-    image.DownloadMemory(map, copies);
-    runtime.Finish();
-    SwizzleImage(*gpu_memory, image.gpu_addr, info, copies, map.mapped_span, swizzle_data_buffer);
-    image.flags &= ~ImageFlagBits::GpuModified;
+    // Downloaded with the next fence's flushes and written back once the GPU reaches that fence,
+    // as a preemptively downloaded render target is, instead of waiting for the GPU here.
+    uncommitted_downloads.emplace_back(PendingDownload{true, 0, image_id});
     return true;
 }
+
 template <class P>
 void TextureCache<P>::FillImageViews(std::span<ImageViewInOut> views, bool compute, bool blacklist) {
     bool has_blacklisted = false;
