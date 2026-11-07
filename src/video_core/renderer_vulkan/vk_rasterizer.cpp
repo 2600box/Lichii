@@ -1088,11 +1088,7 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
 
         if (mesh_draw && mesh_emulation_vertices_per_group != 0) {
             const u32 vertices{mesh_emulation_groups * mesh_emulation_vertices_per_group};
-            // EDEN_NX2_MESH_EMULATION_SKIP_DRAW=1: run the compute pass (and its render pass
-            // break) but draw nothing, to tell the emulated geometry from the break's effects.
-            static const bool skip_draw{std::getenv("EDEN_NX2_MESH_EMULATION_SKIP_DRAW") !=
-                                        nullptr};
-            if (vertices == 0 || skip_draw) {
+            if (vertices == 0) {
                 return;
             }
             if (mesh_emulation_indirect.buffer) {

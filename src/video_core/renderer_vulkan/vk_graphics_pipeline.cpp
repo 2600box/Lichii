@@ -88,10 +88,10 @@ DescriptorLayoutBuilder MakeBuilder(const Device& device, std::span<const Shader
         };
         // Mesh emulation: the mesh program's resources are read by its compute shader.
         const bool emulated{infos[index].is_mesh || infos[index].is_task};
-        const VkShaderStageFlags stage{mesh_emulation && emulated
-                                           ? VkShaderStageFlags{VK_SHADER_STAGE_COMPUTE_BIT}
-                                           : VkShaderStageFlags{
-                                                 StageFlag(infos[index], stages.at(index))}};
+        const VkShaderStageFlags stage{
+            mesh_emulation && emulated
+                ? static_cast<VkShaderStageFlags>(VK_SHADER_STAGE_COMPUTE_BIT)
+                : static_cast<VkShaderStageFlags>(StageFlag(infos[index], stages.at(index)))};
         builder.Add(infos[index], stage);
     }
     if (mesh_emulation) {

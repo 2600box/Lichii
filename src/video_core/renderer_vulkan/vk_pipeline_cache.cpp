@@ -1576,13 +1576,10 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     }
     // Mesh emulation without VK_EXT_mesh_shader (prototype): a mesh program, after an optional
     // task program, drawing triangles without per-primitive outputs, before a pixel program only.
-    // EDEN_NX2_NO_MESH_EMULATION=1 turns it off, EDEN_NX2_NO_TASK_EMULATION=1 only with a task.
     std::optional<MeshEmulationSetup> mesh_emulation;
     size_t mesh_index{};
     if (mesh_unsupported) {
         ReportUnsupportedMeshPipeline(key, programs);
-        static const bool disabled{std::getenv("EDEN_NX2_NO_MESH_EMULATION") != nullptr};
-        static const bool task_disabled{std::getenv("EDEN_NX2_NO_TASK_EMULATION") != nullptr};
         const bool has_task{key.unique_hashes[1] != 0 &&
                             programs[1].stage == Shader::Stage::Task};
         for (size_t index = 1; index < Maxwell::MaxShaderProgram; ++index) {
@@ -1591,8 +1588,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                 break;
             }
         }
-        bool eligible{!disabled && !(has_task && task_disabled) && mesh_index != 0 &&
-                      (mesh_index == 1 || has_task) && layer_source_program == nullptr};
+        bool eligible{mesh_index != 0 && (mesh_index == 1 || has_task) &&
+                      layer_source_program == nullptr};
         const Shader::IR::Program& mesh{programs[mesh_index]};
         eligible = eligible && mesh.mesh.topology == 4 && mesh.mesh.primitive_lines.empty() &&
                    !mesh.mesh.vertex_lines.empty() && mesh.mesh.max_vertices != 0 &&
