@@ -594,6 +594,8 @@ public:
 
 constexpr VkFormat LIVE_COLOR_FORMAT = VK_FORMAT_R16G16B16A16_SFLOAT;
 constexpr VkFormat EFFECTS_FORMAT = VK_FORMAT_R8_UNORM;
+// Streamline has no R8_UNORM: it rejects such a mask as "undefined format" and DLSS never sees it.
+constexpr VkFormat BIAS_FORMAT = VK_FORMAT_R16_SFLOAT;
 
 vk::Image CreateOcarinaImage(MemoryAllocator& allocator, VkExtent2D extent, VkFormat format,
                             VkImageUsageFlags usage) {
@@ -651,8 +653,8 @@ struct OcarinaEffects {
                 CreateOcarinaImage(allocator, extent, EFFECTS_FORMAT, USAGE)},
           mark_views{CreateOcarinaView(device, *marks[0], EFFECTS_FORMAT),
                      CreateOcarinaView(device, *marks[1], EFFECTS_FORMAT)},
-          bias{CreateOcarinaImage(allocator, extent, EFFECTS_FORMAT, USAGE)},
-          bias_view{CreateOcarinaView(device, *bias, EFFECTS_FORMAT)} {}
+          bias{CreateOcarinaImage(allocator, extent, BIAS_FORMAT, USAGE)},
+          bias_view{CreateOcarinaView(device, *bias, BIAS_FORMAT)} {}
 
     static constexpr VkImageUsageFlags USAGE =
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -895,7 +897,7 @@ bool OcarinaLiveDlss::Record(VkImageView color, VkImageView depth, VkImageView t
         state.queue.AddImage(*effects.bias_view);
         state.effects_bias_pass->Record(state.scheduler, state.queue.UpdateData(), *effects.bias,
                                         extent, has_previous ? 1 : 0);
-        bias = StreamlineDlssUpscaler::Image{*effects.bias_view, *effects.bias, EFFECTS_FORMAT,
+        bias = StreamlineDlssUpscaler::Image{*effects.bias_view, *effects.bias, BIAS_FORMAT,
                                              COLOR_RANGE, VK_IMAGE_ASPECT_COLOR_BIT};
     }
 

@@ -42,7 +42,7 @@ public:
         bool reset;
         bool depth_inverted = true;
         bool hdr = true; ///< Linear HDR colour. False for tonemapped, perceptually encoded colour.
-        /// R8 at the render size: 1 where DLSS should use this frame's colour instead of history.
+        /// R16F at the render size: 1 where DLSS should use this frame's colour instead of history.
         std::optional<Image> bias_current_color;
     };
 
