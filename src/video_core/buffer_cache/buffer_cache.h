@@ -6,6 +6,11 @@
 
 #pragma once
 
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+
 #include "video_core/buffer_cache/uniform_cache_history.h"
 
 #include <algorithm>
@@ -788,6 +793,28 @@ void BufferCache<P>::UnbindComputeStorageBuffers() {
     channel_state->image_compute_texture_buffers = 0;
 }
 
+// EXPERIMENT (test package only): <EDEN_NX2_DEBUG_DIR>/ssbo-mapping-size binds every native compute
+// storage buffer from its mapping again (the pre-port behaviour); checked every 250 ms.
+inline bool ExperimentMappingSize() {
+    static std::atomic<bool> enabled{false};
+    static std::atomic<s64> next_check{};
+    const s64 now = std::chrono::steady_clock::now().time_since_epoch().count();
+    if (now >= next_check.load(std::memory_order_relaxed)) {
+        next_check.store(now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                   std::chrono::milliseconds{250})
+                                   .count(),
+                         std::memory_order_relaxed);
+        const char* dir = std::getenv("EDEN_NX2_DEBUG_DIR");
+        std::error_code ec;
+        const bool on = dir != nullptr &&
+                        std::filesystem::exists(std::filesystem::path{dir} / "ssbo-mapping-size", ec);
+        if (enabled.exchange(on) != on) {
+            LOG_INFO(HW_GPU, "EXPERIMENT native SSBO mapping size {}", on ? "on" : "off");
+        }
+    }
+    return enabled.load(std::memory_order_relaxed);
+}
+
 template <class P>
 void BufferCache<P>::BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index, u32 cbuf_offset,
                                               bool is_written, u32 indirect_offset) {
@@ -836,7 +863,7 @@ void BufferCache<P>::BindComputeStorageBuffer(size_t ssbo_index, u32 cbuf_index,
         ssbo_addr = holder + indirect_offset;
     }
     channel_state->compute_storage_buffers[ssbo_index] = StorageBufferBinding(
-        ssbo_addr, cbuf_index, is_written, kepler_compute->IsDlssDispatch(), indirect_offset != ~0U);
+        ssbo_addr, cbuf_index, is_written, ExperimentMappingSize() ? kepler_compute->IsNativeMode() : kepler_compute->IsDlssDispatch(), indirect_offset != ~0U);
     if (indirect_offset != ~0U) {
         TraceTablePointer(true, 0, ssbo_index, cbuf_index, cbuf_offset, indirect_offset, holder,
                           channel_state->compute_storage_buffers[ssbo_index]);
