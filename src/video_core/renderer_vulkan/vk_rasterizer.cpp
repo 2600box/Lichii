@@ -1103,6 +1103,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         draw_func();
     }
     submitted = true;
+    buffer_cache.NoteWorkRecorded(false);
 #ifdef EGLANTINE_STREAMLINE
     constexpr u64 final_vertex = 0x16aff33d999f993fULL;
     constexpr u64 final_fragment = 0x52402d8e8ab55263ULL;
@@ -2159,6 +2160,7 @@ void RasterizerVulkan::DispatchCompute() {
                 cmdbuf.DispatchIndirect(indirect_buffer, indirect_offset);
             });
         });
+        buffer_cache.NoteWorkRecorded(true);
         SubmitNx2ListCopies();
         publish_collision_map();
         return;
@@ -2213,6 +2215,7 @@ void RasterizerVulkan::DispatchCompute() {
         // The deferred native binding may follow DLSS's command buffer bindings.
         scheduler.InvalidateState();
     }
+    buffer_cache.NoteWorkRecorded(true);
     SubmitNx2ListCopies();
     publish_collision_map();
 
