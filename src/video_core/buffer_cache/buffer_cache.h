@@ -2985,7 +2985,11 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
             // constant from them. Written pools keep a cap: a write marks the whole binding
             // GPU-modified.
             if (table_pointer && !is_written) {
-                const u64 reach = (std::min)(runtime.GetMaxStorageBufferRange(), u64{1_GiB});
+                static const u64 ab_cap = [] {
+                    const char* value = std::getenv("EDEN_NX2_AB_TABLE_CAP_MIB");
+                    return value ? std::strtoull(value, nullptr, 10) << 20 : u64{1_GiB};
+                }();
+                const u64 reach = (std::min)({runtime.GetMaxStorageBufferRange(), u64{1_GiB}, ab_cap + 64_KiB});
                 const u32 limit = static_cast<u32>(reach - (std::min)(reach, u64{64_KiB}));
                 return (std::min)(memory_layout_size, limit);
             }
