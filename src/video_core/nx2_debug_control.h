@@ -3,7 +3,9 @@
 
 #pragma once
 
+#include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <optional>
 #include <span>
@@ -17,6 +19,24 @@
 /// them at the end of each presented frame, so every cache they touch is used from its owner.
 /// Without the server nothing is posted and the per-frame cost is one relaxed atomic load.
 namespace VideoCore::Nx2Debug {
+
+inline std::atomic<int> g_sem_fast{-1};
+
+inline int EnvSwitch(const char* name) {
+    const char* value = std::getenv(name);
+    return value == nullptr ? 0 : std::atoi(value);
+}
+
+inline int SwitchValue(std::atomic<int>& value, const char* name, int fallback = 0) {
+    int current = value.load(std::memory_order_relaxed);
+    if (current < 0) {
+        int unset = -1;
+        const int initial = std::getenv(name) != nullptr ? EnvSwitch(name) : fallback;
+        value.compare_exchange_strong(unset, initial, std::memory_order_relaxed);
+        current = value.load(std::memory_order_relaxed);
+    }
+    return current;
+}
 
 struct CaptureRequest {
     u64 id;
