@@ -1102,7 +1102,8 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
     if (writes_storage) {
         scheduler.NoteRenderPassStores();
     }
-    if (optimized_ready.load(std::memory_order_acquire) && !optimized_bound) {
+    // Only once the first build is done: until then its thread may still read `pipeline`.
+    if (IsBuilt() && optimized_ready.load(std::memory_order_acquire) && !optimized_bound) {
         // Fast first build: the optimized pipeline is in. Swap on the scheduler thread, in order
         // with the draws recorded so far, and bind again; the unoptimized one stays alive for the
         // command buffers that bound it.

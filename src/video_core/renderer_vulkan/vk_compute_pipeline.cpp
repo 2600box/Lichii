@@ -667,7 +667,9 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
         return false;
     }
 
-    if (optimized_ready.load(std::memory_order_acquire) && !optimized_bound) {
+    // Only once the first build is done: until then its thread may still read `pipeline`.
+    if (is_built.load(std::memory_order::acquire) &&
+        optimized_ready.load(std::memory_order_acquire) && !optimized_bound) {
         // Fast first build: the optimized pipeline is in. Swap on the scheduler thread, in order
         // with the dispatches recorded so far (every dispatch binds the pipeline); the unoptimized
         // one stays alive for the command buffers that bound it.
