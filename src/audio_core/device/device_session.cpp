@@ -78,11 +78,11 @@ void DeviceSession::Finalize() {
     }
 }
 
-/// Start the host stream before scheduling audio ticks; propagate backend failures.
+/// Start the host stream before scheduling audio ticks; propagate input backend failures.
 Result DeviceSession::Start() {
     if (stream) {
         stream->Start();
-        if (!stream->IsReady()) {
+        if (type == Sink::StreamType::In && !stream->IsReady()) {
             return Service::Audio::ResultOperationFailed;
         }
         system.CoreTiming().ScheduleLoopingEvent(std::chrono::nanoseconds::zero(), INCREMENT_TIME,

@@ -81,8 +81,9 @@ ConfigureMicrophone::ConfigureMicrophone(Core::System& system_, QWidget* parent)
     // Devices are bound when the audio core is created.
     devices->setEnabled(!system.IsPoweredOn());
     refresh->setEnabled(!system.IsPoweredOn());
+    volume->setEnabled(!system.IsPoweredOn());
     if (system.IsPoweredOn()) {
-        status->setText(tr("Stop emulation to change the microphone input device."));
+        status->setText(tr("Stop emulation to change the microphone input device or volume."));
     }
 }
 
@@ -152,14 +153,14 @@ void ConfigureMicrophone::StopTest() {
     status->clear();
 }
 
-/// Save gain and, when emulation is stopped, the input device; release any active preview.
+/// Save gain and the input device when emulation is stopped; release any active preview.
 void ConfigureMicrophone::ApplyConfiguration() {
     StopTest();
     if (!system.IsPoweredOn()) {
         Settings::values.audio_input_device_id.SetValue(
             devices->currentData().toString().toStdString());
+        Settings::values.microphone_volume.SetValue(static_cast<u16>(volume->value()));
     }
-    Settings::values.microphone_volume.SetValue(static_cast<u16>(volume->value()));
 }
 
 void ConfigureMicrophone::hideEvent(QHideEvent* event) {

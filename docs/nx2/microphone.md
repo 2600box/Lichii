@@ -4,7 +4,7 @@ Configure -> Controls -> Microphone selects the host input device, adjusts input
 (0–200%, 100% is unchanged PCM), and provides a start/stop level test. The test uses
 the same audio backend and gain conversion as capture, works while emulation is
 stopped or paused, and closes its recording stream when the tab is hidden, settings
-are applied, or the dialog closes. Input-device changes require emulation to stop.
+are applied, or the dialog closes. Input-device and gain changes require emulation to stop.
 The existing input-device setting is retained; per-game Audio overrides still apply.
 
 Switch 2 clients can obtain `IAudioInManager` from `aud:u` command 0. This follows the
