@@ -104,6 +104,7 @@ add_executable(tests
     common/core_pinning.cpp
     common/event.cpp
     common/fibers.cpp
+    common/fs_iterate.cpp
     common/game_presets.cpp
     common/host_memory.cpp
     common/host_memory_failure.cpp
