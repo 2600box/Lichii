@@ -522,3 +522,21 @@ TEST_CASE("Gradient texture fetches read their gradients from shadowed high regi
         CHECK(std::find(begin, native,
                         Shader::Ampere::NativeRegisterCopy(0, gradients + i, 1, 240 + i)) != native);
 }
+
+TEST_CASE("Gradient texture fetch shadows keep the array layer register",
+          "[video_core][ampere][logged_numeric]") {
+    // TXD.ARRAY_2D R4, R210, R240: the coordinates are R210, R211 and the layer in R212. The
+    // gradients' shadow must not borrow the R212-R215 quartet, or its copies overwrite the layer.
+    const Instruction uniform_marker{{0x0000fc02, 0, 0, 0}};
+    const Instruction gradient{{0xd2047b6c, 0xa00000f0, 0x001e03ff, 0x000fe200}};
+    const auto lowered = LowerToMaxwell(std::array{uniform_marker, gradient, Exit});
+    INFO(lowered.error);
+    REQUIRE(lowered);
+    const auto begin = lowered.instructions.begin() + lowered.source_instruction_offsets[1];
+    const auto end = lowered.instructions.begin() + lowered.source_instruction_offsets[2];
+    const auto native = std::find_if(begin, end, [](u64 word) { return (word >> 56) == 0xde; });
+    REQUIRE(native != end);
+    CHECK(((*native >> 8) & 0xff) == 210);
+    const u32 gradients = static_cast<u32>((*native >> 20) & 0xff);
+    CHECK((gradients + 4 <= 210 || gradients >= 213));
+}
