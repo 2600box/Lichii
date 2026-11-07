@@ -218,6 +218,9 @@ public:
     bool IsGpuWrittenCommands(GPUVAddr address, size_t size);
     bool EntryPagesSeen(GPUVAddr address, size_t size);
     void MarkEntryPagesSeen(GPUVAddr address, size_t size);
+    /// A copy engine method sent to the split's back: a launch that releases its semaphore tells
+    /// the front what it writes (GpuSplit::NoteSemaphoreWrite).
+    void NoteDmaSemaphore(u32 method, u32 argument);
     /// Copies the list's words from memory again, as of suspension count `now`.
     void RefreshSnapshot(CommandList& list, u64 now);
     /// Copies the list's deferred entries (CommandList::deferred_entries) from memory.
@@ -302,6 +305,8 @@ public:
 
     std::array<Engines::EngineInterface*, max_subchannels> subchannels{};
     std::array<Engines::EngineTypes, max_subchannels> subchannel_type;
+    /// The copy engine's semaphore address (high, low) and payload as sent (NoteDmaSemaphore).
+    std::array<u32, 3> dma_semaphore{};
 
     Engines::Puller puller;
     std::mutex sync_mutex;

@@ -8,8 +8,10 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <thread>
 #include <type_traits>
+#include <unordered_map>
 
 #include "common/common_types.h"
 #include "video_core/engines/engine_interface.h"
@@ -191,8 +193,8 @@ public:
         return consumed.load(std::memory_order_acquire) < std::min(last_writer_position, write_position);
     }
     /// A host-level wait was just sent (a syncpoint acquire, a host WFI, a GP entry with its sync
-    /// bit; semaphore acquires drain): the guest's GPU work before it is complete before the
-    /// commands after it are fetched.
+    /// bit; semaphore acquires drain, or note it when a release still queued meets them): the
+    /// guest's GPU work before it is complete before the commands after it are fetched.
     void NoteSync() {
         last_sync_position = write_position;
     }
@@ -203,6 +205,17 @@ public:
     /// executed what can write memory in command order (memory_write_mask methods, deferred calls,
     /// compute and copy work) and the work before the last host-level wait, all sent so far.
     bool WaitForMemoryWriters(DrainSite site);
+    /// A semaphore release was just sent: once the back ran it, the word at `device_address` holds
+    /// `payload`, or a value the front can't tell (`known` false: a reduction, a counter report).
+    void NoteSemaphoreWrite(u64 device_address, u32 payload, bool known);
+    struct QueuedSemaphoreWrite {
+        u32 payload;
+        bool known;
+    };
+    /// The last write sent to the semaphore word at `device_address`, if the back may not have run
+    /// it yet.
+    [[nodiscard]] std::optional<QueuedSemaphoreWrite> QueuedSemaphoreWriteAt(
+        u64 device_address) const;
 
 private:
     friend struct GpuSplitTestAccess;
@@ -278,6 +291,14 @@ private:
     u64 last_writer_position{};
     u64 last_sync_position{};
     u64 last_memory_write_position{};
+    struct SemaphoreWrite {
+        u64 position; ///< write_position once it was sent
+        u32 payload;
+        bool known;
+    };
+    /// The front's NoteSemaphoreWrite, by word address.
+    std::unordered_map<u64, SemaphoreWrite> semaphore_writes;
+    size_t semaphore_writes_limit = 1024; ///< Forget what the back ran past this many
     u64 published_local{};
     u64 consumed_cache{};
     /// Words between publishes: small right after a drain, while the back has nothing to do.
