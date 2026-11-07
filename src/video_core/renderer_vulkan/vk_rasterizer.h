@@ -242,10 +242,10 @@ private:
     void TracePendingCpuWrites(bool compute, std::span<const u64> shader_hashes);
 #ifdef EGLANTINE_STREAMLINE
     bool OcarinaDlssEnabled() const;
-    void TrackOcarinaCamera(std::span<const u64> shader_hashes);
+    void TrackOcarinaCamera();
     void TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool is_indirect);
     bool TryOcarinaDlss(const ComputePipeline& pipeline, bool replace);
-    bool ReadOcarinaActor(struct OcarinaActorMesh& mesh);
+    void ReadOcarinaActor(struct OcarinaActorMesh& mesh);
 #endif
     /// Records the uniform and storage buffers of the current draw or dispatch for the frame dump.
     bool FrameDumpBuffers(bool compute, std::span<const u64> shader_hashes);
@@ -296,6 +296,8 @@ private:
     } oot_motion;
     std::unique_ptr<class OcarinaLiveDlss> oot_live_dlss;
     bool oot_live_failed{};
+    const char* oot_fallback_reason{};
+    u32 oot_fallback_repeats{};
     std::optional<u64> oot_4k_scene_frame;
     VkImage oot_4k_guest_present{};
     struct OcarinaActorPose {

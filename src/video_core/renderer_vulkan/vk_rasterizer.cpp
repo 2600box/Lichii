@@ -483,7 +483,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     }
 
 #ifdef EGLANTINE_STREAMLINE
-    TrackOcarinaCamera(pipeline->ShaderHashes());
+    TrackOcarinaCamera();
     TrackOcarinaActor(pipeline->ShaderHashes()[1], is_indexed, is_indirect);
 #endif
     TracePendingCpuWrites(false, pipeline->ShaderHashes());
@@ -2063,11 +2063,11 @@ bool RasterizerVulkan::OcarinaDlssEnabled() const {
            Settings::values.nvidia_dlss.GetValue() && Streamline::IsDlssAvailable();
 }
 
-/// Capture the two camera matrices from a draw targeting the scene color and depth.
-void RasterizerVulkan::TrackOcarinaCamera(std::span<const u64> shader_hashes) {
-    constexpr u64 scene_vertex_shader = 0x46cc6aaba42f700fULL;
-    if (!OcarinaDlssEnabled() || oot_camera_sample_frame == render_trace_frame ||
-        std::ranges::find(shader_hashes, scene_vertex_shader) == shader_hashes.end()) {
+/// Capture the two camera matrices from a draw targeting the scene color and depth. Terrain and
+/// materials draw with several vertex shaders, so any draw into a scene-sized target qualifies;
+/// the camera buffer's contents are checked below.
+void RasterizerVulkan::TrackOcarinaCamera() {
+    if (!OcarinaDlssEnabled()) {
         return;
     }
 
@@ -2078,6 +2078,12 @@ void RasterizerVulkan::TrackOcarinaCamera(std::span<const u64> shader_hashes) {
     const auto& color = texture_cache.GetImageView(targets.color_buffer_ids[0]);
     if (color.size.width < 640 || color.size.height < 360 ||
         color.format != VideoCore::Surface::PixelFormat::B10G11R11_FLOAT) {
+        return;
+    }
+    // Reflections and half-size passes share the camera layout; the upscale reads the largest.
+    if (oot_camera_sample_frame == render_trace_frame &&
+        u64{color.size.width} * color.size.height <=
+            u64{oot_motion.extent.width} * oot_motion.extent.height) {
         return;
     }
 
@@ -2160,13 +2166,13 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
 }
 
 /// Read the shared mesh only when both poses refer to the same vertex and index buffers.
-bool RasterizerVulkan::ReadOcarinaActor(OcarinaActorMesh& mesh) {
+void RasterizerVulkan::ReadOcarinaActor(OcarinaActorMesh& mesh) {
     const auto& now = oot_actor;
     const auto& before = oot_previous_actor;
     if (now.frame != render_trace_frame || before.frame + 1 != now.frame ||
         now.channel != gpu_memory || before.channel != now.channel || now.vertex != before.vertex ||
         now.indices != before.indices || now.base_vertex != before.base_vertex) {
-        return false;
+        return;
     }
     const auto read = [&](GPUVAddr address, void* dst, size_t size) {
         if (!gpu_memory->IsContinuousRange(address, size) ||
@@ -2185,24 +2191,23 @@ bool RasterizerVulkan::ReadOcarinaActor(OcarinaActorMesh& mesh) {
     constexpr size_t stride = 48;
     std::vector<u16> indices(index_count);
     if (!read(now.indices, indices.data(), indices.size() * sizeof(u16))) {
-        return false;
+        return;
     }
     const auto [minimum, maximum] = std::ranges::minmax(indices);
     const s64 first = static_cast<s64>(now.base_vertex) + minimum;
     const u32 vertex_count = static_cast<u32>(maximum) - minimum + 1;
     if (first < 0 || first > (1 << 20) || vertex_count > 16384) {
-        return false;
+        return;
     }
     std::vector<u8> vertices(vertex_count * stride);
     if (!read(now.vertex + first * stride, vertices.data(), vertices.size())) {
-        return false;
+        return;
     }
     for (u16& index : indices) {
         index -= minimum;
     }
 
     mesh = {std::move(vertices), std::move(indices), now.origin, before.origin, now.bones, before.bones};
-    return true;
 }
 
 /// Track the scene depth on its reader dispatch, or try to replace a recognized upscale dispatch.
@@ -2233,7 +2238,10 @@ bool RasterizerVulkan::TryOcarinaDlss(const ComputePipeline& pipeline, bool repl
         }
         const u32 index = gpu_memory->Read<u32>(cbuf.Address() + depth_handle_offset) & 0xfffff;
         const auto tic = read_tic(index);
-        if (tic && tic->Address()) {
+        const bool scene_size = oot_camera_sample_frame != render_trace_frame ||
+                                (tic && tic->Width() == oot_motion.extent.width &&
+                                 tic->Height() == oot_motion.extent.height);
+        if (tic && tic->Address() && scene_size) {
             oot_motion.depth_channel = gpu_memory;
             oot_motion.depth_frame = render_trace_frame;
             oot_motion.depth_tic = index;
@@ -2241,33 +2249,50 @@ bool RasterizerVulkan::TryOcarinaDlss(const ComputePipeline& pipeline, bool repl
         }
         return false;
     }
-    if (oot_camera_sample_frame != render_trace_frame || oot_motion.depth_frame != render_trace_frame ||
-        oot_motion.camera_channel != gpu_memory || oot_motion.depth_channel != gpu_memory) {
+    // Logs why the game's own upscale draws, when the reason changes and every 120th repeat.
+    const auto fail = [this](const char* reason) {
+        if (reason != oot_fallback_reason || ++oot_fallback_repeats % 120 == 0) {
+            LOG_INFO(Render_Vulkan, "Ocarina DLSS: the game's upscale draws frame {} ({})",
+                     render_trace_frame, reason);
+        }
+        if (reason != oot_fallback_reason) {
+            oot_fallback_reason = reason;
+            oot_fallback_repeats = 0;
+        }
         return false;
+    };
+    if (oot_camera_sample_frame != render_trace_frame) {
+        return fail("no scene camera this frame");
+    }
+    if (oot_motion.depth_frame != render_trace_frame) {
+        return fail("no scene depth this frame");
+    }
+    if (oot_motion.camera_channel != gpu_memory || oot_motion.depth_channel != gpu_memory) {
+        return fail("camera and depth from another channel");
     }
     const auto tic = read_tic(oot_motion.depth_tic);
     if (!tic || tic->Address() != oot_motion.depth_address ||
         tic->Width() != oot_motion.extent.width || tic->Height() != oot_motion.extent.height) {
-        return false;
+        return fail("scene depth descriptor changed");
     }
 
     texture_cache.SynchronizeDescriptors(true);
     std::array images{VideoCommon::ImageViewInOut{.index = oot_motion.depth_tic}};
     texture_cache.FillImageViews(images, true);
     if (!images[0].id) {
-        return false;
+        return fail("no scene depth image");
     }
     auto& depth = texture_cache.GetImageView(images[0].id);
     const auto* backing = depth.BackingImage();
     if (!backing || depth.IsRescaled() || depth.format != VideoCore::Surface::PixelFormat::D32_FLOAT ||
         depth.range != VideoCommon::SubresourceRange{} || backing->info.num_samples != 1) {
-        return false;
+        return fail("unsupported scene depth");
     }
 
     const auto sampled = pipeline.SampledImages();
     const auto written = pipeline.WrittenImages();
     if (sampled.size() != 1 || written.size() != 1 || !sampled[0].id || !written[0]) {
-        return false;
+        return fail("unexpected upscale bindings");
     }
     const auto& color = texture_cache.GetImageView(sampled[0].id);
     auto& target = texture_cache.GetImageView(written[0]);
@@ -2285,7 +2310,7 @@ bool RasterizerVulkan::TryOcarinaDlss(const ComputePipeline& pipeline, bool repl
         color.format != PixelFormat::E5B9G9R9_FLOAT || target.format != PixelFormat::B10G11R11_FLOAT ||
         color.size.width != extent.width || color.size.height != extent.height ||
         color.ImageHandle() == target.ImageHandle() || depth.ImageHandle() == target.ImageHandle()) {
-        return false;
+        return fail("unexpected upscale images");
     }
 
     constexpr VkFormat output_format = VK_FORMAT_B10G11R11_UFLOAT_PACK32;
@@ -2294,19 +2319,18 @@ bool RasterizerVulkan::TryOcarinaDlss(const ComputePipeline& pipeline, bool repl
         !device.IsFormatSupported(output_format, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT, FormatType::Optimal) ||
         (target.BackingImage()->UsageFlags() & VK_IMAGE_USAGE_STORAGE_BIT) == 0 ||
         MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, true, target.format).format != output_format) {
-        return false;
+        return fail("unsupported storage format");
     }
+    // Without Link's pose the mesh stays empty and the motion comes from the camera alone.
     OcarinaActorMesh mesh;
-    if (!ReadOcarinaActor(mesh)) {
-        return false;
-    }
+    ReadOcarinaActor(mesh);
     try {
         const auto target_view =
             target.StorageView(Shader::TextureType::Color2D, Shader::ImageFormat::Typeless, false);
         const auto scene_reference = upscale_4k ? target.Handle(Shader::TextureType::Color2D)
                                                 : VK_NULL_HANDLE;
         if (!target_view || (upscale_4k && !scene_reference)) {
-            return false;
+            return fail("no upscale target view");
         }
         if (!oot_live_dlss) {
             oot_live_dlss = std::make_unique<OcarinaLiveDlss>(
@@ -2318,12 +2342,16 @@ bool RasterizerVulkan::TryOcarinaDlss(const ComputePipeline& pipeline, bool repl
                                                    extent, output_extent, target_extent, oot_motion.current,
                                                    oot_motion.previous, mesh, depth.ImageHandle(),
                                                    render_trace_frame);
-        if (upscale_4k && recorded) {
+        if (!recorded) {
+            return fail("DLSS declined the frame");
+        }
+        if (upscale_4k) {
             oot_live_dlss->SaveSceneReference(scene_reference);
             oot_4k_scene_frame = render_trace_frame;
             oot_4k_guest_present = VK_NULL_HANDLE;
         }
-        return recorded;
+        oot_fallback_reason = nullptr;
+        return true;
     } catch (const vk::Exception& error) {
         LOG_WARNING(Render_Vulkan, "Ocarina DLSS unavailable: {}", error.what());
         oot_live_failed = true;

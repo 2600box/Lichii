@@ -339,8 +339,8 @@ public:
     /// Fill camera motion from depth, then overwrite visible actor pixels with skinned motion.
     void Record(Scheduler& scheduler, const void* descriptors, const Matrix& transform,
                 VkImage motion, VkExtent2D size,
-                const ActorOverlay& overlay) {
-        scheduler.Record([this, descriptors, transform, motion, size, &overlay]
+                const ActorOverlay* overlay) {
+        scheduler.Record([this, descriptors, transform, motion, size, overlay]
                          (vk::CommandBuffer cmdbuf) {
             const VkMemoryBarrier read_depth{
                 .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
@@ -375,7 +375,9 @@ public:
             };
             cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, to_overlay);
-            overlay.Draw(cmdbuf);
+            if (overlay) {
+                overlay->Draw(cmdbuf);
+            }
         });
     }
 };
@@ -712,8 +714,11 @@ bool OcarinaLiveDlss::Record(VkImageView color, VkImageView depth, VkImageView t
         current, previous, mesh.current_origin, mesh.previous_origin,
         {static_cast<f32>(extent.width), static_cast<f32>(extent.height), 0, 0},
     };
-    if (!resources.overlay ||
-        !resources.overlay->Update(state.device, mesh, actor_transforms, depth, sampler)) {
+    // Without Link's pose (dialogue, cutscenes, first person) the motion comes from the camera alone.
+    if (mesh.indices.empty()) {
+        resources.overlay.reset();
+    } else if (!resources.overlay ||
+               !resources.overlay->Update(state.device, mesh, actor_transforms, depth, sampler)) {
         resources.overlay = std::make_unique<ActorOverlay>(state.device, state.allocator, mesh,
                                                             actor_transforms, depth, sampler,
                                                             *resources.motion_view, extent);
@@ -725,7 +730,7 @@ bool OcarinaLiveDlss::Record(VkImageView color, VkImageView depth, VkImageView t
     state.queue.AddImage(*resources.motion_view);
     resources.tick = state.scheduler.CurrentTick();
     state.motion_pass.Record(state.scheduler, state.queue.UpdateData(), *transform,
-                             *resources.motion, extent, *resources.overlay);
+                             *resources.motion, extent, resources.overlay.get());
     state.queue.Acquire(state.scheduler, 2);
     state.queue.AddSampledImage(color, sampler);
     state.queue.AddImage(*resources.color_view);
