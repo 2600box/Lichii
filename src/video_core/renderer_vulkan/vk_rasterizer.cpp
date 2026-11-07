@@ -968,6 +968,20 @@ void RasterizerVulkan::DrawIndirect() {
     buffer_cache.SetDrawIndirect(nullptr);
 }
 
+VideoCommon::OotNetwork::BypassState* RasterizerVulkan::OotNetworkBypass() {
+#ifdef EGLANTINE_STREAMLINE
+    // NVIDIA DLSS replaces the same output pass and takes precedence.
+    if (OcarinaDlssEnabled()) {
+        static bool logged = false;
+        if (!std::exchange(logged, true)) {
+            LOG_INFO(Render_Vulkan, "Ocarina of Time: No sharpening is off while NVIDIA DLSS is on");
+        }
+        return nullptr;
+    }
+#endif
+    return &oot_network_bypass;
+}
+
 void RasterizerVulkan::TrackOotTonemappedImage(const GraphicsPipeline& pipeline) {
     const auto& hashes = pipeline.ShaderHashes();
     if (std::none_of(hashes.begin(), hashes.end(), VideoCommon::OotNetwork::IsTonemapShader)) {
