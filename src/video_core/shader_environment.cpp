@@ -50,8 +50,6 @@ constexpr size_t INST_SIZE = sizeof(u64);
 
 using Maxwell = Tegra::Engines::Maxwell3D::Regs;
 
-// The shader hash of lowered native code (frame dump "shaders", pipeline cache keys), with a
-// version tag that isolates this experimental ABI.
 // Constant buffer slots that held a null pointer when the program was translated and were
 // therefore not bound as storage buffers. A later non-null value makes the translation stale.
 static std::vector<std::pair<u32, u32>> NullStoragePointerSlots(
@@ -84,6 +82,8 @@ static std::vector<u64> MappedStoragePointerKeys(
     return keys;
 }
 
+// The shader hash of lowered native code (frame dump "shaders", pipeline cache keys), with a
+// version tag that isolates this experimental ABI.
 static u64 NativeShaderHash(std::span<const u64> code) {
     return Common::CityHash64(reinterpret_cast<const char*>(code.data()), code.size() * sizeof(u64)) ^
            0x4f554e4345000002ULL;
