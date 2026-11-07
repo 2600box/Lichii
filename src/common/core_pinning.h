@@ -19,7 +19,14 @@ struct LogicalProcessor {
     u32 core;
     /// Higher is faster. Equal on every processor of a CPU that is not hybrid.
     u8 efficiency_class;
+    /// Bytes of the L3 the processor sits on, 0 when unknown.
+    u32 last_level_cache_size{};
 };
+
+/// Ryzen X3D parts put a larger L3 on one CCD. When every processor has the same efficiency class
+/// but the L3 sizes differ, the processors on the largest L3 move up one class, so they count as
+/// the performance cores. Returns whether it changed anything.
+bool PreferLargestLastLevelCache(std::span<LogicalProcessor> processors);
 
 /// Physical cores of the fastest class needed before the GPU threads are pinned.
 constexpr std::size_t MinCoresForGpuThreadPinning = 6;

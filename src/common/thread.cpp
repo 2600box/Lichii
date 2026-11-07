@@ -456,7 +456,8 @@ void RememberCurrentThreadNice(pid_t tid, s32 nice_value) {
 namespace {
 // Hybrid CPUs (Intel P/E cores): Windows alone may run the emulator's time-critical threads on an
 // efficiency core, where a frame takes much longer. Keep them on the fastest cores with CPU sets
-// (a soft affinity the power manager respects) and background workers on the slower ones.
+// (a soft affinity the power manager respects) and background workers on the slower ones. Ryzen
+// X3D parts count the CCD with the larger L3 as the fast cores (PreferLargestLastLevelCache).
 // EDEN_HYBRID_CORES=0 turns this off.
 struct WindowsCpuSets {
     std::vector<Common::LogicalProcessor> processors;
@@ -491,7 +492,11 @@ const WindowsCpuSets& CpuSets() {
                  GetCurrentProcess(), 0)) {
             return result;
         }
-        u8 best = 0;
+        struct Placement {
+            WORD group;
+            BYTE logical_index;
+        };
+        std::vector<Placement> placements;
         for (ULONG offset = 0; offset + sizeof(SYSTEM_CPU_SET_INFORMATION) <= length;) {
             const auto* info =
                 reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION*>(buffer.data() + offset);
@@ -503,16 +508,57 @@ const WindowsCpuSets& CpuSets() {
                     (static_cast<u32>(info->CpuSet.Group) << 8) | info->CpuSet.CoreIndex;
                 result.processors.push_back({static_cast<u32>(info->CpuSet.Id), core,
                                              static_cast<u8>(info->CpuSet.EfficiencyClass)});
-                best = (std::max)(best, static_cast<u8>(info->CpuSet.EfficiencyClass));
+                placements.push_back({info->CpuSet.Group, info->CpuSet.LogicalProcessorIndex});
             }
             offset += info->Size;
         }
+        if (result.processors.empty()) {
+            return result;
+        }
+        DWORD cache_length = 0;
+        GetLogicalProcessorInformationEx(RelationCache, nullptr, &cache_length);
+        std::vector<u8> caches(cache_length);
+        if (cache_length != 0 &&
+            GetLogicalProcessorInformationEx(
+                RelationCache,
+                reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(caches.data()),
+                &cache_length)) {
+            for (DWORD offset = 0; offset < cache_length;) {
+                const auto* info = reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(
+                    caches.data() + offset);
+                if (info->Size == 0) {
+                    break;
+                }
+                const CACHE_RELATIONSHIP& cache = info->Cache;
+                if (info->Relationship == RelationCache && cache.Level == 3 &&
+                    (cache.Type == CacheUnified || cache.Type == CacheData)) {
+                    for (std::size_t i = 0; i < placements.size(); ++i) {
+                        const Placement& placement = placements[i];
+                        if (placement.group == cache.GroupMask.Group &&
+                            placement.logical_index < sizeof(KAFFINITY) * 8 &&
+                            ((cache.GroupMask.Mask >> placement.logical_index) & 1) != 0) {
+                            result.processors[i].last_level_cache_size = cache.CacheSize;
+                        }
+                    }
+                }
+                offset += info->Size;
+            }
+        }
+        const bool larger_l3 = Common::PreferLargestLastLevelCache(result.processors);
+        const u8 best = std::ranges::max(result.processors, {},
+                                         &Common::LogicalProcessor::efficiency_class)
+                            .efficiency_class;
         for (const Common::LogicalProcessor& processor : result.processors) {
             (processor.efficiency_class == best ? result.performance : result.efficiency)
                 .push_back(processor.id);
         }
         result.hybrid = !result.efficiency.empty() && result.performance.size() >= 2;
-        if (result.hybrid) {
+        if (result.hybrid && larger_l3) {
+            LOG_INFO(Common,
+                     "CPU with a larger L3 on {} of {} logical processors, time-critical threads "
+                     "stay on them",
+                     result.performance.size(), result.processors.size());
+        } else if (result.hybrid) {
             LOG_INFO(Common,
                      "Hybrid CPU: {} performance and {} efficiency logical processors, "
                      "time-critical threads stay on the performance cores",

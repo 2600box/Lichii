@@ -53,6 +53,15 @@ u32 CoreOf(const std::vector<LogicalProcessor>& processors, u32 id) {
     return std::ranges::find(processors, id, &LogicalProcessor::id)->core;
 }
 
+void SetLastLevelCache(std::vector<LogicalProcessor>& processors, std::size_t first,
+                       std::size_t count, u32 size) {
+    for (std::size_t i = first; i < first + count; ++i) {
+        processors[i].last_level_cache_size = size;
+    }
+}
+
+constexpr u32 MiB = 1024 * 1024;
+
 void CheckSkipped(const Common::GpuThreadPinning& plan) {
     CHECK(plan.front.empty());
     CHECK(plan.back.empty());
@@ -174,4 +183,60 @@ TEST_CASE("Core pinning: the enumeration order does not change the cores",
     CHECK(Sorted(plan.front) == expected.front);
     CHECK(Sorted(plan.back) == expected.back);
     CHECK(Sorted(plan.guest) == expected.guest);
+}
+
+TEST_CASE("Core pinning: Ryzen X3D pins the GPU threads on the V-cache CCD",
+          "[common][core_pinning]") {
+    auto processors = Uniform(16, 2);
+    SetLastLevelCache(processors, 0, 16, 96 * MiB);
+    SetLastLevelCache(processors, 16, 16, 32 * MiB);
+    REQUIRE(Common::PreferLargestLastLevelCache(processors));
+    for (std::size_t i = 0; i < processors.size(); ++i) {
+        CHECK(processors[i].efficiency_class == (i < 16 ? 1 : 0));
+    }
+    const auto plan = Common::PlanGpuThreadPinning(processors);
+    CHECK(plan.performance_cores == 8);
+    CHECK(plan.front == Ids(2, 2));
+    CHECK(plan.back == Ids(4, 2));
+    CHECK(plan.guest == Concat(Ids(0, 2), Ids(6, 10)));
+    CheckCoresAreDedicated(processors, plan);
+}
+
+TEST_CASE("Core pinning: Ryzen X3D with the V-cache on the second CCD",
+          "[common][core_pinning]") {
+    auto processors = Uniform(16, 2);
+    SetLastLevelCache(processors, 0, 16, 32 * MiB);
+    SetLastLevelCache(processors, 16, 16, 96 * MiB);
+    REQUIRE(Common::PreferLargestLastLevelCache(processors));
+    const auto plan = Common::PlanGpuThreadPinning(processors);
+    CHECK(plan.performance_cores == 8);
+    CHECK(plan.front == Ids(18, 2));
+    CHECK(plan.back == Ids(20, 2));
+    CHECK(plan.guest == Concat(Ids(16, 2), Ids(22, 10)));
+    CheckCoresAreDedicated(processors, plan);
+}
+
+TEST_CASE("Core pinning: equal L3s, hybrid classes or unknown sizes keep the classes",
+          "[common][core_pinning]") {
+    auto equal = Uniform(16, 2);
+    SetLastLevelCache(equal, 0, 32, 32 * MiB);
+    CHECK_FALSE(Common::PreferLargestLastLevelCache(equal));
+
+    std::vector<LogicalProcessor> hybrid;
+    AddCores(hybrid, 8, 2, 1);
+    AddCores(hybrid, 16, 1, 0);
+    SetLastLevelCache(hybrid, 0, 16, 36 * MiB);
+    SetLastLevelCache(hybrid, 16, 16, 4 * MiB);
+    CHECK_FALSE(Common::PreferLargestLastLevelCache(hybrid));
+
+    auto unknown = Uniform(16, 2);
+    SetLastLevelCache(unknown, 0, 16, 96 * MiB);
+    CHECK_FALSE(Common::PreferLargestLastLevelCache(unknown));
+
+    for (const auto* processors : {&equal, &unknown}) {
+        for (const LogicalProcessor& processor : *processors) {
+            CHECK(processor.efficiency_class == 0);
+        }
+    }
+    CHECK(Common::PlanGpuThreadPinning(hybrid).performance_cores == 8);
 }

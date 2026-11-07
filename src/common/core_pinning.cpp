@@ -7,6 +7,27 @@
 
 namespace Common {
 
+bool PreferLargestLastLevelCache(std::span<LogicalProcessor> processors) {
+    if (processors.empty()) {
+        return false;
+    }
+    const auto [slowest, fastest] =
+        std::ranges::minmax(processors, {}, &LogicalProcessor::efficiency_class);
+    const auto [smallest, largest] =
+        std::ranges::minmax(processors, {}, &LogicalProcessor::last_level_cache_size);
+    if (slowest.efficiency_class != fastest.efficiency_class ||
+        smallest.last_level_cache_size == 0 ||
+        smallest.last_level_cache_size == largest.last_level_cache_size) {
+        return false;
+    }
+    for (LogicalProcessor& processor : processors) {
+        if (processor.last_level_cache_size == largest.last_level_cache_size) {
+            ++processor.efficiency_class;
+        }
+    }
+    return true;
+}
+
 GpuThreadPinning PlanGpuThreadPinning(std::span<const LogicalProcessor> processors) {
     GpuThreadPinning plan;
     if (processors.empty()) {
