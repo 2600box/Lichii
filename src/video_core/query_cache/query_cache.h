@@ -311,6 +311,7 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         }
         query_base->value += streamer->GetAmendValue();
         streamer->SetAccumulationValue(query_base->value);
+        FinishReads(cpu_addr, True(query_base->flags & QueryFlagBits::HasTimestamp) ? 16 : 4);
         if (True(query_base->flags & QueryFlagBits::HasTimestamp)) {
             u64 timestamp = impl->gpu.GetTicks();
             std::memcpy(pointer_timestamp, &timestamp, sizeof(timestamp));
@@ -337,6 +338,7 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         VideoCore::g_signaling_query_report_fence = false;
     } else {
         if (!Settings::IsGPULevelHigh() && counter_type == QueryType::Payload) {
+            FinishReads(cpu_addr, has_timestamp ? 16 : 4);
             if (has_timestamp) {
                 u64 timestamp = impl->gpu.GetTicks();
                 u64 value = static_cast<u64>(payload);
@@ -624,6 +626,8 @@ bool QueryCacheBase<Traits>::SemiFlushQueryDirty(QueryCacheBase<Traits>::QueryLo
     }
     if (True(query_base->flags & QueryFlagBits::IsFinalValueSynced) &&
         False(query_base->flags & QueryFlagBits::IsGuestSynced)) {
+        FinishReads(query_base->guest_address,
+                    True(query_base->flags & QueryFlagBits::HasTimestamp) ? 8 : 4);
         auto* ptr = impl->device_memory.template GetPointer<u8>(query_base->guest_address);
         if (True(query_base->flags & QueryFlagBits::HasTimestamp)) {
             std::memcpy(ptr, &query_base->value, sizeof(query_base->value));
@@ -645,6 +649,15 @@ bool QueryCacheBase<Traits>::SemiFlushQueryDirty(QueryCacheBase<Traits>::QueryLo
     }
     return True(query_base->flags & QueryFlagBits::IsHostManaged) &&
            False(query_base->flags & QueryFlagBits::IsGuestSynced);
+}
+
+template <typename Traits>
+void QueryCacheBase<Traits>::FinishReads(DAddr address, size_t size) {
+    // SemiFlushQueryDirty asks with cache_mutex held, which no holder of the buffer cache's lock
+    // takes.
+    if (VideoCore::ReadDownloadsMayCover(address, size)) [[unlikely]] {
+        impl->rasterizer.FinishRead(address, size);
+    }
 }
 
 template <typename Traits>
