@@ -26,6 +26,7 @@
 #include "core/core.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/environment.h"
+#include "shader_recompiler/exception.h"
 #include "shader_recompiler/frontend/maxwell/control_flow.h"
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/ir_opt/passes.h"
@@ -1463,6 +1464,22 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                             key.state.patch_control_points_minus_one.Value() + 1, max_patch_size);
                 return nullptr;
             }
+        }
+    }
+    // Each stage stays within the limit on its own; together they share one descriptor set.
+    if (const u32 set_limit = host_info.max_descriptor_set_storage_buffers; set_limit != 0) {
+        size_t storage_buffers{};
+        for (size_t index = uses_vertex_a && uses_vertex_b ? 1 : 0;
+             index < Maxwell::MaxShaderProgram; ++index) {
+            if (key.unique_hashes[index] != 0) {
+                storage_buffers +=
+                    Shader::NumDescriptors(programs[index].info.storage_buffers_descriptors);
+            }
+        }
+        if (storage_buffers > set_limit) {
+            throw Shader::NotImplementedException(
+                "Binding {} storage buffers to a pipeline whose descriptor set binds {}",
+                storage_buffers, set_limit);
         }
     }
     std::array<const Shader::Info*, Maxwell::MaxShaderStage> infos{};
