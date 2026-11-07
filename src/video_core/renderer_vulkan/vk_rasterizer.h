@@ -298,6 +298,7 @@ private:
     bool oot_live_failed{};
     const char* oot_fallback_reason{};
     u32 oot_fallback_repeats{};
+    std::optional<u64> oot_dlss_frame;
     std::optional<u64> oot_4k_scene_frame;
     VkImage oot_4k_guest_present{};
     struct OcarinaActorPose {

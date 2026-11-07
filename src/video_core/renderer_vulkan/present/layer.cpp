@@ -125,19 +125,21 @@ void Layer::ConfigureDraw(const Device& device, PresentPushConstants* out_push_c
         texture_info ? texture_info->image_view : *raw_image_views[image_index];
 
     const bool already_upscaled = texture_info && texture_info->already_upscaled;
-    if (!already_upscaled) {
+    // FXAA or SMAA on top of NVIDIA DLSS's image only blurs it.
+    const bool anti_aliased = already_upscaled || (texture_info && texture_info->anti_aliased);
+    if (!anti_aliased) {
         if (auto* fxaa = std::get_if<FXAA>(&anti_alias)) {
             fxaa->Draw(device, scheduler, image_index, &source_image, &source_image_view);
         } else if (auto* smaa = std::get_if<SMAA>(&anti_alias)) {
             smaa->Draw(device, scheduler, image_index, &source_image, &source_image_view);
         }
+    }
 
 #ifdef HAS_RESHADE
-        if (post_process.has_value()) {
-            post_process->Draw(device, scheduler, image_index, &source_image, &source_image_view);
-        }
-#endif
+    if (!already_upscaled && post_process.has_value()) {
+        post_process->Draw(device, scheduler, image_index, &source_image, &source_image_view);
     }
+#endif
 
     auto crop_rect = Tegra::NormalizeCrop(framebuffer, texture_width, texture_height);
     const VkExtent2D render_extent{

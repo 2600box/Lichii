@@ -1508,14 +1508,16 @@ void RasterizerVulkan::DispatchCompute() {
     }
     scheduler.RequestOutsideRenderPassOperationContext();
     record_read_barrier();
-    if (!can_replace) {
-        scheduler.TraceComputePipeline(pipeline->ShaderHash());
-    }
 #ifdef EGLANTINE_STREAMLINE
     const auto* const replacement =
         can_replace && !byte_addressed_shadow && TryOcarinaDlss(*pipeline, true)
             ? oot_live_dlss.get()
             : nullptr;
+    if (!replacement) {
+        scheduler.TraceComputePipeline(pipeline->ShaderHash());
+    }
+#else
+    scheduler.TraceComputePipeline(pipeline->ShaderHash());
 #endif
     scheduler.Record([this, pipeline, dim, byte_addressed_shadow, bind = std::move(deferred_bind)
 #ifdef EGLANTINE_STREAMLINE
@@ -2350,6 +2352,7 @@ bool RasterizerVulkan::TryOcarinaDlss(const ComputePipeline& pipeline, bool repl
             oot_4k_scene_frame = render_trace_frame;
             oot_4k_guest_present = VK_NULL_HANDLE;
         }
+        oot_dlss_frame = render_trace_frame;
         oot_fallback_reason = nullptr;
         return true;
     } catch (const vk::Exception& error) {
@@ -2639,6 +2642,7 @@ std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
     info.scaled_width = scaled ? resolution.ScaleUp(info.width) : info.width;
     info.scaled_height = scaled ? resolution.ScaleUp(info.height) : info.height;
 #ifdef EGLANTINE_STREAMLINE
+    info.anti_aliased = oot_dlss_frame == render_trace_frame && !oot_live_dlss->EvaluationFailed();
     if (oot_4k_scene_frame == render_trace_frame && info.image &&
         info.image == oot_4k_guest_present && info.image_view &&
         info.width == 2560 && info.height == 1440 && !scaled &&
