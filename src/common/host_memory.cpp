@@ -181,7 +181,7 @@ public:
             if (void* const probe = VirtualAlloc(nullptr, backing_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE)) {
                 VirtualFree(probe, 0, MEM_RELEASE);
             }
-            if (attempt > 1) {
+            if (attempt < BackingAttempts) {
                 Sleep(50);
             }
         }
