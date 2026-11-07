@@ -1709,9 +1709,10 @@ PackResult UpdateMetadata(const fs::path& archive, const MetadataUpdate& update,
         const size_t pos = static_cast<size_t>(TocHeaderSize + u64{i} * PackageRecordSize);
         const u64 offset = read_le(toc, pos + 0x20, 8);
         const u64 size = read_le(toc, pos + 0x28, 4);
+        const u64 region_end = offset < blob_offset ? blob_offset : actual_size;
         if ((size == 0 && offset != 0) ||
-            (size != 0 && (offset < blob_offset || offset > actual_size ||
-                           size > actual_size - offset)) ||
+            (size != 0 && (offset < toc_offset + toc_size || offset > region_end ||
+                           size > region_end - offset)) ||
             size > MaxMetadataSize - total_metadata) {
             return fail(PackResult::InvalidSource, "invalid or oversized NUP metadata range");
         }
