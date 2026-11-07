@@ -798,3 +798,21 @@ TEST_CASE("Maxwell3D takes its macros back from the split's front once the split
     CHECK(engine.shadow_state.reg_array[state] == 0x1234);
     CHECK(engine.GetNativeMacroPositions()[0] == 0x40);
 }
+
+TEST_CASE("Maxwell3D keeps state written after the split stops over the front's shadow RAM",
+          "[video_core][gpu_split_dependencies]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    Fixture f;
+    VideoCommon::GpuSplit split;
+    Access::Initialize(split, f.system);
+    auto& engine = f.fast;
+    const u32 state = f.state_methods.front();
+    engine.FrontCallMethod(f.system, split, state, 0x1234, true);
+    // After the stop, DmaPusher sinks a state write and consumes the sink before the next
+    // executable method: the handback must come first so that write wins.
+    engine.method_sink.emplace_back(state, 0x5678);
+    engine.ConsumeSink(f.system);
+    engine.CallMethod(f.system, MAXWELL3D_REG_INDEX(load_mme.start_address_ptr), 0, true);
+    CHECK(engine.shadow_state.reg_array[state] == 0x5678);
+    CHECK(engine.regs.reg_array[state] == 0x5678);
+}
