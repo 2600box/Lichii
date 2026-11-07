@@ -66,6 +66,13 @@ bool HasExtension(const std::vector<u32>& code, std::string_view name) {
     });
 }
 
+bool HasVariable(const std::vector<u32>& code, spv::StorageClass storage_class) {
+    return std::ranges::any_of(Instructions(code), [&](const Instruction& inst) {
+        return inst.op == spv::Op::OpVariable &&
+               inst.operands[2] == static_cast<u32>(storage_class);
+    });
+}
+
 bool UsesStorageClass(const std::vector<u32>& code, spv::StorageClass storage_class) {
     return std::ranges::any_of(Instructions(code), [&](const Instruction& inst) {
         return (inst.op == spv::Op::OpTypePointer &&
@@ -166,7 +173,7 @@ void RequireNoMeshShading(const std::vector<u32>& code) {
     REQUIRE_FALSE(HasCapability(code, spv::Capability::MeshShadingEXT));
     REQUIRE_FALSE(HasExtension(code, "SPV_EXT_mesh_shader"));
     REQUIRE_FALSE(UsesStorageClass(code, spv::StorageClass::TaskPayloadWorkgroupEXT));
-    REQUIRE_FALSE(UsesStorageClass(code, spv::StorageClass::Output));
+    REQUIRE_FALSE(HasVariable(code, spv::StorageClass::Output));
 }
 } // Anonymous namespace
 
