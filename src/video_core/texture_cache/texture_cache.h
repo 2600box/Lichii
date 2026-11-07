@@ -551,6 +551,113 @@ void TextureCache<P>::FillImageViews(std::span<ImageViewInOut> views, bool compu
 }
 
 template <class P>
+bool TextureCache<P>::ResolveMemoizedTextures(SampledTextureMemo& memo,
+                                              std::span<const GPUVAddr> handle_addresses,
+                                              std::span<ImageViewInOut> views,
+                                              std::span<SamplerId> samplers) {
+    const auto& image_table = channel_state->graphics_image_table;
+    const auto& sampler_table = channel_state->graphics_sampler_table;
+    const bool via_header_index =
+        maxwell3d->regs.sampler_binding == Tegra::Engines::Maxwell3D::Regs::SamplerBinding::ViaHeaderBinding;
+    if (!memo.valid || memo.memory != gpu_memory || memo.image_table != &image_table ||
+        memo.image_changes != image_table.changes ||
+        memo.sampler_changes != sampler_table.changes ||
+        memo.via_header_index != via_header_index ||
+        memo.entries.size() != handle_addresses.size() || views.size() != handle_addresses.size() ||
+        samplers.size() != handle_addresses.size() ||
+        memo.host_serial != gpu_memory->HostPointerSerial()) {
+        return false;
+    }
+    // The bytes the ids came from are what they were: the handle words, then the texture and
+    // sampler descriptors they select. Nothing else decides the views and samplers.
+    for (size_t i = 0; i < handle_addresses.size(); ++i) {
+        const SampledTextureMemo::Entry& entry = memo.entries[i];
+        if (entry.handle_address != handle_addresses[i] ||
+            std::memcmp(entry.handle_host, &entry.raw, sizeof(entry.raw)) != 0 ||
+            std::memcmp(entry.tic_host, &entry.tic, sizeof(entry.tic)) != 0 ||
+            std::memcmp(entry.tsc_host, &entry.tsc, sizeof(entry.tsc)) != 0) {
+            return false;
+        }
+    }
+    has_deleted_images = false;
+    for (size_t i = 0; i < handle_addresses.size(); ++i) {
+        const SampledTextureMemo::Entry& entry = memo.entries[i];
+        views[i] = ImageViewInOut{.index = entry.view_index, .blacklist = false, .id = entry.view};
+        samplers[i] = entry.sampler;
+        PrepareImageView(entry.view, false, false);
+    }
+    if (has_deleted_images) {
+        // Preparing an image deleted others: the full path resolves the views again.
+        memo.valid = false;
+        return false;
+    }
+    return true;
+}
+
+template <class P>
+void TextureCache<P>::MemoizeTextures(SampledTextureMemo& memo,
+                                      std::span<const TextureHandleRead> reads,
+                                      std::span<const ImageViewInOut> views,
+                                      std::span<const SamplerId> samplers) {
+    memo.valid = false;
+    memo.entries.clear();
+    auto& image_table = channel_state->graphics_image_table;
+    auto& sampler_table = channel_state->graphics_sampler_table;
+    if (image_table.invalidated || sampler_table.invalidated || reads.size() != views.size() ||
+        reads.size() != samplers.size()) {
+        return;
+    }
+    const bool via_header_index =
+        maxwell3d->regs.sampler_binding == Tegra::Engines::Maxwell3D::Regs::SamplerBinding::ViaHeaderBinding;
+    const bool native_tiling = gpu_memory->UsesNativeTiling();
+    // The descriptors are read through one host page each (see DescriptorTable::Read).
+    const auto host_of = [&](GPUVAddr address, size_t size) -> const u8* {
+        if ((address & Core::Memory::YUZU_PAGEMASK) + size > Core::Memory::YUZU_PAGESIZE) {
+            return nullptr;
+        }
+        return gpu_memory->GetPointer(address);
+    };
+    for (size_t i = 0; i < reads.size(); ++i) {
+        const auto [view_index, sampler_index] = Tegra::Texture::TexturePair(reads[i].raw, via_header_index);
+        const u32 tic_index =
+            Tegra::Texture::TextureHeaderIndex(view_index, image_table.current_limit, native_tiling);
+        if (!views[i].id || !samplers[i] || tic_index > image_table.current_limit ||
+            sampler_index > sampler_table.current_limit) {
+            return;
+        }
+        SampledTextureMemo::Entry entry{
+            .handle_address = reads[i].address,
+            .handle_host = host_of(reads[i].address, sizeof(u32)),
+            .tic_host = host_of(image_table.current_gpu_addr + tic_index * sizeof(TICEntry),
+                                sizeof(TICEntry)),
+            .tsc_host = host_of(sampler_table.current_gpu_addr + sampler_index * sizeof(TSCEntry),
+                                sizeof(TSCEntry)),
+            .tic = image_table.descriptors[tic_index],
+            .tsc = sampler_table.descriptors[sampler_index],
+            .raw = reads[i].raw,
+            .view_index = view_index,
+            .view = views[i].id,
+            .sampler = samplers[i],
+        };
+        if (entry.handle_host == nullptr || entry.tic_host == nullptr || entry.tsc_host == nullptr ||
+            std::memcmp(entry.handle_host, &entry.raw, sizeof(entry.raw)) != 0 ||
+            std::memcmp(entry.tic_host, &entry.tic, sizeof(entry.tic)) != 0 ||
+            std::memcmp(entry.tsc_host, &entry.tsc, sizeof(entry.tsc)) != 0) {
+            memo.entries.clear();
+            return;
+        }
+        memo.entries.push_back(entry);
+    }
+    memo.memory = gpu_memory;
+    memo.image_table = &image_table;
+    memo.host_serial = gpu_memory->HostPointerSerial();
+    memo.image_changes = image_table.changes;
+    memo.sampler_changes = sampler_table.changes;
+    memo.via_header_index = via_header_index;
+    memo.valid = true;
+}
+
+template <class P>
 void TextureCache<P>::CheckFeedbackLoop(std::span<const ImageViewInOut> views) {
     if (!Settings::values.barrier_feedback_loops.GetValue()) {
         return;

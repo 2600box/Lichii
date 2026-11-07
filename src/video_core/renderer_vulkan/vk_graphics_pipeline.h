@@ -319,6 +319,10 @@ private:
     bool fragment_has_color0_output{};
     u32 color_output_mask{};
     bool writes_storage{};
+    /// Every texture is sampled with a handle read from a constant buffer: ConfigureImpl can
+    /// resolve them from texture_memo.
+    bool texture_memo_eligible{};
+    VideoCommon::SampledTextureMemo texture_memo;
 
     vk::DescriptorSetLayout descriptor_set_layout;
     DescriptorAllocator descriptor_allocator;

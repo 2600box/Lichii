@@ -418,6 +418,7 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
       accelerate_dma(buffer_cache, texture_cache, scheduler),
       fence_manager(*this, gpu, texture_cache, buffer_cache, query_cache, device, scheduler),
       frame_dump(device, memory_allocator, scheduler) {
+    dynamic_state_flags = DynamicStateFlags();
     scheduler.SetQueryCache(query_cache);
     buffer_cache.SetPendingCpuWrites(
         [this](const std::function<void(DAddr, size_t)>& callback) {
@@ -3163,6 +3164,73 @@ void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* pipeline) {
         flags[Dirty::PrimitiveRestartEnable] = true;
     }
 
+    namespace Experiment = VideoCommon::Nx2Experiment;
+    // The color write mask also depends on the pipeline's fragment outputs (see UpdateBlending).
+    const bool color_output_changed =
+        (pipeline != nullptr ? pipeline->ColorOutputMask() : ~0U) != last_color_output_mask;
+    if (Experiment::On(Experiment::DynamicStateSkip) && !topology_changed && !emulated_mesh &&
+        !color_output_changed && (flags & dynamic_state_flags).none()) {
+        Experiment::Count(Experiment::g_dynamic_skips);
+    } else {
+        Experiment::Count(Experiment::g_dynamic_updates);
+        UpdateFixedDynamicStates(regs, pipeline, topology, topology_changed, emulated_mesh);
+    }
+
+    if (device.IsExtVertexInputDynamicStateSupported() && !emulated_mesh) {
+        // A draw passes the pipeline it looked up: a second lookup was ~2.5% of the back thread.
+        const GraphicsPipeline* const gp =
+            pipeline != nullptr ? pipeline : pipeline_cache.CurrentGraphicsPipeline();
+        if (gp && gp->HasDynamicVertexInput()) {
+            UpdateVertexInput(regs);
+        }
+    }
+}
+
+Tegra::Engines::Maxwell3D::DirtyState::Flags RasterizerVulkan::DynamicStateFlags() const {
+    Tegra::Engines::Maxwell3D::DirtyState::Flags result;
+    const auto set = [&result](std::initializer_list<u8> flags) {
+        for (const u8 flag : flags) {
+            result[flag] = true;
+        }
+    };
+    set({Dirty::Viewports, VideoCommon::Dirty::RescaleViewports, Dirty::Scissors,
+         VideoCommon::Dirty::RescaleScissors, Dirty::DepthBias, VideoCommon::Dirty::DepthBiasGlobal,
+         Dirty::BlendConstants, Dirty::DepthBounds, Dirty::StencilProperties, Dirty::LineWidth});
+    if (device.IsExtExtendedDynamicStateSupported()) {
+        set({Dirty::CullMode, Dirty::DepthCompareOp, Dirty::FrontFace, Dirty::StencilOp,
+             Dirty::StateEnable});
+    }
+    if (device.IsExtExtendedDynamicState2Supported()) {
+        set({Dirty::PrimitiveRestartEnable, Dirty::RasterizerDiscardEnable, Dirty::DepthBiasEnable});
+    }
+    if (device.IsExtExtendedDynamicState2ExtrasSupported()) {
+        set({Dirty::LogicOp});
+    }
+    if (device.IsExtExtendedDynamicState3EnablesSupported()) {
+        set({Dirty::LogicOpEnable, Dirty::DepthClampEnable, Dirty::LineStippleEnable,
+             Dirty::ConservativeRasterizationMode, Dirty::AlphaToCoverageEnable,
+             Dirty::AlphaToOneEnable});
+        if (device.IsExtLineRasterizationSupported()) {
+            set({Dirty::LineRasterizationMode});
+        }
+        // The AMD workaround in UpdateFixedDynamicStates rewrites logic_op.enable on every draw.
+        if (device.GetDriverID() == VkDriverIdKHR::VK_DRIVER_ID_AMD_OPEN_SOURCE ||
+            device.GetDriverID() == VkDriverIdKHR::VK_DRIVER_ID_AMD_PROPRIETARY) {
+            result.set();
+        }
+    }
+    if (device.IsExtExtendedDynamicState3BlendingSupported()) {
+        set({Dirty::Blending});
+    } else if (device.IsExtColorWriteEnableSupported()) {
+        set({Dirty::ColorMask});
+    }
+    return result;
+}
+
+void RasterizerVulkan::UpdateFixedDynamicStates(Tegra::Engines::Maxwell3D::Regs& regs,
+                                                const GraphicsPipeline* pipeline,
+                                                Maxwell::PrimitiveTopology topology,
+                                                bool topology_changed, bool emulated_mesh) {
     UpdateViewportsState(regs);
     UpdateScissorsState(regs);
     UpdateDepthBias(regs);
@@ -3230,15 +3298,6 @@ void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* pipeline) {
         UpdateBlending(regs, pipeline);
     } else if (device.IsExtColorWriteEnableSupported()) {
         UpdateColorWriteEnable(regs);
-    }
-
-    if (device.IsExtVertexInputDynamicStateSupported() && !emulated_mesh) {
-        // A draw passes the pipeline it looked up: a second lookup was ~2.5% of the back thread.
-        const GraphicsPipeline* const gp =
-            pipeline != nullptr ? pipeline : pipeline_cache.CurrentGraphicsPipeline();
-        if (gp && gp->HasDynamicVertexInput()) {
-            UpdateVertexInput(regs);
-        }
     }
 }
 
