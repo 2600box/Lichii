@@ -138,6 +138,7 @@ add_executable(tests
     core/nx2_video_input_queue.cpp
     core/ldn.cpp
     core/internal_network/socket_proxy.cpp
+    core/nx2_present_queue.cpp
     core/priority_queue.cpp
     core/internal_network/network.cpp
     video_core/memory_tracker.cpp
