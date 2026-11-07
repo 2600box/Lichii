@@ -1784,6 +1784,11 @@ void Device::RemoveUnsuitableExtensions() {
             properties.subgroup_size_control.maxSubgroupSize == GuestWarpSize;
         cooperative_hmma_16x16x16 =
             usable && has_shape(16) && IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT);
+        if (std::getenv("EDEN_NX2_AB_NO_COOP_HMMA") != nullptr) {
+            LOG_WARNING(Render_Vulkan, "EDEN_NX2_AB_NO_COOP_HMMA: guest HMMA stays on the software path");
+            cooperative_hmma_16x8x16 = false;
+            cooperative_hmma_16x16x16 = false;
+        }
         extensions.cooperative_matrix = cooperative_hmma_16x8x16 || cooperative_hmma_16x16x16;
         features.cooperative_matrix.cooperativeMatrixRobustBufferAccess = VK_FALSE;
         RemoveExtensionFeatureIfUnsuitable(extensions.cooperative_matrix,

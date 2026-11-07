@@ -334,6 +334,10 @@ GraphicsPipeline::GraphicsPipeline(
         color_output_mask |= u32{stage_infos[NUM_STAGES - 1].frag_color_components[rt]}
                              << (rt * 4);
     }
+    static const bool ab_no_output_mask{std::getenv("EDEN_NX2_AB_NO_OUTPUT_MASK") != nullptr};
+    if (ab_no_output_mask) {
+        color_output_mask = ~0U;
+    }
     const auto any_written = [](const auto& descriptors) {
         return std::ranges::any_of(descriptors, [](const auto& desc) { return desc.is_written; });
     };

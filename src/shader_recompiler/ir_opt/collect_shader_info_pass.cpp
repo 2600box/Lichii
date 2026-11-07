@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+
 #include "common/alignment.h"
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/frontend/ir/modifiers.h"
@@ -817,6 +819,11 @@ void VisitUsages(Info& info, IR::Inst& inst) {
     }
 }
 
+bool AbNoMinMaxDenorms() {
+    static const bool enabled{std::getenv("EDEN_NX2_AB_NO_MINMAX_DENORM") != nullptr};
+    return enabled;
+}
+
 void VisitFpModifiers(Info& info, IR::Inst& inst) {
     switch (inst.GetOpcode()) {
     case IR::Opcode::FPAdd16:
@@ -840,11 +847,15 @@ void VisitFpModifiers(Info& info, IR::Inst& inst) {
         }
         break;
     }
+    case IR::Opcode::FPMin32:
+    case IR::Opcode::FPMax32:
+        if (AbNoMinMaxDenorms()) {
+            break;
+        }
+        [[fallthrough]];
     case IR::Opcode::FPAdd32:
     case IR::Opcode::FPFma32:
     case IR::Opcode::FPMul32:
-    case IR::Opcode::FPMin32:
-    case IR::Opcode::FPMax32:
     case IR::Opcode::FPRoundEven32:
     case IR::Opcode::FPFloor32:
     case IR::Opcode::FPCeil32:
