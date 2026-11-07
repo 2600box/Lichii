@@ -152,9 +152,11 @@ jobs:
     if: needs.changes.outputs.build == 'true'
     runs-on: windows-2022
     timeout-minutes: 120
+    # ccache rather than sccache: sccache has no direct mode for clang-cl, so every hit still ran the
+    # preprocessor and a 99% hit build took 8.5 minutes.
     env:
-      SCCACHE_DIR: ${{ github.workspace }}/.sccache
-      SCCACHE_CACHE_SIZE: 1G
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 1G
     defaults:
       run:
         shell: bash
@@ -182,14 +184,16 @@ jobs:
           modules: qtcharts
           cache: true
 
-      - name: Install sccache
+      - name: Install ccache
         shell: pwsh
         run: |
-          $zip = Join-Path $env:RUNNER_TEMP 'sccache.zip'
-          Invoke-WebRequest -OutFile $zip https://github.com/mozilla/sccache/releases/download/v0.19.0/sccache-v0.19.0-x86_64-pc-windows-msvc.zip
-          Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'sccache')
-          $bin = (Get-ChildItem -Recurse -Filter sccache.exe (Join-Path $env:RUNNER_TEMP 'sccache')).DirectoryName
-          $bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          $zip = Join-Path $env:RUNNER_TEMP 'ccache.zip'
+          Invoke-WebRequest -OutFile $zip https://github.com/ccache/ccache/releases/download/v4.14.2/ccache-4.14.2-windows-x86_64.zip
+          if ((Get-FileHash -Algorithm SHA256 $zip).Hash -ne '6993ce645e53192cec592ee23186200b574ac4c59097ecde8d9cfd681b47ae84') {
+              throw 'ccache checksum mismatch'
+          }
+          Expand-Archive $zip -DestinationPath $env:RUNNER_TEMP
+          Join-Path $env:RUNNER_TEMP 'ccache-4.14.2-windows-x86_64' | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
 
       - name: Install Vulkan SDK
         shell: pwsh
@@ -201,10 +205,10 @@ jobs:
         with:
           path: |
             .cache/cpm
-            .sccache
-          key: clang-cl-qt683-${{ runner.os }}-${{ github.sha }}
+            .ccache
+          key: clang-cl-ccache-qt683-${{ runner.os }}-${{ github.sha }}
           restore-keys: |
-            clang-cl-qt683-${{ runner.os }}-
+            clang-cl-ccache-qt683-${{ runner.os }}-
 
       - name: Configure production and tests
         run: >-
@@ -216,8 +220,6 @@ jobs:
           "-DCMAKE_AR=$LLVM_ROOT/bin/llvm-lib.exe"
           "-DCMAKE_C_FLAGS=-DWIN32 -D_WINDOWS -DNOMINMAX"
           "-DCMAKE_CXX_FLAGS=-DWIN32 -D_WINDOWS -EHsc -DNOMINMAX"
-          -DCMAKE_C_COMPILER_LAUNCHER=sccache
-          -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
           -DENABLE_WERROR=ON
           -DBUILD_TESTING=ON
           -DYUZU_TESTS=ON
@@ -229,20 +231,20 @@ jobs:
           -DYUZU_USE_BUNDLED_SDL3=ON
           -DENABLE_UPDATE_CHECKER=ON
           -DUSE_DISCORD_PRESENCE=OFF
+          -DUSE_CCACHE=ON
 
+      # The install script pins clang-cl by checksum, so it identifies the compiler without hashing
+      # the binary on every call.
       - name: Build production and tests
+        env:
+          CCACHE_COMPILERCHECK: string:${{ hashFiles('tools/windows/install-llvm.ps1') }}
         run: |
-          sccache --zero-stats
+          ccache --zero-stats
           cmake --build build --parallel
-          sccache --show-stats
+          ccache --show-stats -v
 
       - name: Run tests
         run: ctest --test-dir build --output-on-failure --no-tests=error --parallel "$NUMBER_OF_PROCESSORS"
-
-      # sccache keeps its cache files open; stop it before saving them.
-      - name: Stop sccache
-        if: always()
-        run: sccache --stop-server || true
 
       - name: Save dependencies and compiler objects
         if: always()
@@ -250,5 +252,5 @@ jobs:
         with:
           path: |
             .cache/cpm
-            .sccache
-          key: clang-cl-qt683-${{ runner.os }}-${{ github.sha }}
+            .ccache
+          key: clang-cl-ccache-qt683-${{ runner.os }}-${{ github.sha }}
