@@ -1606,6 +1606,8 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
     }
     TrackingConditions conditions{program};
     StorageInfo info;
+    // Without 64-bit integers the backend cannot route global accesses among bound buffers.
+    info.bind_competing_loaded = host_info.support_int64;
     info.iterator_words = CollectIteratorWords(program);
     info.atomic_pointers = CollectAtomicPointers(program);
     const auto collect = [&] {

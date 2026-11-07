@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <optional>
 #include <vector>
 
@@ -51,6 +52,7 @@ struct KernelProgram {
     IR::Block loop{pool};
     IR::Program program;
     TestEnvironment env;
+    bool int64{true};
 
     KernelProgram() {
         program.stage = Shader::Stage::Compute;
@@ -61,6 +63,7 @@ struct KernelProgram {
     std::vector<u32> TrackedOffsets() {
         Shader::HostTranslateInfo host{};
         host.min_ssbo_alignment = 16;
+        host.support_int64 = int64;
         Shader::Optimization::GlobalMemoryToStorageBufferPass(env, program, host);
         std::vector<u32> offsets;
         for (const auto& descriptor : program.info.storage_buffers_descriptors) {
@@ -425,14 +428,19 @@ TEST_CASE("Native accesses through a cbuf pointer or a pointer loaded from it bi
 
 TEST_CASE("Native accesses the backend cannot route keep their paired cbuf pointer",
           "[shader][storage_buffer]") {
-    // The SPIR-V backend has no global subword accesses or global exchange atomics, so these
-    // accesses are rebased on the pair rather than left global.
+    // The SPIR-V backend has no global subword accesses or global exchange atomics, and routes
+    // no global access without 64-bit integers, so these accesses are rebased on the pair rather
+    // than left global.
     const bool phi = GENERATE(false, true);
-    const bool atomic = GENERATE(false, true);
-    CAPTURE(phi, atomic);
+    const int access = GENERATE(0, 1, 2);
+    const bool atomic = access == 1;
+    CAPTURE(phi, access);
     DirectOrLoadedPointer program;
+    program.fixture.int64 = access != 2;
     const IR::U64 address{program.RecordAddress(phi)};
-    if (atomic) {
+    if (access == 2) {
+        static_cast<void>(program.record->LoadGlobal128(address));
+    } else if (atomic) {
         static_cast<void>(program.record->GlobalAtomicExchange(address, program.record->Imm32(1)));
     } else {
         static_cast<void>(program.record->LoadGlobalU16(address));
@@ -441,10 +449,12 @@ TEST_CASE("Native accesses the backend cannot route keep their paired cbuf point
     CHECK(program.fixture.TrackedOffsets() == std::vector<u32>{0x30});
     CHECK_FALSE(program.fixture.program.info.native_global_bounds);
     CHECK(program.LoadedDescriptors() == 0);
-    CHECK(program.Count(atomic ? IR::Opcode::StorageAtomicExchange32
-                               : IR::Opcode::LoadStorageU16) == 1);
-    CHECK(program.Count(atomic ? IR::Opcode::GlobalAtomicExchange32 : IR::Opcode::LoadGlobalU16) ==
-          0);
+    const std::array storage{IR::Opcode::LoadStorageU16, IR::Opcode::StorageAtomicExchange32,
+                             IR::Opcode::LoadStorage128};
+    const std::array global{IR::Opcode::LoadGlobalU16, IR::Opcode::GlobalAtomicExchange32,
+                            IR::Opcode::LoadGlobal128};
+    CHECK(program.Count(storage[access]) == 1);
+    CHECK(program.Count(global[access]) == 0);
 }
 
 TEST_CASE("Loaded pointers that compete with a pair do not take the last storage buffer",
