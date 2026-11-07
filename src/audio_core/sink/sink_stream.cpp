@@ -106,8 +106,7 @@ bool SinkStream::TryAppendOutputBlock(SinkBuffer& buffer, std::span<s16> samples
 std::vector<s16> SinkStream::ReleaseBuffer(u64 num_samples) {
     const auto frames = num_samples / system_channels;
     const auto captured = samples_buffer.Pop(frames * device_channels);
-    const auto volume{system_volume * device_volume *
-                      (Settings::values.microphone_volume.GetValue() / 100.0f)};
+    const auto volume{system_volume * device_volume};
     return ConvertInputSamples(captured, num_samples, device_channels, system_channels, volume);
 }
 
@@ -115,8 +114,7 @@ std::vector<s16> SinkStream::ReleaseBuffer(u64 num_samples) {
 std::vector<s16> SinkStream::DrainInputSamples(u64 max_frames) {
     const auto captured = samples_buffer.Pop(max_frames * device_channels);
     const auto frames = captured.size() / device_channels;
-    const auto volume = system_volume * device_volume *
-                        (Settings::values.microphone_volume.GetValue() / 100.0f);
+    const auto volume = system_volume * device_volume;
     return ConvertInputSamples(captured, frames * system_channels, device_channels, system_channels,
                                volume);
 }
