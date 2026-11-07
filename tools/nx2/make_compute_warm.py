@@ -56,6 +56,7 @@ def runtime_code(instructions, offsets):
 
 
 def read_override(path):
+    """Instructions and address map offsets of a lowered override record; raises on others."""
     data = Path(path).read_bytes()
     magic, version, source_size, count, _texture_buffer, map_count = struct.unpack_from('<6I', data)
     if magic != 0x4E454445 or version != 0x3230564F or map_count != source_size // 16:
@@ -82,6 +83,7 @@ def entry(code, workgroup, shared, local):
 
 
 def main():
+    """Lowers the dump's compute programs with shader-sweep and writes one entry per unique key."""
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--corpus', default='./corpus',
                     help='static shader dump folder (extract_static_shaders.py output)')
@@ -100,6 +102,7 @@ def main():
                 if p['stage'] == 'compute']
 
     def lower(program):
+        """Lowers one program (reusing its record); returns it with the record, None on failure."""
         record = work / f"{program['code_sha256']}.ovr"
         if not record.exists():
             # A hung or unstartable sweep counts as a failed program, as in make_graphics_warm.py,

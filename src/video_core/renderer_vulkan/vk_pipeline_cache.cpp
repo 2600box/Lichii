@@ -748,6 +748,8 @@ bool PreloadAllPipelines() {
 }
 } // Anonymous namespace
 
+/// Stops the warm-up threads, background builds and workers, then saves the used pipeline list and
+/// the driver's pipeline cache.
 PipelineCache::~PipelineCache() {
     // Stop the warm-up first: its builds use the members below.
     compute_warm_threads.clear();
@@ -933,6 +935,9 @@ ComputePipeline* PipelineCache::CurrentComputePipeline() {
                      kepler_compute->regs.code_loc.Address() + qmd.program_start, key);
 }
 
+/// Loads the title's pipeline cache from disk and builds its pipelines, reporting progress through
+/// `callback`, then (unless loading was stopped) starts the background builds and the compute
+/// warm-up.
 void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading,
                                       const VideoCore::DiskResourceLoadCallback& callback) {
     if (title_id == 0) {
@@ -1208,6 +1213,7 @@ struct WarmStamp {
     u32 cache_version{};
 };
 
+/// The marker values for `file` on this device, empty when the file's size or time cannot be read.
 std::optional<WarmStamp> CurrentStamp(const std::filesystem::path& file, const Device& device,
                                       u64 entries) {
     std::error_code ec;
@@ -1251,6 +1257,8 @@ bool WarmAlreadyDone(const std::filesystem::path& file, const std::filesystem::p
     return false;
 }
 
+/// Writes the marker for `file` next to it, or in the title's shader folder when that write
+/// fails.
 void WriteWarmMarker(const std::filesystem::path& file, const std::filesystem::path& title_file,
                      const Device& device, u64 entries) {
     const auto stamp = CurrentStamp(file, device, entries);
@@ -1274,6 +1282,7 @@ void WriteWarmMarker(const std::filesystem::path& file, const std::filesystem::p
 struct WarmProgressThrottle {
     std::atomic<s64> last{};
 
+    /// True for the first caller once 250 ms have passed since the last one it let through.
     bool Due() {
         const s64 now = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now().time_since_epoch())

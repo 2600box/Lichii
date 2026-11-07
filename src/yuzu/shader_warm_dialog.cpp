@@ -56,6 +56,7 @@ QString StageText(const std::string& stage) {
 
 } // namespace
 
+/// Builds the stage label, progress bar, result text and the Cancel/Close button.
 ShaderWarmDialog::ShaderWarmDialog(Core::System& system_, std::filesystem::path game_path_,
                                    u64 title_id_, const QString& game_name, QWidget* parent)
     : QDialog(parent), system{system_}, game_path{std::move(game_path_)}, title_id{title_id_} {
@@ -91,6 +92,7 @@ ShaderWarmDialog::ShaderWarmDialog(Core::System& system_, std::filesystem::path 
     layout->addLayout(buttons);
 }
 
+/// Stops and joins a running build.
 ShaderWarmDialog::~ShaderWarmDialog() {
     if (worker.joinable()) {
         worker.request_stop();
@@ -98,6 +100,8 @@ ShaderWarmDialog::~ShaderWarmDialog() {
     }
 }
 
+/// Starts the build on a worker thread. Progress (at most every 100 ms unless the stage changes)
+/// and the result, failures included, come back on the UI thread.
 void ShaderWarmDialog::Start() {
     if (running) {
         return;
@@ -142,6 +146,7 @@ void ShaderWarmDialog::Start() {
     });
 }
 
+/// Asks a running build to stop and disables the button until it has.
 void ShaderWarmDialog::RequestStop() {
     if (!running || stopping) {
         return;
@@ -152,6 +157,7 @@ void ShaderWarmDialog::RequestStop() {
     button->setEnabled(false);
 }
 
+/// Shows the stage and its progress; a busy bar when the total is unknown.
 void ShaderWarmDialog::OnProgress(const QString& stage, qulonglong done, qulonglong total) {
     if (stopping) {
         return;
@@ -166,6 +172,7 @@ void ShaderWarmDialog::OnProgress(const QString& stage, qulonglong done, qulongl
     }
 }
 
+/// Joins the worker and shows the result: program counts, stopped, or the error text.
 void ShaderWarmDialog::OnFinished(const ShaderWarm::Result& result, bool stopped) {
     running = false;
     if (worker.joinable()) {
@@ -202,6 +209,7 @@ void ShaderWarmDialog::OnFinished(const ShaderWarm::Result& result, bool stopped
     emit BuildFinished(result.ok);
 }
 
+/// Closing while a build runs only asks it to stop.
 void ShaderWarmDialog::closeEvent(QCloseEvent* event) {
     if (running) {
         RequestStop();
@@ -211,6 +219,7 @@ void ShaderWarmDialog::closeEvent(QCloseEvent* event) {
     QDialog::closeEvent(event);
 }
 
+/// Escape or Cancel while a build runs only asks it to stop.
 void ShaderWarmDialog::reject() {
     if (running) {
         RequestStop();

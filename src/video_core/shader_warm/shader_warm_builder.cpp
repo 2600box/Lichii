@@ -51,6 +51,7 @@ fs::path TitleDir(u64 title_id) {
            fmt::format("{:016x}", title_id);
 }
 
+/// True when `text` ends with `suffix`.
 bool EndsWith(std::string_view text, std::string_view suffix) {
     return text.size() >= suffix.size() && text.substr(text.size() - suffix.size()) == suffix;
 }
@@ -60,6 +61,7 @@ struct ArchiveFile {
     FileSys::VirtualFile file;
 };
 
+/// Appends every file under `dir` to `out`, recursively, with its '/' separated path.
 void ListFiles(const FileSys::VirtualDir& dir, const std::string& prefix,
                std::vector<ArchiveFile>& out) {
     for (const auto& file : dir->GetFiles()) {
@@ -79,6 +81,8 @@ struct GameFiles {
     std::vector<FileSys::VirtualDir> romfs;
 };
 
+/// Opens the game file and collects its RomFS trees into `game`. Returns the error text when the
+/// file cannot be opened or has no RomFS.
 std::optional<std::string> OpenGame(Core::System& system, const fs::path& game_path,
                                     GameFiles& game) {
     FileSys::VirtualFilesystem filesystem = system.GetFilesystem();
@@ -176,12 +180,14 @@ struct JobResult {
 
 class Converter {
 public:
+    /// Starts `threads` workers that convert pushed jobs until `stop` is requested.
     Converter(size_t threads, std::stop_token stop_) : stop{std::move(stop_)} {
         for (size_t i = 0; i < threads; ++i) {
             workers.emplace_back([this] { Work(); });
         }
     }
 
+    /// Lets the workers finish the queued jobs, then joins them.
     ~Converter() {
         {
             std::scoped_lock lock{mutex};
@@ -226,6 +232,8 @@ public:
     }
 
 private:
+    /// Worker loop: takes jobs in order, converts each one (skipped once stopping) and files the
+    /// result under its sequence number. Returns once closing with no job left.
     void Work() {
         Common::SetCurrentThreadName("ShaderWarmBuild");
         Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
@@ -252,6 +260,8 @@ private:
         }
     }
 
+    /// Lowers one program and makes its compute entry or graphics env record. The result is not ok
+    /// when lowering or conversion failed.
     static JobResult Convert(const Job& job) {
         JobResult result;
         try {
