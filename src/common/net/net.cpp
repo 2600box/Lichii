@@ -264,7 +264,7 @@ ReleaseList GetReleases() {
         return {.status = response.status};
     }
 
-    return {.releases = Release::ListFromJson(*response.body, url,
+    return {.releases = Release::ListFromJson(std::string_view{*response.body}, url,
                                               Common::g_build_auto_update_stable_repo),
             .ok = true,
             .status = response.status};
