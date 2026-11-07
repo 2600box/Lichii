@@ -1087,10 +1087,6 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
         }
 
         if (mesh_draw && mesh_emulation_vertices_per_group != 0) {
-            // The emulation pipeline's static input assembly and vertex input replaced the
-            // dynamic topology, primitive restart, vertex input and strides the next draw relies
-            // on, so it must set them again.
-            state_tracker.InvalidateCommandBufferState();
             const u32 vertices{mesh_emulation_groups * mesh_emulation_vertices_per_group};
             // EDEN_NX2_MESH_EMULATION_SKIP_DRAW=1: run the compute pass (and its render pass
             // break) but draw nothing, to tell the emulated geometry from the break's effects.
@@ -2707,8 +2703,14 @@ bool AccelerateDMA::BufferToImage(const Tegra::DMA::ImageCopy& copy_info,
 void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* pipeline) {
     auto& regs = maxwell3d->regs;
     auto& flags = maxwell3d->dirty.flags;
+    // A mesh emulation pipeline has static input assembly and vertex input. Binding it replaces
+    // that dynamic state, so leave it to the next regular draw to set again.
+    const bool emulated_mesh{pipeline != nullptr && pipeline->IsEmulatedMesh()};
+    if (emulated_mesh) {
+        state_tracker.InvalidateInputState();
+    }
     const auto topology = maxwell3d->draw_manager.draw_state.topology;
-    const bool topology_changed = state_tracker.ChangePrimitiveTopology(topology);
+    const bool topology_changed = !emulated_mesh && state_tracker.ChangePrimitiveTopology(topology);
     if (topology_changed) {
         flags[Dirty::DepthBiasEnable] = true;
         flags[Dirty::PrimitiveRestartEnable] = true;
@@ -2742,7 +2744,9 @@ void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* pipeline) {
     }
 
     if (device.IsExtExtendedDynamicState2Supported()) {
-        UpdatePrimitiveRestartEnable(regs);
+        if (!emulated_mesh) {
+            UpdatePrimitiveRestartEnable(regs);
+        }
         UpdateRasterizerDiscardEnable(regs);
         UpdateDepthBiasEnable(regs);
     }
@@ -2781,7 +2785,7 @@ void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* pipeline) {
         UpdateColorWriteEnable(regs);
     }
 
-    if (device.IsExtVertexInputDynamicStateSupported()) {
+    if (device.IsExtVertexInputDynamicStateSupported() && !emulated_mesh) {
         // A draw passes the pipeline it looked up: a second lookup was ~2.5% of the back thread.
         const GraphicsPipeline* const gp =
             pipeline != nullptr ? pipeline : pipeline_cache.CurrentGraphicsPipeline();
