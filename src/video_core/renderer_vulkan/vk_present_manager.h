@@ -139,7 +139,10 @@ private:
         bool lost;
     };
     bool present_wait_enabled{};
+    bool pacing_unreliable{};
     HostPacer pacer;
+    HostPacer::Clock::time_point next_refresh_query{};
+    std::optional<double> refresh_period_ns;
     u64 last_present_id{};
     std::mutex present_wait_mutex; ///< Held while waiting on a swapchain; recreation takes it
     std::mutex wait_queue_mutex;

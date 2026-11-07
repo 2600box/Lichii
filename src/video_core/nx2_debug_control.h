@@ -38,14 +38,22 @@ namespace VideoCore::Nx2Debug {
     }
     return current;
 }
-/// EDEN_NX2_HOST_PACE: the host frame pacer (vk_host_pacer.h). 1 = on (default), 0 = only
+/// EDEN_NX2_HOST_PACE: the host frame pacer (vk_host_pacer.h). 1 = on, 0 = only
 /// measure how long each frame was shown.
 inline std::atomic<int> g_host_pace{-1};
+inline std::atomic<int> g_host_fixed_refresh{-1};
+inline std::atomic<int> g_swap_interval{-1};
 
 /// The live switch called `name`, or null.
 [[nodiscard]] inline std::atomic<int>* FindSwitch(std::string_view name) {
     if (name == "EDEN_NX2_HOST_PACE") {
         return &g_host_pace;
+    }
+    if (name == "EDEN_NX2_HOST_PACE_FIXED_REFRESH") {
+        return &g_host_fixed_refresh;
+    }
+    if (name == "EDEN_NX2_SWAP_INTERVAL") {
+        return &g_swap_interval;
     }
     return nullptr;
 }

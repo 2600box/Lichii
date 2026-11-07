@@ -73,6 +73,7 @@
 #include "core/hle/service/nx2_image_layout.h"
 #include "core/hle/service/nx2_video_input_queue.h"
 #include "core/hle/service/nx2_present_pacer.h"
+#include "video_core/nx2_debug_control.h"
 #include "core/hle/service/nx2_video_ready.h"
 #include "core/hle/service/sm/sm.h"
 #include "core/hle/service/server_manager.h"
@@ -1919,10 +1920,9 @@ private:
             m_frame_trace.sleep_actual_ms = 0;
             m_frame_trace.deadline_reset = false;
         }
-        static const u32 forced_interval = [] {
-            const char* value = std::getenv("EDEN_NX2_SWAP_INTERVAL");
-            return value ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 0U;
-        }();
+        const u32 forced_interval = static_cast<u32>(std::clamp(
+            VideoCore::Nx2Debug::SwitchValue(VideoCore::Nx2Debug::g_swap_interval,
+                                           "EDEN_NX2_SWAP_INTERVAL"), 0, 4));
         const bool mkw_dynamic =
             process != nullptr && process->GetProgramId() == Settings::MarioKartWorldProgramId &&
             process->IsMkwDynamicFpsPatchApplied() && Settings::values.mkw_dynamic_fps.GetValue();
@@ -2038,9 +2038,9 @@ private:
             --m_phase.backoff;
             return;
         }
-        const double slack = static_cast<double>((deadline - now).count());
-        const double shift =
-            std::clamp(m_phase.error_ema * 0.2, -0.5e6, (std::min)(0.5e6, slack - 2e6));
+        const double shift = static_cast<double>(Nx2PresentPacer::PhaseShift(
+            m_phase.error_ema, std::chrono::duration_cast<std::chrono::nanoseconds>(deadline - now))
+                                                    .count());
         if (std::abs(m_phase.error_ema) > 1e6 && std::abs(shift) > 1e4) {
             const auto step = std::chrono::nanoseconds{static_cast<s64>(shift)};
             m_present_pacer.Shift(step);

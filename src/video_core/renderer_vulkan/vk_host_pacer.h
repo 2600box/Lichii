@@ -12,7 +12,7 @@
 
 namespace Vulkan {
 
-/// Host frame pacer (EDEN_NX2_HOST_PACE, live switch; 1 = on, the default, 0 = measure only).
+/// Host frame pacer (EDEN_NX2_HOST_PACE, live switch; 1 = on, 0 = measure only).
 ///
 /// A swapchain shows a frame at the first display refresh after it is ready. A 60 fps game on a
 /// 120 Hz display should then show every frame for two refreshes, but when its frames reach the
@@ -36,11 +36,10 @@ public:
         return pacing;
     }
 
-    /// Re-reads the switch and the display's refresh period now and then.
-    void Refresh(Clock::time_point now, bool allowed);
+    void Configure(bool enabled, std::optional<double> refresh_period_ns);
 
     /// When the next frame should be handed to the swapchain; `now` or earlier = at once.
-    [[nodiscard]] Clock::time_point Target(Clock::time_point now);
+    [[nodiscard]] Clock::time_point Target(Clock::time_point now, s64 guest_interval_ns);
 
     /// The frame was presented with `id` (0: not presented); `was_held` if Target made it wait.
     void NoteSubmitted(u64 id, Clock::time_point submitted_at, bool was_held);
@@ -75,7 +74,6 @@ private:
     bool pacing{};
     double refresh_ns{1e9 / 60.0};
     bool refresh_known{};
-    Clock::time_point next_refresh_query{};
 
     std::optional<Clock::time_point> last_queued;
     double content_ns{1e9 / 60.0};
@@ -97,6 +95,6 @@ private:
 };
 
 /// The display refresh period from the OS compositor (Windows); nullopt elsewhere or on failure.
-[[nodiscard]] std::optional<double> QueryRefreshPeriodNs();
+[[nodiscard]] std::optional<double> QueryRefreshPeriodNs(void* window);
 
 } // namespace Vulkan

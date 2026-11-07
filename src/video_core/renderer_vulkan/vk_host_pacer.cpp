@@ -5,8 +5,6 @@
 #include <cmath>
 
 #include "common/logging.h"
-#include "video_core/nx2_debug_control.h"
-#include "video_core/nx2_perf.h"
 #include "video_core/renderer_vulkan/vk_host_pacer.h"
 
 #ifdef _WIN32
@@ -25,13 +23,24 @@ Ns ToNs(double ns) {
 }
 } // Anonymous namespace
 
-std::optional<double> QueryRefreshPeriodNs() {
+std::optional<double> QueryRefreshPeriodNs([[maybe_unused]] void* window) {
 #ifdef _WIN32
+    const auto monitor = MonitorFromWindow(static_cast<HWND>(window), MONITOR_DEFAULTTONULL);
+    MONITORINFOEXW monitor_info{};
+    monitor_info.cbSize = sizeof(monitor_info);
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+    if (monitor == nullptr || !GetMonitorInfoW(monitor, &monitor_info) ||
+        !EnumDisplaySettingsW(monitor_info.szDevice, ENUM_CURRENT_SETTINGS, &mode) ||
+        mode.dmDisplayFrequency <= 1) {
+        return std::nullopt;
+    }
+    const double nominal = 1e9 / mode.dmDisplayFrequency;
     DWM_TIMING_INFO info{};
     info.cbSize = sizeof(info);
-    if (SUCCEEDED(DwmGetCompositionTimingInfo(nullptr, &info)) &&
+    if ((monitor_info.dwFlags & MONITORINFOF_PRIMARY) != 0 &&
+        SUCCEEDED(DwmGetCompositionTimingInfo(nullptr, &info)) &&
         info.rateRefresh.uiNumerator != 0 && info.rateRefresh.uiDenominator != 0) {
-        const double nominal = 1e9 * info.rateRefresh.uiDenominator / info.rateRefresh.uiNumerator;
         // The compositor's measured period: a "120 Hz" display may run at 119.98, and the game's
         // frame clock follows this (genlock). The nominal rate when it looks off.
         LARGE_INTEGER frequency{};
@@ -45,12 +54,7 @@ std::optional<double> QueryRefreshPeriodNs() {
         }
         return nominal;
     }
-    DEVMODEW mode{};
-    mode.dmSize = sizeof(mode);
-    if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode) &&
-        mode.dmDisplayFrequency > 1) {
-        return 1e9 / mode.dmDisplayFrequency;
-    }
+    return nominal;
 #endif
     return std::nullopt;
 }
@@ -66,28 +70,27 @@ void HostPacer::NoteQueued(Clock::time_point queued) {
     last_queued = queued;
 }
 
-void HostPacer::Refresh(Clock::time_point now, bool allowed) {
-    if (now >= next_refresh_query) {
-        next_refresh_query = now + std::chrono::seconds{2};
-        if (const auto period = QueryRefreshPeriodNs(); period && *period > 2e6 && *period < 50e6) {
-            if (!refresh_known || std::abs(*period - refresh_ns) > refresh_ns * 0.01) {
-                LOG_INFO(Render_Vulkan, "Host pacing: display refresh {:.4f} Hz", 1e9 / *period);
-                vblank.reset();
-            }
-            refresh_ns = *period;
-            refresh_known = true;
-        }
+void HostPacer::Configure(bool enabled, std::optional<double> refresh_period_ns) {
+    const bool known = refresh_period_ns && std::isfinite(*refresh_period_ns) &&
+                       *refresh_period_ns > 2e6 && *refresh_period_ns < 50e6;
+    const bool next_pacing = enabled && known;
+    if (next_pacing != pacing || !known || !refresh_known ||
+        std::abs(*refresh_period_ns - refresh_ns) > refresh_ns * 0.01) {
+        vblank.reset();
+        pending_intended.reset();
+        early_streak = 0;
+        lead_ns = 2e6;
     }
-    pacing = allowed && refresh_known &&
-             VideoCore::Nx2Debug::SwitchValue(VideoCore::Nx2Debug::g_host_pace,
-                                              "EDEN_NX2_HOST_PACE", 1) != 0;
-    VideoCommon::Nx2Perf::g_host_refresh_ns.store(
-        pacing ? static_cast<long long>(refresh_ns) : 0, std::memory_order_relaxed);
+    refresh_known = known;
+    if (known) {
+        refresh_ns = *refresh_period_ns;
+    }
+    pacing = next_pacing;
 }
 
-HostPacer::Clock::time_point HostPacer::Target(Clock::time_point now) {
+HostPacer::Clock::time_point HostPacer::Target(Clock::time_point now, s64 guest_interval_ns) {
     pending_intended.reset();
-    if (!pacing || !vblank || outstanding != 0) {
+    if (!pacing || !vblank || outstanding != 0 || guest_interval_ns <= 0) {
         return now;
     }
     // Refreshes per game frame, from the frame rate the game asks for: 2 for 60 fps at 120 Hz,
@@ -95,8 +98,7 @@ HostPacer::Clock::time_point HostPacer::Target(Clock::time_point now) {
     // fast frames arrive: holding frames slows the game, and the pacer then locked itself to
     // the slower rate (a loading screen's 25 ms frames held Ocarina at 40 fps). Unknown: only
     // one frame per refresh.
-    const long long guest_ns =
-        VideoCommon::Nx2Perf::g_guest_frame_interval_ns.load(std::memory_order_relaxed);
+    const s64 guest_ns = guest_interval_ns;
     const s64 k =
         guest_ns > 0
             ? (std::max<s64>)(1, static_cast<s64>(std::floor(guest_ns / refresh_ns + 0.02)))

@@ -16,6 +16,7 @@
 #include "video_core/renderer_vulkan/present/lsfg_common.h"
 #endif
 #include "video_core/nx2_perf.h"
+#include "video_core/nx2_debug_control.h"
 #include "video_core/renderer_vulkan/vk_present_manager.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
@@ -190,6 +191,9 @@ PresentManager::~PresentManager() {
         present_wait_thread.request_stop();
         present_wait_thread.join();
     }
+    VideoCommon::Nx2Perf::g_host_refresh_ns.store(0, std::memory_order_relaxed);
+    VideoCommon::Nx2Perf::g_host_phase_ns.store(-1, std::memory_order_relaxed);
+    VideoCommon::Nx2Perf::g_guest_frame_interval_ns.store(0, std::memory_order_relaxed);
 }
 
 Frame* PresentManager::GetRenderFrame() {
@@ -407,9 +411,22 @@ bool PresentManager::PaceFrame(Frame* frame, std::stop_token token) {
     const bool allowed =
         (mode == VK_PRESENT_MODE_FIFO_KHR || mode == VK_PRESENT_MODE_MAILBOX_KHR ||
          mode == VK_PRESENT_MODE_FIFO_RELAXED_KHR) &&
-        !Settings::values.frame_gen.GetValue() && Settings::values.use_speed_limit.GetValue() &&
+        Settings::CurrentProgramIsSwitch2() && !Settings::values.frame_gen.GetValue() &&
+        Settings::values.use_speed_limit.GetValue() && Settings::SpeedLimit() == 100 &&
         Settings::values.current_speed_mode.GetValue() != Settings::SpeedMode::Turbo;
-    pacer.Refresh(Clock::now(), allowed);
+    const auto now = Clock::now();
+    if (now >= next_refresh_query) {
+        next_refresh_query = now + std::chrono::seconds{2};
+        refresh_period_ns = QueryRefreshPeriodNs(render_window.GetWindowInfo().render_surface);
+    }
+    const bool enabled =
+        VideoCore::Nx2Debug::SwitchValue(VideoCore::Nx2Debug::g_host_pace,
+                                       "EDEN_NX2_HOST_PACE") == 1 &&
+        VideoCore::Nx2Debug::SwitchValue(VideoCore::Nx2Debug::g_host_fixed_refresh,
+                                       "EDEN_NX2_HOST_PACE_FIXED_REFRESH") == 1;
+    pacer.Configure(allowed && enabled && !pacing_unreliable, refresh_period_ns);
+    VideoCommon::Nx2Perf::g_host_refresh_ns.store(
+        pacer.Pacing() ? pacer.RefreshPeriod().count() : 0, std::memory_order_relaxed);
     if (const u64 want = pacer.Outstanding(); pacer.Pacing() && want != 0) {
         // The next target counts from the refresh the previous frame was shown at.
         Common::Nx2Timeline::Span span{"present: wait until shown"};
@@ -421,6 +438,10 @@ bool PresentManager::PaceFrame(Frame* frame, std::stop_token token) {
         });
     }
     DrainShown();
+    if (pacing_unreliable) {
+        pacer.Configure(false, refresh_period_ns);
+        VideoCommon::Nx2Perf::g_host_refresh_ns.store(0, std::memory_order_relaxed);
+    }
     if (!pacer.Pacing()) {
         VideoCommon::Nx2Perf::g_host_phase_ns.store(-1, std::memory_order_relaxed);
         return false;
@@ -436,13 +457,14 @@ bool PresentManager::PaceFrame(Frame* frame, std::stop_token token) {
     // getting a frame for the next one, so every frame arrived right after the last was shown
     // and waited a whole frame (~30 ms of input lag). The game's pacing lines its frames up with
     // the refreshes instead (g_host_phase_ns).
-    if (VideoCommon::Nx2Perf::g_guest_frame_interval_ns.load(std::memory_order_relaxed) >=
-        25'000'000) {
+    const auto guest_interval =
+        VideoCommon::Nx2Perf::g_guest_frame_interval_ns.load(std::memory_order_relaxed);
+    if (guest_interval >= 25'000'000) {
         VideoCommon::Nx2Perf::g_host_phase_ns.store(pacer.NsToNextRefresh(start),
                                                     std::memory_order_relaxed);
         // Only a short hold, for a frame that would be shown a refresh early (after a late
         // one): longer ones are what backed the frames up.
-        const auto target = pacer.Target(start);
+        const auto target = pacer.Target(start, guest_interval);
         if (target <= start || target - start >= pacer.RefreshPeriod()) {
             return false;
         }
@@ -459,7 +481,7 @@ bool PresentManager::PaceFrame(Frame* frame, std::stop_token token) {
         return true;
     }
     VideoCommon::Nx2Perf::g_host_phase_ns.store(-1, std::memory_order_relaxed);
-    const auto target = pacer.Target(start);
+    const auto target = pacer.Target(start, guest_interval);
     if (target <= start) {
         return false;
     }
@@ -531,6 +553,10 @@ void PresentManager::DrainShown() {
         reports.swap(shown_reports);
     }
     for (const ShownReport& report : reports) {
+        if (report.lost && !pacing_unreliable) {
+            pacing_unreliable = true;
+            LOG_WARNING(Render_Vulkan, "Host pacing disabled: present completion was lost");
+        }
         pacer.NoteShown(report.id, report.shown, report.lost);
     }
 }

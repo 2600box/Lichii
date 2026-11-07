@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <optional>
 
@@ -29,6 +30,15 @@ public:
         if (last_deadline) {
             *last_deadline += shift;
         }
+    }
+
+    static std::chrono::nanoseconds PhaseShift(double error_ns, std::chrono::nanoseconds slack) {
+        if (slack < std::chrono::milliseconds{2}) {
+            return std::chrono::nanoseconds::zero();
+        }
+        const double latest = (std::min)(500'000.0, static_cast<double>(slack.count()) - 2e6);
+        return std::chrono::nanoseconds{
+            static_cast<std::chrono::nanoseconds::rep>(std::clamp(error_ns * 0.2, -500'000.0, latest))};
     }
 
 private:

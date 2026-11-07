@@ -208,6 +208,28 @@ json Status(ToolState& state, const json& params) {
     };
 }
 
+json ExperimentSwitch(ToolState&, const json& params) {
+    const auto name = params.at("name").get<std::string>();
+    auto* value = VideoCore::Nx2Debug::FindSwitch(name);
+    if (value == nullptr) {
+        throw std::runtime_error{"unknown experiment switch"};
+    }
+    const int maximum = name == "EDEN_NX2_SWAP_INTERVAL" ? 4 : name == "EDEN_NX2_SEM_FAST" ? 2 : 1;
+    if (params.contains("value")) {
+        if (!params.at("value").is_number_integer()) {
+            throw std::runtime_error{"value must be an integer"};
+        }
+        const auto next = params.at("value").get<s64>();
+        if (next < 0 || next > maximum) {
+            throw std::runtime_error{fmt::format("value must be between 0 and {}", maximum)};
+        }
+        value->store(static_cast<int>(next), std::memory_order_relaxed);
+        LOG_INFO(Debug, "Experiment switch {}={}", name, next);
+    }
+    return {{"name", name},
+            {"value", VideoCore::Nx2Debug::SwitchValue(*value, name.c_str())}};
+}
+
 json FrameTimes(ToolState& state, const json& params) {
     const double seconds = params.value("seconds", 5.0);
     const double refresh_hz = params.value("refresh_hz", 60.0);
@@ -674,6 +696,7 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
     return {
         {"status", handler(Status)},
         {"frame_times", handler(FrameTimes)},
+        {"switch", handler(ExperimentSwitch)},
         {"screenshot", handler(Screenshot)},
         {"log_tail", handler(LogTail)},
         {"log_filter", handler(LogFilter)},
