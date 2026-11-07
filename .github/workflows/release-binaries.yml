@@ -684,16 +684,20 @@ jobs:
             echo "${appimage}${appimage:+${tar:+ · }}${tar}"
           }
           has_pgo=$(compgen -G 'dist/*-pgo.*' || true)
-          table_head() {
+          row() {
+            [[ -z "$2$3" ]] && return 0
+            if [[ -n "$has_pgo" ]]; then echo "| $1 | $2 | $3 | $4 |"; else echo "| $1 | $2 | $4 |"; fi
+          }
+          table() {
+            local rows
+            rows=$(cat)
+            [[ -z "$rows" ]] && return 0
             if [[ -n "$has_pgo" ]]; then
               printf '| Build Type | Standard | PGO (Recommended) | Notes |\n| --- | --- | --- | --- |\n'
             else
               printf '| Build Type | Standard | Notes |\n| --- | --- | --- |\n'
             fi
-          }
-          row() {
-            [[ -z "$2$3" ]] && return 0
-            if [[ -n "$has_pgo" ]]; then echo "| $1 | $2 | $3 | $4 |"; else echo "| $1 | $2 | $4 |"; fi
+            echo "$rows"
           }
           pgo_note=""
           if [[ -n "$has_pgo" ]]; then
@@ -707,22 +711,23 @@ jobs:
 
           Linux packages come as an AppImage (self-contained, needs glibc 2.39 or newer: Ubuntu 24.04, Fedora 40, Debian 13, Arch) and a tar.gz (uses your system libraries, so Qt 6 and the usual libraries must be installed).
 
-          $(table_head)
-          $(row amd64 "$(appimage_tar lichii-linux-x86_64)" "$(appimage_tar lichii-linux-x86_64-pgo)" "Make the AppImage executable (\`chmod +x\`) and run it")
-          $(row "ARM (aarch64)" "$(appimage_tar lichii-linux-aarch64)" "$(appimage_tar lichii-linux-aarch64-pgo)" "")
+          $({
+            row amd64 "$(appimage_tar lichii-linux-x86_64)" "$(appimage_tar lichii-linux-x86_64-pgo)" "Make the AppImage executable (\`chmod +x\`) and run it"
+            row "ARM (aarch64)" "$(appimage_tar lichii-linux-aarch64)" "$(appimage_tar lichii-linux-aarch64-pgo)" ""
+          } | table)
 
           ## Windows
 
           Windows packages are in-place zip files: extract and run \`lichii.exe\`, or \`eden-cli.exe\` from a terminal.
 
-          $(table_head)
-          $(row "amd64 / x86_64 (MSVC)" "$(link "MSVC zip" lichii-windows-x86_64.zip)" "" "Use if you run into graphical issues on other builds")
-          $(row "amd64 / x86_64 (MinGW)" "" "$(link "PGO zip" lichii-windows-x86_64-pgo.zip)" "Built with MinGW clang; bundles its own DLLs, no Visual C++ redistributable needed")
+          $({
+            row "amd64 / x86_64 (MSVC)" "$(link "MSVC zip" lichii-windows-x86_64.zip)" "" "Use if you run into graphical issues on other builds"
+            row "amd64 / x86_64 (MinGW)" "" "$(link "PGO zip" lichii-windows-x86_64-pgo.zip)" "Built with MinGW clang; bundles its own DLLs, no Visual C++ redistributable needed"
+          } | table)
 
           ## macOS
 
-          $(table_head)
-          $(row "arm64 (Apple Silicon)" "$(link zip lichii-macos-arm64.zip)" "" "macOS 15 or newer. Not notarized: right-click and choose Open the first time, or run \`xattr -dr com.apple.quarantine lichii.app\`. \`eden-cli\` is inside the app, in \`Contents/MacOS\`")
+          $(row "arm64 (Apple Silicon)" "$(link zip lichii-macos-arm64.zip)" "" "macOS 15 or newer. Not notarized: right-click and choose Open the first time, or run \`xattr -dr com.apple.quarantine lichii.app\`. \`eden-cli\` is inside the app, in \`Contents/MacOS\`" | table)
 
           ${pgo_note}
           EOF
