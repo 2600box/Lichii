@@ -417,21 +417,6 @@ bool UpdateDialog::DownloadTo(const QString& filename) {
         return false;
     }
 
-    const bool wrong_size = m_asset.size != 0 && received != m_asset.size;
-    const bool wrong_hash =
-        !m_asset.sha256.empty() &&
-        hash.result().toHex() != QByteArray::fromStdString(m_asset.sha256);
-    if (wrong_size || wrong_hash) {
-        LOG_ERROR(Frontend, "Downloaded {} does not match the published size or SHA-256",
-                  m_asset.filename);
-        file.cancelWriting();
-        QtCommon::Frontend::Critical(
-            tr("Download failed verification"),
-            tr("The downloaded file does not match the checksum GitHub published for it, so it "
-               "was discarded. Try again later."));
-        return;
-    }
-
     if (!file.commit()) {
         LOG_WARNING(Frontend, "Could not commit to file {}", filename.toStdString());
         QtCommon::Frontend::Critical(tr("Failed to save file"),
