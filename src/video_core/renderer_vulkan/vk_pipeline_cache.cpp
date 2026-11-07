@@ -2083,6 +2083,7 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
         spv_module.SetObjectNameEXT(name.c_str());
     }
     const bool deferred = program.info.uses_software_matrix &&
+                          !program.info.uses_cooperative_matrix &&
                           device.DefersSoftwareMatrixPipelines();
     Common::ThreadWorker* const thread_worker{deferred            ? &deferred_workers
                                               : build_in_parallel ? &workers
