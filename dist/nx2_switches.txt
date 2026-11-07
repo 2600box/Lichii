@@ -49,3 +49,6 @@ EDEN_NX2_FENCE_BATCH=1
 # dispatch.
 # =0 builds the SPIR-V as emitted, as before.
 #EDEN_NX2_COMPUTE_NOINLINE=0
+# Same for graphics stages (vertex, tessellation, geometry, fragment): monolithic pipelines,
+# pipeline libraries and the graphics warm-up. =0 builds the SPIR-V as emitted, as before.
+#EDEN_NX2_GRAPHICS_NOINLINE=0

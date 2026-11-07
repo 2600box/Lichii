@@ -361,6 +361,18 @@ void AddRuntimeSpirvTime(size_t thread, std::chrono::steady_clock::time_point be
         std::memory_order::relaxed);
 }
 
+// EDEN_NX2_GRAPHICS_NOINLINE=0 turns it off: graphics modules are then built from the SPIR-V
+// exactly as emitted. On by default: functions a graphics stage calls from several places (the
+// global memory functions of native programs) are built as calls instead of being inlined at
+// each call site, as for compute (EDEN_NX2_COMPUTE_NOINLINE, video_core/spirv_inline_control.h).
+bool GraphicsNoInline() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_GRAPHICS_NOINLINE");
+        return !(value != nullptr && value[0] == '0');
+    }();
+    return enabled;
+}
+
 vk::ShaderModule EmitShaderModule(const Device& device, const Shader::Profile& profile,
                                  const Shader::RuntimeInfo& runtime_info,
                                  Shader::IR::Program& program, Shader::Backend::Bindings& binding,
@@ -369,13 +381,29 @@ vk::ShaderModule EmitShaderModule(const Device& device, const Shader::Profile& p
                                  u128* spirv_hash = nullptr) {
     const auto code =
         EmitPipelineShader(profile, runtime_info, program, binding, shader_hash, reference);
+    // Every graphics module (monolithic pipelines, pipeline libraries, the graphics warm-up, on
+    // the GPU thread or on a worker) is made here, so the pass runs once on every path.
+    std::vector<u32> module_code(code.begin(), code.end());
+    if (GraphicsNoInline()) {
+        if (const size_t marked = VideoCommon::MarkSharedFunctionsDontInline(module_code);
+            marked != 0) {
+            static std::atomic<u32> logged{};
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 32) {
+                LOG_INFO(Render_Vulkan,
+                         "Graphics shader {:016x}: {} shared functions built as calls, not "
+                         "inlined",
+                         shader_hash, marked);
+            }
+        }
+    }
     if (spirv_hash) {
-        // Graphics pipeline libraries are keyed by the SPIR-V the stage was emitted to.
-        *spirv_hash = Common::CityHash128(reinterpret_cast<const char*>(code.data()),
-                                          code.size() * sizeof(u32));
+        // Graphics pipeline libraries are keyed by the SPIR-V handed to the driver (after the
+        // DontInline pass), so a library is only reused for the exact same module words.
+        *spirv_hash = Common::CityHash128(reinterpret_cast<const char*>(module_code.data()),
+                                          module_code.size() * sizeof(u32));
     }
     device.SaveShader(code);
-    vk::ShaderModule module{BuildShader(device, code)};
+    vk::ShaderModule module{BuildShader(device, module_code)};
 
     // Text log + .spv dump. Text log is gated by gpu_log_level != Off; .spv dump
     // is independent and gated only by gpu_log_shader_dumps.
