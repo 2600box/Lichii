@@ -12,6 +12,7 @@
 #include <type_traits>
 
 #include "common/common_types.h"
+#include "video_core/nx2_experiment.h"
 
 namespace VideoCommon {
 
@@ -40,12 +41,28 @@ concept StreamUniformReusable = requires(R& runtime, u32 size) {
     return enabled;
 }
 
+/// Graphics uniform binds by path, for the EDEN_NX2_GPU_PROFILE report (BufferCache::TickFrame).
+/// Written and read on the GPU back thread only.
+struct UniformBindStats {
+    u64 classic{};  ///< bound from the cached host buffer
+    u64 streamed{}; ///< copied to the stream buffer outside BindSmallUniformReusing
+    u64 reused{};   ///< same bytes, same command buffer: the slot's allocation bound again
+    u64 recopied{}; ///< same bytes, new command buffer: copied again
+    u64 changed{};  ///< bytes differ from the slot's previous bind
+    u64 in_place{}; ///< of the three above: compared in guest memory (ubo-inplace)
+    u64 bytes{};    ///< bytes of the streamed and checked binds
+};
+
+inline UniformBindStats g_uniform_bind_stats;
+
 template <class Ref>
 class UniformStreamReuse {
 public:
     static constexpr u32 MaxBytes = 4096; // BufferCache's DEFAULT_SKIP_CACHE_SIZE
     static constexpr size_t NumStages = 5;
     static constexpr size_t NumSlots = 18; // Maxwell constant buffers per stage
+    static constexpr u64 PageSize = 4096;  // Core::DEVICE_PAGESIZE, what GetPointer translates
+    static_assert(MaxBytes <= PageSize);
 
     struct Slot {
         Ref ref{};
@@ -82,6 +99,26 @@ inline void ResetUniformStreamReuse() noexcept {
     }
 }
 
+/// The `size` guest bytes at `device_addr` where they lie in host memory, or nullptr when they
+/// span two pages that are not contiguous there or a page is unmapped (read them instead).
+template <class Reuse, class DeviceMemory>
+[[nodiscard]] const u8* GuestBytes(DeviceMemory& device_memory, u64 device_addr, u32 size) {
+    if constexpr (requires { device_memory.template GetPointer<u8>(device_addr); }) {
+        const u8* const first = device_memory.template GetPointer<u8>(device_addr);
+        if (first == nullptr) {
+            return nullptr;
+        }
+        const u64 next_page = (device_addr | (Reuse::PageSize - 1)) + 1;
+        if (device_addr + size <= next_page) {
+            return first;
+        }
+        const u8* const second = device_memory.template GetPointer<u8>(next_page);
+        return second == first + (next_page - device_addr) ? first : nullptr;
+    } else {
+        return nullptr;
+    }
+}
+
 /// Binds the small uniform buffer at `device_addr` for (stage, cbuf `index`) through the stream
 /// buffer, reusing the slot's previous allocation when the bytes and the command buffer are the
 /// same. Returns false (nothing bound) when the buffer does not qualify, so the caller binds it
@@ -97,24 +134,41 @@ template <class Runtime, class DeviceMemory>
     }
     Reuse& reuse = UniformStreamReuseState<typename Runtime::StreamUniformRef>();
     typename Reuse::Slot& slot = reuse.slots[stage][index];
-    u8* const scratch = reuse.scratch.data();
-    device_memory.ReadBlockUnsafe(device_addr, scratch, size);
+    UniformBindStats& stats = g_uniform_bind_stats;
+    stats.bytes += size;
+    // ubo-inplace: compare against guest memory where it lies instead of reading a copy first.
+    // The stream buffer then gets the slot's copy, so it always holds exactly slot.bytes even if
+    // the guest writes between the two reads.
+    const u8* guest = nullptr;
+    if (Nx2Experiment::On(Nx2Experiment::UboInPlace)) {
+        guest = GuestBytes<Reuse>(device_memory, device_addr, size);
+    }
+    const u8* bytes = guest;
+    if (bytes == nullptr) {
+        device_memory.ReadBlockUnsafe(device_addr, reuse.scratch.data(), size);
+        bytes = reuse.scratch.data();
+    } else {
+        ++stats.in_place;
+    }
 
-    const bool same_bytes =
-        slot.size == size && std::memcmp(slot.bytes.data(), scratch, size) == 0;
+    const bool same_bytes = slot.size == size && std::memcmp(slot.bytes.data(), bytes, size) == 0;
     if (same_bytes && slot.tick == runtime.CurrentTick()) {
+        ++stats.reused;
         runtime.RebindStreamUniform(slot.ref, size);
         return true;
     }
+    if (same_bytes) {
+        ++stats.recopied;
+    } else {
+        ++stats.changed;
+        slot.size = size;
+        std::memcpy(slot.bytes.data(), bytes, size);
+    }
     const std::span<u8> span = runtime.BindMappedUniformBuffer(stage, binding_index, size);
-    std::memcpy(span.data(), scratch, size);
+    std::memcpy(span.data(), guest != nullptr ? slot.bytes.data() : bytes, size);
     slot.ref = runtime.LastStreamUniformRef();
     // After the allocation: the tick the stream region is tagged with is the one current now.
     slot.tick = runtime.CurrentTick();
-    if (!same_bytes) {
-        slot.size = size;
-        std::memcpy(slot.bytes.data(), scratch, size);
-    }
     return true;
 }
 

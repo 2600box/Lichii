@@ -218,6 +218,11 @@ private:
                        std::source_location caller) const;
     void WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size, VideoCommon::CacheType which, bool unsafe);
 
+    /// cb-write-cache: WriteBlockImpl (unsafe) of a write within one 4 KiB page outside the
+    /// Switch 2 sparse span, through the device address of the last page written while the page
+    /// table is unchanged. False when it does not apply: nothing was written.
+    bool WriteWithinCachedPage(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size);
+
     [[nodiscard]] std::size_t PageEntryIndex(GPUVAddr gpu_addr, bool is_big_page) const {
         if (is_big_page) {
             return (gpu_addr >> big_page_bits) & big_page_table_mask;
@@ -281,6 +286,11 @@ private:
     mutable std::mutex guard;
     /// Bumped after each page table change; readers keep their MappingSnapshot until then.
     std::atomic<u64> map_serial{};
+
+    /// WriteWithinCachedPage's page, its device address and the map_serial it was looked up at.
+    GPUVAddr cached_write_page = ~GPUVAddr{0};
+    DAddr cached_write_device{};
+    u64 cached_write_serial{};
 
     struct ContinuousRun {
         GPUVAddr end;

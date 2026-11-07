@@ -54,6 +54,28 @@ struct Runtime {
     }
 };
 
+/// Two guest pages; with `contiguous` off the second lies apart from the first in host memory.
+struct PagedMemory {
+    std::array<u8, 3 * 4096> host{};
+    bool contiguous = true;
+    u64 HostOffset(u64 address) const {
+        return address < 4096 || contiguous ? address : address + 4096;
+    }
+    template <typename T>
+    T* GetPointer(u64 address) {
+        return address < 2 * 4096 ? host.data() + HostOffset(address) : nullptr;
+    }
+    void ReadBlockUnsafe(u64 address, void* destination, u32 size) {
+        Check(address + size <= 2 * 4096, "read outside guest memory");
+        for (u32 i = 0; i < size; ++i) {
+            static_cast<u8*>(destination)[i] = host[HostOffset(address + i)];
+        }
+    }
+    u8& Byte(u64 address) {
+        return host[HostOffset(address)];
+    }
+};
+
 void CheckBound(const Runtime& runtime, const Memory& memory, u64 address, u32 size) {
     const auto& bytes = runtime.allocations.at(runtime.bound.allocation);
     Check(bytes.size() == size &&
@@ -113,4 +135,40 @@ TEST_CASE("Uniform stream reuse preserves data through mutation and session rese
         bind(stage, slot, address, size);
         bind(stage, slot, address, size);
     }
+}
+
+TEST_CASE("Uniform stream reuse compares in guest memory with ubo-inplace", "[video_core]") {
+    using VideoCommon::BindSmallUniformReusing;
+    namespace Experiment = VideoCommon::Nx2Experiment;
+    const u32 previous = Experiment::g_on.exchange(Experiment::UboInPlace);
+    PagedMemory memory;
+    Runtime runtime;
+    VideoCommon::ResetUniformStreamReuse<Runtime>();
+    auto bind = [&](size_t stage, u32 slot, u64 address, u32 size) {
+        Check(BindSmallUniformReusing(runtime, memory, stage, slot, slot, address, size),
+              "valid small uniform rejected");
+        const auto& bytes = runtime.allocations.at(runtime.bound.allocation);
+        Check(bytes.size() == size, "bound uniform has the wrong size");
+        for (u32 i = 0; i < size; ++i) {
+            Check(bytes[i] == memory.Byte(address + i), "bound uniform data differs from guest memory");
+        }
+    };
+    u32 random = 29;
+    for (u32 index = 0; index < 10000; ++index) {
+        random = random * 1664525U + 1013904223U;
+        memory.contiguous = (index / 101) % 2 == 0;
+        if (index % 37 == 0)
+            runtime.NextTick();
+        const u32 size = 1 + random % 4096;
+        const u64 address = (random >> 12) % (2 * 4096 - size + 1);
+        if (index % 3 == 0)
+            memory.Byte(address + random % size) ^= u8{0x5a};
+        const size_t stage = (random >> 20) % 5;
+        const u32 slot = (random >> 24) % 18;
+        bind(stage, slot, address, size);
+        const size_t allocations = runtime.allocations.size();
+        bind(stage, slot, address, size);
+        Check(runtime.allocations.size() == allocations, "identical bytes were copied twice");
+    }
+    Experiment::g_on.store(previous);
 }

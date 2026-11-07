@@ -113,6 +113,28 @@ void BufferCache<P>::TickFrame() {
     }
     runtime.TickFrame(slot_buffers);
     native_indirect_uniforms_this_frame.clear();
+    if (Nx2Profile::Enabled()) {
+        static u64 window_start = Nx2Profile::Now();
+        const u64 now = Nx2Profile::Now();
+        if (now - window_start >= 10'000'000'000ULL) {
+            UniformBindStats& stats = g_uniform_bind_stats;
+            const double seconds = static_cast<double>(now - window_start) / 1e9;
+            const auto rate = [seconds](u64 count) { return static_cast<double>(count) / seconds; };
+            const u64 copied_or_checked = stats.streamed + stats.reused + stats.recopied + stats.changed;
+            LOG_INFO(HW_GPU,
+                     "Uniform binds per second: {:.0f} classic, {:.0f} streamed, {:.0f} reused, "
+                     "{:.0f} recopied, {:.0f} changed ({:.0f} compared in place); {:.0f} KiB "
+                     "read, {:.0f} B per streamed or checked bind",
+                     rate(stats.classic), rate(stats.streamed), rate(stats.reused),
+                     rate(stats.recopied), rate(stats.changed), rate(stats.in_place),
+                     rate(stats.bytes) / 1024.0,
+                     copied_or_checked != 0 ? static_cast<double>(stats.bytes) /
+                                                  static_cast<double>(copied_or_checked)
+                                            : 0.0);
+            stats = {};
+            window_start = now;
+        }
+    }
     if (frame_tick % 600 == 0 && !uploaded_buffer_ranges.empty()) {
         for (const auto& [address, size] : uploaded_buffer_ranges) {
             device_memory.HintCold(address, size);
@@ -1373,6 +1395,7 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
             std::memset(span.data(), 0, span.size());
             std::memcpy(span.data(), words.data(), copied);
         }
+        ++g_uniform_bind_stats.streamed;
         channel_state->fast_bound_uniform_buffers[stage] |= 1u << binding_index;
         channel_state->uniform_buffer_binding_sizes[stage][binding_index] = size;
         return;
@@ -1456,10 +1479,13 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         if (!streamed) {
             const std::span<u8> span = runtime.BindMappedUniformBuffer(stage, binding_index, size);
             device_memory.ReadBlockUnsafe(device_addr, span.data(), size);
+            ++g_uniform_bind_stats.streamed;
+            g_uniform_bind_stats.bytes += size;
         }
         return;
     }
     // Classic cached path
+    ++g_uniform_bind_stats.classic;
     if (SynchronizeBuffer(buffer, device_addr, size)) {
         ++channel_state->uniform_cache_hits[0];
     }
