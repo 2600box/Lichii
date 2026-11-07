@@ -476,6 +476,8 @@ public:
     Image(Image&&) = default;
     Image& operator=(Image&&) = default;
 
+    u32 HostMipLevels() const noexcept;
+
     void UploadMemory(VkBuffer buffer, VkDeviceSize offset,
                       std::span<const VideoCommon::BufferImageCopy> copies);
 
