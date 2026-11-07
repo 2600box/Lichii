@@ -1103,6 +1103,16 @@ bool FrontSkipSame() {
     return skip;
 }
 
+// Executable methods the front drops when they keep the register's value. Draw macros write them
+// for every instance (~500,000 same values a second in Ocarina of Time); they only store the value
+// and no dirty flag covers them. index_buffer.first marks the index buffer dirty, which replaces
+// the binding an inline or small index draw left; topology_override is not part of an instance
+// loop, so any write to it ends a deferred draw.
+bool FrontDropsSameValue(u32 method) {
+    return method == MAXWELL3D_REG_INDEX(vertex_buffer.first) ||
+           method == MAXWELL3D_REG_INDEX(vertex_buffer.count);
+}
+
 } // Anonymous namespace
 
 Maxwell3D::FrontState& Maxwell3D::Front(Core::System& system, VideoCommon::GpuSplit& split) {
@@ -1175,13 +1185,10 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
         }
         fs.regs[method] = value;
     } else {
-        // Draw macros write these for every instance (~500,000 same values a second in Ocarina of
-        // Time). They only store the value, so an unchanged one is the same as a state write.
-        // topology_override is not part of an instance loop: any write to it ends a deferred draw.
         // Kept while state writes wait in the back's sink: it would consume them before the next
         // engine's work.
-        if (IsStoreOnlyExecutable(method) && DrawManager::IsInstanceLoopMethod(method) &&
-            fs.regs[method] == value && shadow_kept && fs.skip_same && !fs.sink_pending) {
+        if (FrontDropsSameValue(method) && fs.regs[method] == value && shadow_kept &&
+            fs.skip_same && !fs.sink_pending) {
             if (Profile::Enabled()) [[unlikely]] {
                 Profile::Add(Profile::Counter::SameValueWrites, 1);
             }
