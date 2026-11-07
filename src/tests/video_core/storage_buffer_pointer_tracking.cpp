@@ -334,6 +334,80 @@ TEST_CASE("Loaded global pointers do not inherit the source buffer descriptor",
     }
 }
 
+TEST_CASE("Native accesses through a cbuf pointer or a pointer loaded from it bind both",
+          "[shader][storage_buffer]") {
+    // Ocarina of Time's near-leaf pass 539ffb3f650a34ac reads its foliage unit placement records
+    // from c0[12] or from *c0[12]. Pairing the address with c0[12] alone rebased the loaded path
+    // on c0[12]'s binding, where its records read out of bounds as zeros.
+    const bool phi = GENERATE(false, true);
+    CAPTURE(phi);
+    KernelProgram fixture;
+    fixture.env.native = true;
+    IR::Block taken{fixture.pool};
+    IR::Block merge{fixture.pool};
+    IR::IREmitter ir{fixture.entry};
+    const IR::U32 lane{ir.LocalInvocationIdX()};
+    const IR::Value loaded{ir.LoadGlobal64(Address(ir, Word(ir, 0x30), Word(ir, 0x34)))};
+    const IR::U32 loaded_low{ir.CompositeExtract(loaded, 0)};
+    const IR::U32 loaded_high{ir.CompositeExtract(loaded, 1)};
+    const IR::U1 direct{ir.ILessThan(lane, ir.Imm32(16), false)};
+    IR::U32 low;
+    IR::U32 high;
+    IR::Block* access{&fixture.entry};
+    if (phi) {
+        fixture.entry.AddBranch(&taken);
+        fixture.entry.AddBranch(&merge);
+        taken.AddBranch(&merge);
+        fixture.program.blocks = {&fixture.entry, &taken, &merge};
+        fixture.program.post_order_blocks = {&merge, &taken, &fixture.entry};
+        for (u32 index = 0; index < fixture.program.blocks.size(); ++index) {
+            fixture.program.blocks[index]->SetOrder(index);
+        }
+        IR::IREmitter direct_ir{taken};
+        const IR::U32 direct_low{Word(direct_ir, 0x30)};
+        const IR::U32 direct_high{Word(direct_ir, 0x34)};
+        merge.AppendNewInst(IR::Opcode::Phi, {});
+        IR::Inst* const low_phi{&merge.back()};
+        low_phi->SetFlags(IR::Type::U32);
+        merge.AppendNewInst(IR::Opcode::Phi, {});
+        IR::Inst* const high_phi{&merge.back()};
+        high_phi->SetFlags(IR::Type::U32);
+        low_phi->AddPhiOperand(&fixture.entry, loaded_low);
+        low_phi->AddPhiOperand(&taken, direct_low);
+        high_phi->AddPhiOperand(&fixture.entry, loaded_high);
+        high_phi->AddPhiOperand(&taken, direct_high);
+        low = IR::U32{IR::Value{low_phi}};
+        high = IR::U32{IR::Value{high_phi}};
+        access = &merge;
+    } else {
+        low = IR::U32{ir.Select(direct, Word(ir, 0x30), loaded_low)};
+        high = IR::U32{ir.Select(direct, Word(ir, 0x34), loaded_high)};
+    }
+    IR::IREmitter record{*access};
+    const IR::U32 offset{record.ShiftLeftLogical(record.LocalInvocationIdX(), record.Imm32(4))};
+    static_cast<void>(record.LoadGlobal128(Address(record, record.IAdd(low, offset), high)));
+
+    CHECK(fixture.TrackedOffsets() == std::vector<u32>{0x30, 0x30});
+    CHECK(fixture.program.info.native_global_bounds);
+    const auto& descriptors{fixture.program.info.storage_buffers_descriptors};
+    CHECK(std::ranges::count_if(descriptors,
+                                [](const auto& desc) { return desc.indirect_offset == ~0U; }) == 1);
+    CHECK(std::ranges::count_if(descriptors,
+                                [](const auto& desc) { return desc.indirect_offset == 0; }) == 1);
+    const auto count = [&](IR::Opcode opcode) {
+        std::ptrdiff_t total{};
+        for (const IR::Block* const block : fixture.program.blocks) {
+            total += std::ranges::count_if(block->Instructions(), [=](const IR::Inst& inst) {
+                return inst.GetOpcode() == opcode;
+            });
+        }
+        return total;
+    };
+    CHECK(count(IR::Opcode::LoadStorage64) == 1);
+    CHECK(count(IR::Opcode::LoadGlobal128) == 1);
+    CHECK(count(IR::Opcode::LoadStorage128) == 0);
+}
+
 TEST_CASE("NVN fallback descriptors use guest slots rather than compact binding indices",
           "[shader][storage_buffer]") {
     Shader::Info info{};
