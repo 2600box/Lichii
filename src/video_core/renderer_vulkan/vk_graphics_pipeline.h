@@ -285,7 +285,7 @@ private:
     bool ConfigureDraw(const RescalingPushConstant& rescaling,
                        const RenderAreaPushConstant& render_are);
 
-    void MakePipeline(VkRenderPass render_pass);
+    vk::Pipeline MakePipeline(VkRenderPass render_pass, bool fast);
 
     void Validate();
 
@@ -325,6 +325,13 @@ private:
     vk::PipelineLayout pipeline_layout;
     vk::DescriptorUpdateTemplate descriptor_update_template;
     vk::Pipeline pipeline;
+    /// Fast first build (FastFirstBuildEnabled): the optimized pipeline once its build is done, and
+    /// the unoptimized one kept alive after the swap for the command buffers that bound it.
+    vk::Pipeline optimized_pipeline;
+    vk::Pipeline retired_pipeline;
+    std::atomic_bool optimized_ready{};
+    bool optimized_bound{};
+    Common::ThreadWorker* const build_workers;
 
     DescriptorBufferLayout descriptor_buffer_layout;
     std::vector<DescriptorUpdateEntry> last_descriptor_payload;
@@ -356,6 +363,9 @@ private:
     std::array<MeshEmulationBuffer, 4> mesh_task_buffers{};
     u32 mesh_capacity{};
 
+    /// Declared before `build`: destroyed after it, so the first build (which starts this one)
+    /// has finished when this one is waited for.
+    std::optional<PipelineBuild> optimized_build;
     std::optional<PipelineBuild> build;
 };
 
