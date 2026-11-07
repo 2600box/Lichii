@@ -26,9 +26,12 @@ enum Switch : u32 {
     TextureMemo = 16,  ///< texture-memo: a draw's sampled textures are resolved from the last draw's
     TextureMemoVerify = 32, ///< texture-memo-verify: with texture-memo, also resolve in full and compare
     DynamicStateSkip = 64,  ///< dynamic-state-skip: no dynamic state update while no flag is dirty
+    GeometryMemo = 128,     ///< geometry-memo: index/vertex lookups kept while their inputs hold
+    GeometrySyncSkip = 256, ///< geometry-sync-skip: no upload scan of unwritten index/vertex ranges
+    NativePreflush = 512,   ///< native-preflush: Switch 2 CPU reads mark pages for fence downloads
 };
 
-inline constexpr std::array<std::pair<Switch, const char*>, 7> switch_files{{
+inline constexpr std::array<std::pair<Switch, const char*>, 10> switch_files{{
     {BackPicksOff, "back-perf-off"},
     {EntryWaitSkip, "entry-wait-skip"},
     {UboInPlace, "ubo-inplace"},
@@ -36,6 +39,9 @@ inline constexpr std::array<std::pair<Switch, const char*>, 7> switch_files{{
     {TextureMemo, "texture-memo"},
     {TextureMemoVerify, "texture-memo-verify"},
     {DynamicStateSkip, "dynamic-state-skip"},
+    {GeometryMemo, "geometry-memo"},
+    {GeometrySyncSkip, "geometry-sync-skip"},
+    {NativePreflush, "native-preflush"},
 }};
 
 inline std::atomic<u32> g_on{0};

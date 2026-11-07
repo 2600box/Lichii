@@ -62,6 +62,9 @@ enum class Zone : u32 {
     WriterWait,
     ListSubmitWait,
     ListGpuWait,
+    UpdateGeometryBuffers, ///< Index, vertex and transform feedback buffers looked up
+    UpdateStageBuffers,    ///< Uniform, storage and texture buffers looked up for each stage
+    BindGeometryBuffers,   ///< Index, vertex, transform feedback and indirect buffers bound
     Count,
 };
 
@@ -73,7 +76,8 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "descriptor acquire", "bind stage buffers", "push descriptors", "render targets",
     "configure draw", "dynamic state", "draw record", "texture upload", "fence",
     "fence skipped", "method", "split drain", "split wait",
-    "writer wait", "list submit wait", "list GPU wait",
+    "writer wait", "list submit wait", "list GPU wait", "update geometry buffers",
+    "update stage buffers", "bind geometry buffers",
 };
 
 // A plain flag: Enabled() runs several times per method write (no guard to check).

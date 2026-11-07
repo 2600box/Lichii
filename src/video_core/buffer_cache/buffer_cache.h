@@ -25,6 +25,7 @@
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
+#include "video_core/nx2_experiment.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/texture_cache/util.h"
@@ -113,7 +114,7 @@ void BufferCache<P>::TickFrame() {
     }
     runtime.TickFrame(slot_buffers);
     native_indirect_uniforms_this_frame.clear();
-    if (Nx2Profile::Enabled()) {
+    {
         static u64 window_start = Nx2Profile::Now();
         const u64 now = Nx2Profile::Now();
         if (now - window_start >= 10'000'000'000ULL) {
@@ -134,6 +135,15 @@ void BufferCache<P>::TickFrame() {
             stats = {};
             window_start = now;
         }
+    }
+    if (const GeometryStats& stats = geometry_stats;
+        frame_tick % 600 == 0 && stats.index_lookups + stats.vertex_lookups + stats.syncs != 0) {
+        LOG_INFO(HW_GPU,
+                 "EXPERIMENT geometry in 600 frames: {} of {} index lookups kept, {} of {} vertex "
+                 "lookups kept, {} of {} upload scans skipped, {} verify mismatches",
+                 stats.index_kept, stats.index_lookups, stats.vertex_kept, stats.vertex_lookups,
+                 stats.syncs_skipped, stats.syncs, stats.verify_mismatches);
+        geometry_stats = {};
     }
     if (frame_tick % 600 == 0 && !uploaded_buffer_ranges.empty()) {
         for (const auto& [address, size] : uploaded_buffer_ranges) {
@@ -305,7 +315,8 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
                                            device_addr_end_aligned - device_addr_start_aligned);
     // A preflushable mark persists and downloads later GPU writes at every fence. Native titles
     // instead keep read traps and flush on demand.
-    const bool preflush = !Tegra::g_nx2_ampere.load(std::memory_order_relaxed);
+    const bool preflush = !Tegra::g_nx2_ampere.load(std::memory_order_relaxed) ||
+                          Nx2Experiment::On(Nx2Experiment::NativePreflush);
     if (!area->preemtive) {
         if (Nx2DownloadTrace::g_enabled) [[unlikely]] {
             Nx2DownloadTrace::Marked(device_addr_start_aligned,
@@ -314,13 +325,13 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
         if (preflush) {
             memory_tracker.MarkRegionAsPreflushable(
                 device_addr_start_aligned, device_addr_end_aligned - device_addr_start_aligned);
-        } else {
-            if constexpr (USE_MEMORY_MAPS) {
-                cpu_read_ranges.Add(area->start_address, area->end_address - area->start_address);
-                download_cpu_read_ranges = true;
-            }
-            // The core consumed this trap before GetFlushArea. Forget it so the next GPU write
-            // really rearms the core instead of being skipped by the deduplication cache.
+        } else if constexpr (USE_MEMORY_MAPS) {
+            cpu_read_ranges.Add(area->start_address, area->end_address - area->start_address);
+            download_cpu_read_ranges = true;
+        }
+        // The core consumed this trap before GetFlushArea. Forget it so the next GPU write
+        // really rearms the core instead of being skipped by the deduplication cache.
+        if (!preflush || Tegra::g_nx2_ampere.load(std::memory_order_relaxed)) {
             read_trapped_ranges.Subtract(
                 device_addr_start_aligned, device_addr_end_aligned - device_addr_start_aligned);
         }
@@ -1167,7 +1178,8 @@ void BufferCache<P>::BindHostIndexBuffer() {
         }
     }
     if (draw_state.inline_index_draw_indexes.empty()) {
-        SynchronizeBuffer(buffer, channel_state->index_buffer.device_addr, size);
+        SynchronizeGeometryBuffer(NUM_VERTEX_BUFFERS, channel_state->index_buffer.buffer_id,
+                                  channel_state->index_buffer.device_addr, size);
     } else {
         if constexpr (USE_MEMORY_MAPS_FOR_UPLOADS) {
             auto upload_staging = runtime.UploadStagingBuffer(size);
@@ -1226,6 +1238,11 @@ void BufferCache<P>::UpdateVertexBufferSlot(u32 index, const Binding& binding) {
 template <class P>
 void BufferCache<P>::MarkVertexBuffersStale(DAddr device_addr, u64 size) {
     if constexpr (requires { runtime.IsVertexRepacked(u32{}); }) {
+        // Only repacked bindings read the stale mask, and a binding that starts being repacked is
+        // dirtied by SetVertexRepackLayout: nothing to mark while none is.
+        if (Nx2Experiment::On(Nx2Experiment::GeometryMemo) && !runtime.HasVertexRepack()) {
+            return;
+        }
         u32 mask = enabled_vertex_buffers_mask;
         while (mask != 0) {
             const u32 index = std::countr_zero(mask);
@@ -1284,7 +1301,7 @@ void BufferCache<P>::BindHostVertexBuffers() {
             const Binding& binding = VertexBufferSlot(index);
             Buffer& buffer = slot_buffers[binding.buffer_id];
             TouchBuffer(buffer, binding.buffer_id);
-            SynchronizeBuffer(buffer, binding.device_addr, binding.size);
+            SynchronizeGeometryBuffer(index, binding.buffer_id, binding.device_addr, binding.size);
             if (!flags[Dirty::VertexBuffer0 + index]) {
                 flush_bindings();
                 continue;
@@ -1810,15 +1827,21 @@ template <class P>
 void BufferCache<P>::DoUpdateGraphicsBuffers(bool is_indexed) {
     graphics_segments.clear();
     BufferOperations([&]() {
-        if (is_indexed) {
-            UpdateIndexBuffer();
+        {
+            Nx2Profile::Scope scope{Nx2Profile::Zone::UpdateGeometryBuffers};
+            if (is_indexed) {
+                UpdateIndexBuffer();
+            }
+            UpdateVertexBuffers();
+            UpdateTransformFeedbackBuffers();
         }
-        UpdateVertexBuffers();
-        UpdateTransformFeedbackBuffers();
-        for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
-            UpdateUniformBuffers(stage);
-            UpdateStorageBuffers(stage);
-            UpdateTextureBuffers(stage);
+        {
+            Nx2Profile::Scope scope{Nx2Profile::Zone::UpdateStageBuffers};
+            for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+                UpdateUniformBuffers(stage);
+                UpdateStorageBuffers(stage);
+                UpdateTextureBuffers(stage);
+            }
         }
         if (current_draw_indirect) {
             UpdateDrawIndirect();
@@ -1856,6 +1879,7 @@ void BufferCache<P>::UpdateIndexBuffer() {
             inline_buffer_id = CreateBuffer(0, buffer_size, false);
         }
         if (slot_buffers[inline_buffer_id].SizeBytes() < buffer_size) [[unlikely]] {
+            ++buffer_deletions;
             slot_buffers.erase(inline_buffer_id);
             inline_buffer_id = CreateBuffer(0, buffer_size, false);
         }
@@ -1869,18 +1893,59 @@ void BufferCache<P>::UpdateIndexBuffer() {
 
     const GPUVAddr gpu_addr_begin = index_buffer_ref.StartAddress();
     const GPUVAddr gpu_addr_end = index_buffer_ref.EndAddress();
-    const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr_begin);
     const u32 address_size = static_cast<u32>(gpu_addr_end - gpu_addr_begin);
     const u32 draw_size = (index_buffer_ref.count + index_buffer_ref.first) * u32(index_buffer_ref.FormatSizeInBytes());
     const u32 size = (std::min)(address_size, draw_size);
-    if (size == 0 || !device_addr) {
+    if (!Nx2Experiment::On(Nx2Experiment::GeometryMemo)) {
+        const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr_begin);
+        if (size == 0 || !device_addr) {
+            channel_state->index_buffer = NULL_BINDING;
+            return;
+        }
+        channel_state->index_buffer = Binding{
+            .device_addr = *device_addr,
+            .size = size,
+            .buffer_id = FindBuffer(*device_addr, size, false),
+        };
+        return;
+    }
+    // Every draw writes first and count, which only change the size: the device address follows
+    // the start address and the page table, and the buffer stays while no buffer is deleted and it
+    // still holds the range (FindBuffer would return it: live buffers never overlap).
+    GeometryLookup& lookup = index_lookup;
+    const u64 map_serial = gpu_memory->MapSerial();
+    ++geometry_stats.index_lookups;
+    if (!lookup.valid || lookup.begin != gpu_addr_begin || lookup.owner != channel_state ||
+        lookup.map_serial != map_serial) {
+        lookup = GeometryLookup{
+            .begin = gpu_addr_begin,
+            .owner = channel_state,
+            .map_serial = map_serial,
+            .device_addr = gpu_memory->GpuToCpuAddress(gpu_addr_begin),
+            .valid = true,
+        };
+    }
+    if (size == 0 || !lookup.device_addr) {
         channel_state->index_buffer = NULL_BINDING;
         return;
     }
+    const DAddr device_addr = *lookup.device_addr;
+    BufferId buffer_id = lookup.binding.buffer_id;
+    if (buffer_id && lookup.deletions == buffer_deletions &&
+        slot_buffers[buffer_id].IsInBounds(device_addr, size)) {
+        ++geometry_stats.index_kept;
+        if (Settings::IsGPUFenceBehaviorAccurate()) {
+            SynchronizeBufferWrites(slot_buffers[buffer_id]);
+        }
+    } else {
+        buffer_id = FindBuffer(device_addr, size, false);
+        lookup.binding.buffer_id = buffer_id;
+        lookup.deletions = buffer_deletions;
+    }
     channel_state->index_buffer = Binding{
-        .device_addr = *device_addr,
+        .device_addr = device_addr,
         .size = size,
-        .buffer_id = FindBuffer(*device_addr, size, false),
+        .buffer_id = buffer_id,
     };
 }
 
@@ -1911,25 +1976,57 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
         throw std::runtime_error("Native vertex stream exceeds supported 32-bit buffer size");
     }
     const GPUVAddr gpu_addr_end = native ? gpu_addr_begin + native_size : limit.Address() + 1;
+    // The result follows the stream's range, the page table and the buffer set (528bafdd82):
+    // a command buffer submission dirties every stream without changing any of them.
+    const bool memo = Nx2Experiment::On(Nx2Experiment::GeometryMemo);
+    GeometryLookup& lookup = vertex_lookups[index];
+    const GPUVAddr lookup_begin = array.enable != 0 ? gpu_addr_begin : ~GPUVAddr{0};
+    const u64 map_serial = memo ? gpu_memory->MapSerial() : 0;
+    if (memo) {
+        ++geometry_stats.vertex_lookups;
+        if (lookup.valid && lookup.begin == lookup_begin && lookup.end == gpu_addr_end &&
+            lookup.owner == channel_state && lookup.map_serial == map_serial &&
+            lookup.deletions == buffer_deletions) {
+            ++geometry_stats.vertex_kept;
+            if (lookup.binding.buffer_id && Settings::IsGPUFenceBehaviorAccurate()) {
+                SynchronizeBufferWrites(slot_buffers[lookup.binding.buffer_id]);
+            }
+            channel_state->vertex_buffers[index] = lookup.binding;
+            UpdateVertexBufferSlot(index, lookup.binding);
+            return;
+        }
+    }
+    const auto keep = [&](const Binding& binding) {
+        channel_state->vertex_buffers[index] = binding;
+        UpdateVertexBufferSlot(index, binding);
+        if (memo) {
+            lookup = GeometryLookup{
+                .begin = lookup_begin,
+                .end = gpu_addr_end,
+                .owner = channel_state,
+                .map_serial = map_serial,
+                .deletions = buffer_deletions,
+                .binding = binding,
+                .valid = true,
+            };
+        }
+    };
     const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr_begin);
     const u32 address_size = static_cast<u32>(gpu_addr_end - gpu_addr_begin);
     u32 size = address_size; // TODO: Analyze stride and number of vertices
     if (array.enable == 0 || size == 0 || !device_addr) {
-        channel_state->vertex_buffers[index] = NULL_BINDING;
-        UpdateVertexBufferSlot(index, NULL_BINDING);
+        keep(NULL_BINDING);
         return;
     }
     if (!gpu_memory->IsWithinGPUAddressRange(gpu_addr_end) || size >= 64_MiB) {
         size = static_cast<u32>(gpu_memory->MaxContinuousRange(gpu_addr_begin, size));
     }
     const BufferId buffer_id = FindBuffer(*device_addr, size, false);
-    const Binding binding{
+    keep(Binding{
         .device_addr = *device_addr,
         .size = size,
         .buffer_id = buffer_id,
-    };
-    channel_state->vertex_buffers[index] = binding;
-    UpdateVertexBufferSlot(index, binding);
+    });
 }
 
 template <class P>
@@ -2619,6 +2716,36 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
 }
 
 template <class P>
+void BufferCache<P>::SynchronizeGeometryBuffer(u32 slot, BufferId buffer_id, DAddr device_addr,
+                                               u32 size) {
+    Buffer& buffer = slot_buffers[buffer_id];
+    if (!Nx2Experiment::On(Nx2Experiment::GeometrySyncSkip)) {
+        SynchronizeBuffer(buffer, device_addr, size);
+        return;
+    }
+    // The deletion count keeps a freed and reused buffer id from passing for the scanned one.
+    GeometrySync& sync = geometry_syncs[slot];
+    ++geometry_stats.syncs;
+    if (memory_tracker.IsSynchronized(slot) && sync.buffer_id == buffer_id &&
+        sync.device_addr == device_addr && sync.size == size &&
+        sync.deletions == buffer_deletions) {
+        ++geometry_stats.syncs_skipped;
+        if (Nx2Perf::Verify() && !SynchronizeBuffer(buffer, device_addr, size)) {
+            ++geometry_stats.verify_mismatches;
+        }
+        return;
+    }
+    SynchronizeBuffer(buffer, device_addr, size);
+    sync = GeometrySync{
+        .buffer_id = buffer_id,
+        .device_addr = device_addr,
+        .size = size,
+        .deletions = buffer_deletions,
+    };
+    memory_tracker.WatchSynchronized(slot, device_addr, size);
+}
+
+template <class P>
 void BufferCache<P>::UploadMemory(Buffer& buffer, u64 total_size_bytes, u64 largest_copy,
                                   std::span<BufferCopy> copies) {
     if constexpr (USE_MEMORY_MAPS_FOR_UPLOADS) {
@@ -2848,6 +2975,7 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
 
 template <class P>
 void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
+    ++buffer_deletions;
     if constexpr (requires { runtime.OnBufferDeleted(slot_buffers[buffer_id]); }) {
         runtime.OnBufferDeleted(slot_buffers[buffer_id]);
     }
