@@ -1718,9 +1718,8 @@ void Device::RemoveUnsuitableExtensions() {
     // Used only for the guest's HMMA.16816.F16: the same M=16 N=8 K=16 shape with 16-bit floats
     // in every matrix, as a subgroup operation of compute shaders whose subgroups are the guest's
     // 32-lane warp. The matrices hold 16-bit floats, so the device needs shaderFloat16.
-    // EDEN_NX2_NO_COOPERATIVE_HMMA=1 keeps the shader emulation, to compare the two.
     {
-        const bool has_shape = !std::getenv("EDEN_NX2_NO_COOPERATIVE_HMMA") && std::ranges::any_of(
+        const bool has_shape = std::ranges::any_of(
             physical.GetCooperativeMatrixPropertiesKHR(),
             [](const VkCooperativeMatrixPropertiesKHR& shape) {
                 return shape.MSize == 16 && shape.NSize == 8 && shape.KSize == 16 &&

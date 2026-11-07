@@ -668,13 +668,13 @@ FN_MAX_LIMIT_LIST
                features.features.shaderInt16;
     }
 
-    /// Returns true if the device supports VK_KHR_shader_quad_control.
     /// Returns true if the guest's HMMA.16816.F16 can run on the host's cooperative matrices
     /// (VK_KHR_cooperative_matrix with the same 16x8x16 shape on 16-bit floats, 32-lane subgroups).
     bool IsCooperativeHmmaSupported() const {
         return extensions.cooperative_matrix;
     }
 
+    /// Returns true if the device supports VK_KHR_shader_quad_control.
     bool IsKhrShaderQuadControlSupported() const {
         return extensions.shader_quad_control && features.shader_quad_control.shaderQuadControl;
     }
