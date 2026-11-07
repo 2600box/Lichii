@@ -144,9 +144,9 @@ void UpdateDialog::Restart(QWidget* window, const QString& target) {
 #ifdef _WIN32
 bool UpdateDialog::LaunchInstaller(QWidget* window, const QString& staging) {
     // The helper runs from a copy, because the installed one is replaced along with everything else.
-    const auto helper =
+    const QString helper =
         QCoreApplication::applicationDirPath() + QStringLiteral("/lichii-updater.exe");
-    const auto copy = QDir::temp().filePath(
+    const QString copy = QDir::temp().filePath(
         QStringLiteral("lichii-updater-%1.exe").arg(QCoreApplication::applicationPid()));
     QFile::remove(copy);
     if (!QFile::copy(helper, copy)) {
