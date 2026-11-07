@@ -366,11 +366,12 @@ void AddRuntimeSpirvTime(size_t thread, std::chrono::steady_clock::time_point be
 // global memory functions of native programs) are built as calls instead of being inlined at
 // each call site, as for compute (EDEN_NX2_COMPUTE_NOINLINE, video_core/spirv_inline_control.h).
 bool GraphicsNoInline() {
-    static const bool enabled = [] {
+    // The environment variable wins over the setting (shader_calls_not_inlined).
+    static const int forced = [] {
         const char* value = std::getenv("EDEN_NX2_GRAPHICS_NOINLINE");
-        return !(value != nullptr && value[0] == '0');
+        return value == nullptr || *value == '\0' ? -1 : (value[0] == '0' ? 0 : 1);
     }();
-    return enabled;
+    return forced >= 0 ? forced == 1 : Settings::values.shader_calls_not_inlined.GetValue();
 }
 
 vk::ShaderModule EmitShaderModule(const Device& device, const Shader::Profile& profile,
@@ -1253,11 +1254,13 @@ std::filesystem::path WarmFile(const char* variable, const std::filesystem::path
     return {};
 }
 
-/// Threads for each warm-up (compute and graphics): EDEN_NX2_WARM_THREADS=N, 1 to 32, else 4.
-/// They always run at low priority.
+/// Threads for each warm-up (compute and graphics): EDEN_NX2_WARM_THREADS=N (1 to 32), else the
+/// shader_warm_threads setting. They always run at low priority.
 size_t WarmThreads() {
-    static const size_t count = [] {
-        constexpr size_t Default = 4;
+    const size_t setting =
+        std::clamp<size_t>(Settings::values.shader_warm_threads.GetValue(), 1, 32);
+    static const size_t forced = [] {
+        constexpr size_t Default = 0;
         const char* const value = std::getenv("EDEN_NX2_WARM_THREADS");
         if (value == nullptr || *value == '\0') {
             return Default;
@@ -1266,13 +1269,14 @@ size_t WarmThreads() {
         const long parsed = std::strtol(value, &end, 10);
         if (end == value || *end != '\0' || parsed < 1 || parsed > 32) {
             LOG_WARNING(Render_Vulkan,
-                        "Nx2Perf: EDEN_NX2_WARM_THREADS={} is not a number from 1 to 32, using {}",
-                        value, Default);
+                        "Nx2Perf: EDEN_NX2_WARM_THREADS={} is not a number from 1 to 32, using "
+                        "the setting",
+                        value);
             return Default;
         }
         return static_cast<size_t>(parsed);
     }();
-    return count;
+    return forced != 0 ? forced : setting;
 }
 
 /// The "already warmed" marker: warm file size and last-write time, entry count, GPU driver
@@ -2754,11 +2758,12 @@ void DumpComputeSpirv(u64 shader_hash, std::span<const u32> code) {
 // site, which made NVIDIA spend 2-13 s on single compute shaders of a test title, every one a
 // freeze at its first dispatch (video_core/spirv_inline_control.h).
 bool ComputeNoInline() {
-    static const bool enabled = [] {
+    // The environment variable wins over the setting (shader_calls_not_inlined).
+    static const int forced = [] {
         const char* value = std::getenv("EDEN_NX2_COMPUTE_NOINLINE");
-        return !(value != nullptr && value[0] == '0');
+        return value == nullptr || *value == '\0' ? -1 : (value[0] == '0' ? 0 : 1);
     }();
-    return enabled;
+    return forced >= 0 ? forced == 1 : Settings::values.shader_calls_not_inlined.GetValue();
 }
 
 // The words a compute module is built from. The translation cache keeps the SPIR-V as emitted,

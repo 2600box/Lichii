@@ -315,6 +315,16 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Builds each shader stage once and links them into pipelines, so new shaders "
               "cause shorter stutters.\nAlso runs the shader warm-up at game start when the game "
               "has one.\nTakes effect after restarting the game."));
+    INSERT(Settings, shader_calls_not_inlined,
+           tr("Faster shader compiles (shared functions as calls)"),
+           tr("Builds large functions that a shader uses in several places once, as calls, "
+              "instead of copying them into every place. Driver compiles of such shaders get "
+              "several times faster (compute warm-up about 3x); the game may run slightly "
+              "slower.\nApplies to shaders built after the change."));
+    INSERT(Settings, shader_warm_threads, tr("Shader warm-up threads:"),
+           tr("CPU threads the shader warm-up uses (low priority). More threads finish the "
+              "warm-up sooner but leave less CPU to the game while it runs.\nTakes "
+              "effect at the next game start."));
     INSERT(Settings, enable_compute_pipelines, tr("Enable Compute Pipelines (Intel Vulkan Only)"),
            tr("Required by some games.\nThis setting only exists for Intel "
               "proprietary drivers and may crash if enabled.\nCompute pipelines are always enabled "

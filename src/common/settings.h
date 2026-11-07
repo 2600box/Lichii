@@ -648,6 +648,23 @@ struct Values {
     SwitchableSetting<bool> use_graphics_pipeline_library{
         linkage, false, "use_graphics_pipeline_library", Category::RendererAdvanced};
 
+    // Large shader functions called from several places are built as calls instead of being
+    // copied into every caller (much faster driver compiles). EDEN_NX2_COMPUTE_NOINLINE=0 and
+    // EDEN_NX2_GRAPHICS_NOINLINE=0 still override.
+    SwitchableSetting<bool> shader_calls_not_inlined{linkage, true, "shader_calls_not_inlined",
+                                                     Category::RendererAdvanced};
+
+    // Threads of the shader warm-up (compute and graphics, each). EDEN_NX2_WARM_THREADS overrides.
+    SwitchableSetting<u32, true> shader_warm_threads{linkage,
+                                                     4,
+                                                     1,
+                                                     32,
+                                                     "shader_warm_threads",
+                                                     Category::RendererAdvanced,
+                                                     Specialization::Countable,
+                                                     true,
+                                                     true};
+
     SwitchableSetting<bool> enable_compute_pipelines{linkage, false, "enable_compute_pipelines",
                                                      Category::RendererAdvanced};
 
