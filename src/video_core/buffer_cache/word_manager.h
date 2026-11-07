@@ -20,6 +20,7 @@
 #include "common/div_ceil.h"
 #include "common/logging.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/nx2_experiment.h"
 #include "video_core/nx2_perf.h"
 
 namespace VideoCommon {
@@ -182,6 +183,7 @@ struct WordManager {
                 mask &= ~untracked_words[index];
             const u64 word = state_words[index] & mask;
             if (word == 0 &&
+                !VideoCommon::Nx2Experiment::On(VideoCommon::Nx2Experiment::BackPicksOff) &&
                 (!clear || ((type != Type::CPU && type != Type::CachedCPU) ||
                             (untracked_words[index] & mask) == 0))) {
                 return;
