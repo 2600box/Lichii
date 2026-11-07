@@ -274,7 +274,9 @@ bool Install(const fs::path& staging, const fs::path& install_dir, std::error_co
     fs::remove_all(backup, ec);
     fs::rename(pending_backup, backup, ec);
     std::error_code cleanup_ec;
-    fs::remove_all(staging, cleanup_ec);
+    if (!fs::equivalent(staging, backup, cleanup_ec)) {
+        fs::remove_all(staging, cleanup_ec);
+    }
     return !ec;
 }
 
