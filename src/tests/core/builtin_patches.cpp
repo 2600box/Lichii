@@ -18,6 +18,7 @@
 #include "common/hex_util.h"
 #include "common/settings.h"
 #include "core/core.h"
+#include "core/file_sys/ocarina_ultrawide.h"
 #include "core/file_sys/patch_manager.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/vfs/vfs_real.h"
@@ -363,4 +364,114 @@ TEST_CASE("Built-in Dynamic FPS leaves both records alone when a user mod change
     auto expected = nso;
     std::memcpy(expected.data() + offset, &mod_word, sizeof(mod_word));
     REQUIRE(context.Manager().PatchNSO(nso, "main") == expected);
+}
+
+namespace {
+
+constexpr std::string_view Ultrawide = "Ultrawide (built-in)";
+constexpr size_t UltrawideCaveOffset = sizeof(Loader::NSOHeader) + 0x3C46400;
+
+std::vector<u8> MakeUltrawideMain() {
+    auto nso = MakeDynamicMain();
+    for (const auto& hook : FileSys::OcarinaUltrawide::Hooks) {
+        std::memcpy(nso.data() + sizeof(Loader::NSOHeader) + hook.offset, &hook.original,
+                    sizeof(hook.original));
+    }
+    return nso;
+}
+
+struct AspectRatioScope {
+    explicit AspectRatioScope(Settings::AspectRatio ratio)
+        : previous{Settings::values.aspect_ratio.GetValue()} {
+        Settings::values.aspect_ratio.SetValue(ratio);
+    }
+
+    ~AspectRatioScope() {
+        Settings::values.aspect_ratio.SetValue(previous);
+    }
+
+    Settings::AspectRatio previous;
+};
+
+} // Anonymous namespace
+
+TEST_CASE("Ultrawide generator matches craftycorvid/oot-mod's 64:27 patch", "[patch_manager]") {
+    constexpr auto patch = FileSys::OcarinaUltrawide::Make(2560.0 / 1080.0);
+    constexpr std::array<u32, 7> branches{0x141F01D0, 0x14EFDC96, 0x14E82AB6, 0x14E42B25,
+                                          0x14E7A365, 0x14D34876, 0x1403A795};
+    for (size_t i = 0; i < branches.size(); ++i) {
+        u32 word;
+        std::memcpy(&word, patch.branches[i].data(), sizeof(word));
+        REQUIRE(word == branches[i]);
+    }
+    REQUIRE(Common::HexToString(patch.cave) ==
+            "0084552D30C7915270FCA7721002271E3038301E10C2201E50E19A527084A7721102271E"
+            "0022311EA5000054D0849652F002A8720102271E01B000BD22FEE017A08E552D29C79152"
+            "69FCA7722401271E6438241E84C0201E49E19A526984A7722501271E8020251EA5000054"
+            "C9849652E902A8722301271EA3B200BD5C231017008C552D29C7915269FCA7722401271E"
+            "6438241E84C0201E49E19A526984A7722501271E8020251EA5000054C9849652E902A872"
+            "2301271E03B000BD3CD517174084552D29C7915269FCA7722201271E2238221E42C0201E"
+            "49E19A526984A7722301271E4020231EA5000054C9849652E902A8722101271E41B000BD"
+            "CDD41B17A102221E2118221E30C7915270FCA7721002271E3038301E10C2201E50E19A52"
+            "7084A7721102271E0022311E85000054D0849652F002A8720102271E8E5C1817411040AD"
+            "3000261E311191521141A7721F02116BA1020054903C0C0E107A0012D13A9752514EA772"
+            "1F02116BE101005411E006D1300240F9317D00F0316202911F0211EB20010054F17C00D0"
+            "31C23E911F0211EBA00000541000805210E8A772110E044E21DC316E71B72C17B0A300D1"
+            "100A40BD111240BD323A301E1100805211C0A7723302271E520A331E102A321E313A321E"
+            "100A00BD111200BD69A241A95F58FC17");
+}
+
+TEST_CASE("Built-in Ultrawide defaults off and follows the 21:9 Aspect Ratio", "[patch_manager]") {
+    PatchManagerTestContext context;
+    AspectRatioScope aspect{Settings::AspectRatio::R21_9};
+    const auto manager = context.Manager();
+    const auto enabled = [&] {
+        const auto patches = manager.GetPatches();
+        const auto it = std::ranges::find(patches, Ultrawide, &FileSys::Patch::name);
+        REQUIRE(it != patches.end());
+        REQUIRE(it->type == FileSys::PatchType::Mod);
+        return it->enabled;
+    };
+    const auto nso = MakeUltrawideMain();
+    const auto& first_hook = FileSys::OcarinaUltrawide::Hooks[0];
+    const size_t hook_offset = sizeof(Loader::NSOHeader) + first_hook.offset;
+
+    REQUIRE_FALSE(enabled());
+    REQUIRE(WordAt(manager.PatchNSO(nso, "main"), hook_offset) == first_hook.original);
+
+    Settings::values.disabled_addons[OcarinaTitleId] = {std::string{Ultrawide}};
+    REQUIRE(enabled());
+    auto patched = manager.PatchNSO(nso, "main");
+    constexpr auto expected = FileSys::OcarinaUltrawide::Make(21.0 / 9.0);
+    for (size_t i = 0; i < FileSys::OcarinaUltrawide::Hooks.size(); ++i) {
+        const size_t offset =
+            sizeof(Loader::NSOHeader) + FileSys::OcarinaUltrawide::Hooks[i].offset;
+        REQUIRE(std::equal(expected.branches[i].begin(), expected.branches[i].end(),
+                           patched.begin() + offset));
+    }
+    REQUIRE(std::equal(expected.cave.begin(), expected.cave.end(),
+                       patched.begin() + UltrawideCaveOffset));
+    REQUIRE(WordAt(patched, DynamicCallOffset) == DynamicCallInstruction);
+    REQUIRE(WordAt(patched) == BranchInstruction);
+
+    Settings::values.aspect_ratio.SetValue(Settings::AspectRatio::R16_9);
+    REQUIRE(enabled());
+    patched = manager.PatchNSO(nso, "main");
+    REQUIRE(WordAt(patched, hook_offset) == first_hook.original);
+    REQUIRE(WordAt(patched, UltrawideCaveOffset) == 0);
+
+    const auto unrelated = context.Manager(OtherTitleId).GetPatches();
+    REQUIRE(std::ranges::find(unrelated, Ultrawide, &FileSys::Patch::name) == unrelated.end());
+}
+
+TEST_CASE("Default-off built-ins flip between stored and disabled Add-On lists", "[patch_manager]") {
+    std::vector<std::string> stored{std::string{MaxResolution}};
+    FileSys::FlipDefaultOffAddons(OcarinaTitleId, stored);
+    REQUIRE(stored == std::vector<std::string>{std::string{MaxResolution}, std::string{Ultrawide}});
+    FileSys::FlipDefaultOffAddons(OcarinaTitleId, stored);
+    REQUIRE(stored == std::vector<std::string>{std::string{MaxResolution}});
+
+    std::vector<std::string> other{std::string{Ultrawide}};
+    FileSys::FlipDefaultOffAddons(OtherTitleId, other);
+    REQUIRE(other == std::vector<std::string>{std::string{Ultrawide}});
 }

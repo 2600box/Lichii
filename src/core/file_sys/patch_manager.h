@@ -51,6 +51,11 @@ struct Patch {
     u32 numeric_version{0};
 };
 
+// Settings::values.disabled_addons lists the add-ons switched away from their default, so a
+// built-in that defaults to off is listed once it is enabled. This turns such a list into a plain
+// list of disabled add-ons and back.
+void FlipDefaultOffAddons(u64 title_id, std::vector<std::string>& addons);
+
 // A centralized class to manage patches to games.
 class PatchManager {
 public:

@@ -12,6 +12,7 @@
 #include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/settings.h"
+#include "core/file_sys/patch_manager.h"
 #include "frontend_common/config.h"
 #include "frontend_common/settings_generator.h"
 #include "native.h"
@@ -356,7 +357,8 @@ void Java_org_yuzu_yuzu_1emu_utils_NativeConfig_addGameDir(JNIEnv* env, jobject 
 jobjectArray Java_org_yuzu_yuzu_1emu_utils_NativeConfig_getDisabledAddons(JNIEnv* env, jobject obj,
                                                                           jstring jprogramId) {
     auto program_id = EmulationSession::GetProgramId(env, jprogramId);
-    auto& disabledAddons = Settings::values.disabled_addons[program_id];
+    auto disabledAddons = Settings::values.disabled_addons[program_id];
+    FileSys::FlipDefaultOffAddons(program_id, disabledAddons);
     jobjectArray jdisabledAddonsArray =
         env->NewObjectArray(disabledAddons.size(), Common::Android::GetStringClass(),
                             Common::Android::ToJString(env, ""));
@@ -378,6 +380,7 @@ void Java_org_yuzu_yuzu_1emu_utils_NativeConfig_setDisabledAddons(JNIEnv* env, j
         auto jaddon = static_cast<jstring>(env->GetObjectArrayElement(jdisabledAddons, i));
         disabled_addons.push_back(Common::Android::GetJString(env, jaddon));
     }
+    FileSys::FlipDefaultOffAddons(program_id, disabled_addons);
     Settings::values.disabled_addons[program_id] = disabled_addons;
 }
 

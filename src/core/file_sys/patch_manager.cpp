@@ -23,6 +23,7 @@
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/ips_layer.h"
+#include "core/file_sys/ocarina_ultrawide.h"
 #include "core/file_sys/patch_manager.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs.h"
@@ -61,6 +62,8 @@ struct BuiltinPatch {
     std::span<const BuiltinPatchRecord> records;
     size_t state_offset = 0;
     size_t state_size = 0;
+    bool default_enabled = true;
+    std::optional<Settings::AspectRatio> aspect_ratio;
 };
 
 constexpr std::array<u8, 4> MAX_RESOLUTION_ORIGINAL{0xE8, 0x41, 0x00, 0x36};
@@ -86,6 +89,28 @@ constexpr std::array DYNAMIC_FPS_RECORDS{
     BuiltinPatchRecord{0x3C46200, DYNAMIC_FPS_ROUTINE, {}, true},
 };
 
+constexpr auto ULTRAWIDE_ORIGINALS = [] {
+    std::array<std::array<u8, 4>, OcarinaUltrawide::Hooks.size()> out{};
+    for (size_t i = 0; i < out.size(); ++i) {
+        for (size_t b = 0; b < 4; ++b) {
+            out[i][b] = static_cast<u8>(OcarinaUltrawide::Hooks[i].original >> (b * 8));
+        }
+    }
+    return out;
+}();
+
+constexpr auto UltrawideRecords(const OcarinaUltrawide::Patch& patch) {
+    std::array<BuiltinPatchRecord, OcarinaUltrawide::Hooks.size() + 1> records{};
+    for (size_t i = 0; i < OcarinaUltrawide::Hooks.size(); ++i) {
+        records[i] = {OcarinaUltrawide::Hooks[i].offset, patch.branches[i], ULTRAWIDE_ORIGINALS[i]};
+    }
+    records.back() = {OcarinaUltrawide::CaveBase, patch.cave, {}, true};
+    return records;
+}
+
+constexpr auto ULTRAWIDE_21_9 = OcarinaUltrawide::Make(21.0 / 9.0);
+constexpr auto ULTRAWIDE_21_9_RECORDS = UltrawideRecords(ULTRAWIDE_21_9);
+
 constexpr std::array BUILTIN_PATCHES{
     // Ocarina of Time takes its "dynamic resolution disabled" path, so the 3D renders at full scale
     // instead of following the GPU-time controller down to its 480p floor.
@@ -104,6 +129,17 @@ constexpr std::array BUILTIN_PATCHES{
         .records = DYNAMIC_FPS_RECORDS,
         .state_offset = 0x4E9FE00,
         .state_size = 16,
+    },
+    // Widens the 3D view to the Aspect Ratio setting and keeps the HUD and movies in the centre
+    // 16:9. Ported from craftycorvid/oot-mod (MIT); see docs/nx2/ocarina-ultrawide.md.
+    BuiltinPatch{
+        .name = "Ultrawide (built-in)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = ULTRAWIDE_21_9_RECORDS,
+        .default_enabled = false,
+        .aspect_ratio = Settings::AspectRatio::R21_9,
     },
 };
 
@@ -248,8 +284,20 @@ VirtualDir PatchManager::GetModificationLoadRoot(bool sdmc) const {
     return LayeredVfsDirectory::MakeLayeredDirectory(std::move(roots));
 }
 
+void FlipDefaultOffAddons(u64 title_id, std::vector<std::string>& addons) {
+    for (const auto& patch : BUILTIN_PATCHES) {
+        if (patch.title_id != title_id || patch.default_enabled) {
+            continue;
+        }
+        if (std::erase(addons, patch.name) == 0) {
+            addons.emplace_back(patch.name);
+        }
+    }
+}
+
 std::vector<std::string> PatchManager::GetDisabledAddons() const {
     auto disabled = Settings::values.disabled_addons[title_id];
+    FlipDefaultOffAddons(title_id, disabled);
     if (parent_title_id) {
         const auto& shared = Settings::values.disabled_addons[*parent_title_id];
         disabled.insert(disabled.end(), shared.begin(), shared.end());
@@ -534,6 +582,11 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
         if (patch.build_id != build_id) {
             LOG_INFO(Loader, "    - Skipping \"{}\": build id {} is not {}", patch.name, build_id,
                      patch.build_id);
+            continue;
+        }
+        if (patch.aspect_ratio && *patch.aspect_ratio != Settings::values.aspect_ratio.GetValue()) {
+            LOG_INFO(Loader, "    - Skipping \"{}\": Aspect Ratio is not {}", patch.name,
+                     Settings::CanonicalizeEnum(*patch.aspect_ratio));
             continue;
         }
         const auto fits = [](const std::vector<u8>& data, size_t offset, size_t size) {
@@ -896,7 +949,8 @@ std::vector<Patch> PatchManager::GetPatches(VirtualFile update_raw) const {
     }
 
     std::vector<Patch> out;
-    const auto& disabled = Settings::values.disabled_addons[title_id];
+    auto disabled = Settings::values.disabled_addons[title_id];
+    FlipDefaultOffAddons(title_id, disabled);
 
     // Game Updates
     const auto update_tid = GetUpdateTitleID(title_id);

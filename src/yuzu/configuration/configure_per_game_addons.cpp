@@ -120,6 +120,7 @@ void ConfigurePerGameAddons::ApplyConfiguration() {
         }
     }
 
+    FileSys::FlipDefaultOffAddons(title_id, disabled_addons);
     auto current = Settings::values.disabled_addons[title_id];
     std::sort(disabled_addons.begin(), disabled_addons.end());
     std::sort(current.begin(), current.end());
@@ -308,7 +309,8 @@ void ConfigurePerGameAddons::LoadConfiguration() {
     FileSys::VirtualFile update_raw;
     loader->ReadUpdateRaw(update_raw);
 
-    const auto& disabled = Settings::values.disabled_addons[title_id];
+    auto disabled = Settings::values.disabled_addons[title_id];
+    FileSys::FlipDefaultOffAddons(title_id, disabled);
 
     update_items.clear();
     list_items.clear();
