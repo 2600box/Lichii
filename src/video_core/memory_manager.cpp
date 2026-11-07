@@ -17,6 +17,7 @@
 #include "memory_manager.h"
 #include "video_core/guest_memory.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_experiment.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/invalidation_accumulator.h"
@@ -574,8 +575,43 @@ void MemoryManager::WriteBlockUnsafe(GPUVAddr gpu_dest_addr, const void* src_buf
     WriteBlockImpl(gpu_dest_addr, src_buffer, size, VideoCommon::CacheType::None, true);
 }
 
+bool MemoryManager::WriteWithinCachedPage(GPUVAddr gpu_dest_addr, const void* src_buffer,
+                                          std::size_t size) {
+    constexpr u64 page_size = 1ULL << cpu_page_bits;
+    const u64 page_offset = gpu_dest_addr & (page_size - 1);
+    if (page_offset + size > page_size) {
+        return false;
+    }
+    // Writes there go through WriteBlockImpl, which gives them to Nx2BackSparseWrite.
+    if (gpu_dest_addr + size > Tegra::g_nx2_sparse_low.load(std::memory_order_relaxed) &&
+        gpu_dest_addr < Tegra::g_nx2_sparse_high.load(std::memory_order_relaxed)) {
+        return false;
+    }
+    const GPUVAddr page = gpu_dest_addr - page_offset;
+    const u64 serial = map_serial.load(std::memory_order_acquire);
+    if (page != cached_write_page || serial != cached_write_serial) {
+        const std::optional<DAddr> device = GpuToCpuAddress(page);
+        if (!device) {
+            return false;
+        }
+        cached_write_page = page;
+        cached_write_device = *device;
+        cached_write_serial = serial;
+    }
+    // The device page's host memory is looked up each time: device unmaps don't bump map_serial.
+    u8* const physical = memory.GetPointer<u8>(cached_write_device + page_offset);
+    if (physical == nullptr) {
+        return false;
+    }
+    std::memcpy(physical, src_buffer, size);
+    return true;
+}
+
 void MemoryManager::WriteBlockCached(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size) {
-    WriteBlockImpl(gpu_dest_addr, src_buffer, size, VideoCommon::CacheType::None, true);
+    if (!VideoCommon::Nx2Experiment::On(VideoCommon::Nx2Experiment::CbWriteCache) ||
+        !WriteWithinCachedPage(gpu_dest_addr, src_buffer, size)) {
+        WriteBlockImpl(gpu_dest_addr, src_buffer, size, VideoCommon::CacheType::None, true);
+    }
     accumulator.Add(gpu_dest_addr, size);
 }
 
@@ -589,7 +625,10 @@ void MemoryManager::WriteWordsCached(GPUVAddr gpu_dest_addr, const u32* words, s
         }
         return;
     }
-    WriteBlockImpl(gpu_dest_addr, words, size, VideoCommon::CacheType::None, true);
+    if (!VideoCommon::Nx2Experiment::On(VideoCommon::Nx2Experiment::CbWriteCache) ||
+        !WriteWithinCachedPage(gpu_dest_addr, words, size)) {
+        WriteBlockImpl(gpu_dest_addr, words, size, VideoCommon::CacheType::None, true);
+    }
     // The accumulator merges word by word differently from one range: keep its ranges.
     for (std::size_t i = 0; i < count; ++i) {
         accumulator.Add(gpu_dest_addr + i * sizeof(u32), sizeof(u32));

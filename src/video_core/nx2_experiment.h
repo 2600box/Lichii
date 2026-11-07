@@ -21,11 +21,15 @@ namespace VideoCommon::Nx2Experiment {
 enum Switch : u32 {
     BackPicksOff = 1,  ///< back-perf-off: no empty-draw skip, no clean-word early-out
     EntryWaitSkip = 2, ///< entry-wait-skip: entries on pages read before skip the writer wait
+    UboInPlace = 4,    ///< ubo-inplace: compare small uniform buffers in guest memory, no read copy
+    CbWriteCache = 8,  ///< cb-write-cache: constant buffer words keep their page's translation
 };
 
-inline constexpr std::array<std::pair<Switch, const char*>, 2> switch_files{{
+inline constexpr std::array<std::pair<Switch, const char*>, 4> switch_files{{
     {BackPicksOff, "back-perf-off"},
     {EntryWaitSkip, "entry-wait-skip"},
+    {UboInPlace, "ubo-inplace"},
+    {CbWriteCache, "cb-write-cache"},
 }};
 
 inline std::atomic<u32> g_on{0};
