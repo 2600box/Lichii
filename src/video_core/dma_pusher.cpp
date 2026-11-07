@@ -28,6 +28,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
+#include "video_core/nx2_experiment.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace Tegra {
@@ -219,10 +220,35 @@ bool DmaPusher::Step() {
         // (the split only starts with unsafe reads; the settings can change mid-game).
         const bool use_safe = !VideoCommon::GpuSplit::Get().Active() &&
                               (Settings::IsDMALevelDefault() ? Settings::IsGPULevelHigh() : Settings::IsDMALevelSafe());
-        if (!gpu_written && VideoCommon::GpuSplit::Get().Active() &&
+        // EXPERIMENT (entry-wait-skip): an entry on pages entries were read from before, none of
+        // them GPU-written then, does not wait for the queued compute and copy work. The back
+        // checks at the entry's place whether that work wrote the pages after all (a miss).
+        const size_t entry_bytes = size_t{header.size} * sizeof(u32);
+        const bool skip_writer_wait =
+            !gpu_written && VideoCommon::GpuSplit::Get().Active() &&
+            VideoCommon::Nx2Experiment::On(VideoCommon::Nx2Experiment::EntryWaitSkip) &&
+            EntryPagesSeen(dma_state.dma_get, entry_bytes);
+        if (skip_writer_wait && VideoCommon::GpuSplit::Get().WritersMayBePending()) {
+            VideoCommon::Nx2Experiment::g_entry_skips.fetch_add(1, std::memory_order_relaxed);
+            VideoCommon::GpuSplit::Get().Defer(
+                [this, address = GPUVAddr{dma_state.dma_get}, entry_bytes] {
+                    if (IsGpuWrittenCommands(address, entry_bytes)) {
+                        VideoCommon::Nx2Experiment::g_entry_misses.fetch_add(
+                            1, std::memory_order_relaxed);
+                        LOG_WARNING(HW_GPU,
+                                    "EXPERIMENT entry-wait-skip missed a GPU write: entry {:#x} "
+                                    "({} bytes) was read before the work that writes it ran",
+                                    address, entry_bytes);
+                    }
+                });
+        }
+        if (!gpu_written && !skip_writer_wait && VideoCommon::GpuSplit::Get().Active() &&
             VideoCommon::GpuSplit::Get().WaitForWriters()) {
             gpu_written =
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
+        }
+        if (!gpu_written) {
+            MarkEntryPagesSeen(dma_state.dma_get, entry_bytes);
         }
         // Resume and GPU-written entries need live words, even after a flush cleared dirty state.
         const bool submitted = (command_list.snapshot_suspensions & 1) == 0 &&
@@ -612,6 +638,36 @@ void DmaPusher::RefreshDeferredEntries(CommandList& list) {
                                        entry.size * sizeof(u32));
     }
     list.deferred_entries.clear();
+}
+
+namespace {
+// EXPERIMENT: device pages GP entries were read from while no GPU work had written them.
+std::array<u64, (u64{1} << (36 - Tegra::Nx2WrittenPageBits)) / 64> g_entry_pages{};
+} // Anonymous namespace
+
+bool DmaPusher::EntryPagesSeen(GPUVAddr address, size_t size) {
+    for (GPUVAddr page = address & ~GPUVAddr{0xfff}; page < address + size; page += 0x1000) {
+        const auto device = memory_manager.GpuToCpuAddress(page);
+        if (!device) {
+            return false;
+        }
+        const u64 index = *device >> Tegra::Nx2WrittenPageBits;
+        if (index >= g_entry_pages.size() * 64 || ((g_entry_pages[index / 64] >> (index % 64)) & 1) == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void DmaPusher::MarkEntryPagesSeen(GPUVAddr address, size_t size) {
+    for (GPUVAddr page = address & ~GPUVAddr{0xfff}; page < address + size; page += 0x1000) {
+        if (const auto device = memory_manager.GpuToCpuAddress(page)) {
+            const u64 index = *device >> Tegra::Nx2WrittenPageBits;
+            if (index < g_entry_pages.size() * 64) {
+                g_entry_pages[index / 64] |= u64{1} << (index % 64);
+            }
+        }
+    }
 }
 
 bool DmaPusher::IsGpuWrittenCommands(GPUVAddr address, size_t size) {

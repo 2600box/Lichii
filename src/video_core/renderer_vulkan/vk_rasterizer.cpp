@@ -73,6 +73,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_debug_control.h"
+#include "video_core/nx2_experiment.h"
 #include "video_core/nx2_profile.h"
 
 namespace Vulkan {
@@ -1104,7 +1105,8 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
     // clears and query counter toggles stay pending for the next recorded draw, clear or render
     // pass end, which apply them before anything can observe them. With transform feedback on
     // the draw goes through, since its counters are begun and closed around draws.
-    if (maxwell3d->regs.transform_feedback_enabled == 0 &&
+    if (!VideoCommon::Nx2Experiment::On(VideoCommon::Nx2Experiment::BackPicksOff) &&
+        maxwell3d->regs.transform_feedback_enabled == 0 &&
         (MakeDrawParams(maxwell3d->draw_manager.draw_state, instance_count, is_indexed)
                  .num_vertices == 0 ||
          (instance_count == 0 && [this] {
@@ -2811,6 +2813,7 @@ void RasterizerVulkan::FrameDumpPass(const Framebuffer* framebuffer) {
 }
 
 void RasterizerVulkan::TickFrame() {
+    VideoCommon::Nx2Experiment::Refresh();
     if (VideoCore::Nx2Debug::HasRequests()) {
         if (auto capture = VideoCore::Nx2Debug::TakeCapture()) {
             frame_dump.Arm(std::move(capture->directory), capture->sampled, capture->buffers,
