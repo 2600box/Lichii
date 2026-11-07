@@ -112,9 +112,32 @@ TEST_CASE("Rollback without a previous copy fails and changes nothing", "[update
 
 TEST_CASE("Only an existing file in a writable folder can be replaced", "[updater]") {
     TempDir dir;
-    CHECK_FALSE(UpdateInstaller::CanReplace(dir.path / "missing.AppImage"));
+    const auto target = dir.path / "lichii.AppImage";
+    CHECK_FALSE(UpdateInstaller::CanReplace(target));
     CHECK_FALSE(UpdateInstaller::CanReplace(dir.path));
-    CHECK_FALSE(fs::exists(dir.path / ".lichii-update-write-test"));
+    Write(target, "x");
+    Write(dir.path / ".lichii-update-write-test", "kept");
+    CHECK(UpdateInstaller::CanReplace(target));
+    CHECK(Read(dir.path / ".lichii-update-write-test") == "kept");
+    std::size_t count = 0;
+    for ([[maybe_unused]] const auto& entry : fs::directory_iterator{dir.path}) {
+        ++count;
+    }
+    CHECK(count == 2);
+}
+
+TEST_CASE("Only one holder at a time gets the lock", "[updater]") {
+    TempDir dir;
+    const auto path = UpdateInstaller::LockPath(dir.path / "lichii.AppImage");
+    CHECK(path == dir.path / "lichii.AppImage.lock");
+    {
+        const UpdateInstaller::Lock first{path};
+        CHECK(first.Held());
+        const UpdateInstaller::Lock second{path};
+        CHECK_FALSE(second.Held());
+    }
+    const UpdateInstaller::Lock third{path};
+    CHECK(third.Held());
 }
 
 namespace {
@@ -247,7 +270,47 @@ TEST_CASE("A failed install puts every file back", "[updater]") {
     CHECK_FALSE(fs::exists(install / ".update-backup.tmp"));
     CHECK_FALSE(fs::exists(install / "install-manifest.txt"));
 }
+
+TEST_CASE("A failed restore keeps the backup it restores from", "[updater]") {
+    TempDir dir;
+    const auto install = dir.path / "app";
+    const auto backup = install / ".update-backup";
+    Put(install, "a.dll", "v2 a");
+    Put(install, "locked/b.dll", "v2 b");
+    Put(backup, "a.dll", "v1 a");
+    Put(backup, "locked/b.dll", "v1 b");
+    if (geteuid() == 0) {
+        SKIP("root ignores directory permissions");
+    }
+    fs::permissions(install / "locked", fs::perms::owner_read | fs::perms::owner_exec);
+
+    std::error_code ec;
+    CHECK_FALSE(UpdateInstaller::Install(backup, install, ec));
+    fs::permissions(install / "locked", fs::perms::owner_all);
+    CHECK(Read(install / "a.dll") == "v2 a");
+    CHECK(Read(install / "locked/b.dll") == "v2 b");
+    CHECK(Read(backup / "a.dll") == "v1 a");
+    CHECK(Read(backup / "locked/b.dll") == "v1 b");
+}
 #endif
+
+TEST_CASE("The user folder is protected whatever its letter case", "[updater]") {
+    TempDir dir;
+    const auto install = dir.path / "app";
+    const auto staging = install / ".update-staging";
+    Put(install, "lichii.exe", "old exe");
+    Put(install, "USER/data.bin", "mine");
+    Put(staging, "lichii.exe", "new exe");
+    Put(staging, "User/config.ini", "must not be installed");
+
+    std::error_code ec;
+    REQUIRE(UpdateInstaller::Install(staging, install, ec));
+    CHECK(Read(install / "USER/data.bin") == "mine");
+    CHECK_FALSE(fs::exists(install / "User/config.ini"));
+    CHECK(Read(install / "install-manifest.txt") == "lichii.exe\n");
+    CHECK(Files(install / ".update-backup") ==
+          std::set<std::string>{"lichii.exe", "install-manifest.txt"});
+}
 
 TEST_CASE("Path list entries inside a folder are removed", "[updater]") {
     using UpdateInstaller::StripPathListEntries;

@@ -15,6 +15,8 @@
 
 #include <windows.h>
 
+#include <shellapi.h>
+
 #include "frontend_common/update_installer.h"
 
 namespace fs = std::filesystem;
@@ -40,8 +42,12 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     LocalFree(argv);
 
     if (HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, pid)) {
-        WaitForSingleObject(process, 120000);
+        const DWORD wait = WaitForSingleObject(process, 120000);
         CloseHandle(process);
+        if (wait != WAIT_OBJECT_0) {
+            Log(install_dir, "Lichii did not close in time, the update was not installed");
+            return 1;
+        }
     }
 
     std::error_code ec;

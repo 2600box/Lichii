@@ -4,11 +4,20 @@
 #include "frontend_common/update_installer.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <fstream>
 #include <set>
 #include <thread>
 #include <vector>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -19,7 +28,13 @@ namespace {
 constexpr std::string_view ProtectedFolder = "user";
 
 bool IsProtected(const fs::path& relative) {
-    return !relative.empty() && relative.begin()->generic_string() == ProtectedFolder;
+    if (relative.empty()) {
+        return false;
+    }
+    const auto first = relative.begin()->generic_string();
+    return std::ranges::equal(first, ProtectedFolder, [](unsigned char a, unsigned char b) {
+        return std::tolower(a) == std::tolower(b);
+    });
 }
 
 // A rename can fail for a moment on Windows while a virus scanner holds the file.
@@ -68,6 +83,44 @@ struct Step {
 
 } // namespace
 
+#ifdef _WIN32
+Lock::Lock(const fs::path& path)
+    : handle(reinterpret_cast<std::intptr_t>(
+          CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS,
+                      FILE_ATTRIBUTE_NORMAL, nullptr))) {}
+
+Lock::~Lock() {
+    if (Held()) {
+        CloseHandle(reinterpret_cast<HANDLE>(handle));
+    }
+}
+
+bool Lock::Held() const {
+    return reinterpret_cast<HANDLE>(handle) != INVALID_HANDLE_VALUE;
+}
+#else
+Lock::Lock(const fs::path& path) : handle(open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600)) {
+    if (handle >= 0 && flock(static_cast<int>(handle), LOCK_EX | LOCK_NB) != 0) {
+        close(static_cast<int>(handle));
+        handle = -1;
+    }
+}
+
+Lock::~Lock() {
+    if (Held()) {
+        close(static_cast<int>(handle));
+    }
+}
+
+bool Lock::Held() const {
+    return handle >= 0;
+}
+#endif
+
+fs::path LockPath(const fs::path& target) {
+    return fs::path{target}.concat(".lock");
+}
+
 fs::path StagedPath(const fs::path& target) {
     return fs::path{target}.concat(".new");
 }
@@ -81,7 +134,13 @@ bool CanReplace(const fs::path& target) {
     if (!fs::is_regular_file(target, ec)) {
         return false;
     }
-    const auto probe = target.parent_path() / ".lichii-update-write-test";
+    const auto probe =
+        target.parent_path() /
+        (".lichii-update-write-test-" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    if (fs::symlink_status(probe, ec).type() != fs::file_type::not_found) {
+        return false;
+    }
     const bool writable = std::ofstream{probe}.is_open();
     fs::remove(probe, ec);
     return writable;
@@ -231,7 +290,7 @@ bool Install(const fs::path& staging, const fs::path& install_dir, std::error_co
         for (auto step = steps.rbegin(); step != steps.rend(); ++step) {
             const auto target = install_dir / step->relative;
             if (step->placed_new) {
-                fs::remove(target, ignored);
+                Move(target, staging / step->relative, ignored);
             }
             if (step->had_old) {
                 Move(pending_backup / step->relative, target, ignored);

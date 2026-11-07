@@ -223,6 +223,14 @@ void UpdateDialog::Download() {
 }
 
 void UpdateDialog::InstallInPlace(const std::filesystem::path& target) {
+    const UpdateInstaller::Lock lock{UpdateInstaller::LockPath(target)};
+    if (!lock.Held()) {
+        QtCommon::Frontend::Critical(tr("Failed to install the update"),
+                                     tr("Another Lichii window is already updating this "
+                                        "installation."));
+        return;
+    }
+
     const auto staged = UpdateInstaller::StagedPath(target);
     if (!DownloadTo(QString::fromStdString(staged.string()))) {
         return;
@@ -407,6 +415,21 @@ bool UpdateDialog::DownloadTo(const QString& filename) {
             tr("The downloaded file does not match the checksum GitHub published for it, so it "
                "was discarded. Try again later."));
         return false;
+    }
+
+    const bool wrong_size = m_asset.size != 0 && received != m_asset.size;
+    const bool wrong_hash =
+        !m_asset.sha256.empty() &&
+        hash.result().toHex() != QByteArray::fromStdString(m_asset.sha256);
+    if (wrong_size || wrong_hash) {
+        LOG_ERROR(Frontend, "Downloaded {} does not match the published size or SHA-256",
+                  m_asset.filename);
+        file.cancelWriting();
+        QtCommon::Frontend::Critical(
+            tr("Download failed verification"),
+            tr("The downloaded file does not match the checksum GitHub published for it, so it "
+               "was discarded. Try again later."));
+        return;
     }
 
     if (!file.commit()) {
