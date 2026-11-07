@@ -21,6 +21,12 @@
 
 namespace ConfigurationShared {
 
+/**
+ * Builds the label and tooltip every settings widget shows, keyed by setting id.
+ *
+ * @param parent Object used for translation lookups.
+ * @return The translation map.
+ */
 std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     std::unique_ptr<TranslationMap> translations = std::make_unique<TranslationMap>();
     const auto& tr = [](const char* text) -> QString { return QCoreApplication::translate("ConfigurationShared", text); };
@@ -209,6 +215,9 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, skip_cpu_inner_invalidation, tr("Skip CPU Inner Invalidation"),
            tr("Skips certain cache invalidations during memory updates, reducing CPU usage and "
               "improving latency. This may cause soft-crashes."));
+    INSERT(Settings, fps_limit, tr("FPS Limit"),
+           tr("Caps how often the game presents, so the game itself runs at this rate. 0 leaves "
+              "the frame rate to the game and the display."));
     INSERT(Settings, vsync_mode, tr("VSync Mode:"),
            tr("FIFO (VSync) does not drop frames or exhibit tearing but is limited by the screen "
               "refresh rate.\nFIFO Relaxed allows tearing as it recovers from a slow down.\n"
@@ -277,7 +286,7 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "emulated CPU cores off them.\n"
               "Can hurt performance on CPUs with few cores. Skipped on CPUs with fewer than 6 "
               "physical performance cores.\n"
-              "Windows only. Takes effect when a game starts."));
+              "Windows and Linux only. Takes effect when a game starts."));
 
     INSERT(Settings, use_vulkan_driver_pipeline_cache, tr("Use Vulkan pipeline cache"),
            tr("Enables GPU vendor-specific pipeline cache.\nThis option can improve shader loading "

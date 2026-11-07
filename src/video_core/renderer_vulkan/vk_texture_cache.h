@@ -117,6 +117,10 @@ public:
         return memory_allocator.MemoryPressureEvents();
     }
 
+    u32 FailedImages() const noexcept {
+        return memory_allocator.FailedImages();
+    }
+
     void LogMemoryStatistics() const;
 
     /// True when ASTC is re-compressed to BC3 and opaque images may use BC1 instead.
@@ -477,6 +481,11 @@ public:
     Image& operator=(Image&&) = default;
 
     u32 HostMipLevels() const noexcept;
+
+    /// No memory was left to make it: the texture cache drops it instead of using it.
+    [[nodiscard]] bool OutOfMemory() const noexcept {
+        return !original_image && info.type != VideoCommon::ImageType::Buffer;
+    }
 
     void UploadMemory(VkBuffer buffer, VkDeviceSize offset,
                       std::span<const VideoCommon::BufferImageCopy> copies);
