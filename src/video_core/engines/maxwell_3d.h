@@ -3401,6 +3401,12 @@ private:
         return value == nullptr || value[0] != '0';
     }();
     const bool perf_verify = VideoCommon::Nx2Perf::Verify();
+    // EDEN_NX2_DMA_READ_VERIFY=1: a macro DMA read the front makes without draining the split
+    // (FrontDmaRead) drains it anyway and has the caches write the words out, as every read
+    // did before, and the macro gets those words. The front counts the reads whose words
+    // differ from the ones it read first and logs the counts every 10 s, the first 16 reads
+    // with their words. The differences must stay 0. Read per engine, as the switch above.
+    const bool dma_read_verify = std::getenv("EDEN_NX2_DMA_READ_VERIFY") != nullptr;
     /// Parameters that have been submitted to the macro call so far.
     std::vector<u32> macro_params;
 
