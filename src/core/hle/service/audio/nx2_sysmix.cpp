@@ -108,11 +108,11 @@ struct SysmixOutput::Impl {
                 .count());
         LOG_INFO(Service_Audio,
                  "sysmix stream {} output: copied={} accepted={} nonzero={} blocks={} full={} "
-                 "queued={} retried={} padded={} filled={} emu_us={}",
+                 "queued={} retried={} padded={} deferred={} filled={} emu_us={}",
                  id, counters.copied_frames, counters.accepted_frames, counters.nonzero_frames,
                  counters.admitted_blocks, counters.backpressure,
                  host ? host->GetQueueSize() : 0, counters.retried_frames, counters.padded_frames,
-                 filled, emu_us);
+                 counters.deferred, filled, emu_us);
     }
 
     Core::System& system;
