@@ -51,6 +51,7 @@ public:
         return inputs.size() < ReadyWatermark;
     }
 
+    /// Whether SubmitInput refuses packets other than end of stream: RefuseAt or more queued.
     bool Full() const {
         return inputs.size() >= RefuseAt;
     }
