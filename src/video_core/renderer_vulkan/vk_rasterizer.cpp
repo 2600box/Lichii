@@ -1085,6 +1085,10 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
         }
 
         if (mesh_draw && mesh_emulation_vertices_per_group != 0) {
+            // The emulation pipeline's static input assembly and vertex input replaced the
+            // dynamic topology, primitive restart, vertex input and strides the next draw relies
+            // on, so it must set them again.
+            state_tracker.InvalidateCommandBufferState();
             const u32 vertices{mesh_emulation_groups * mesh_emulation_vertices_per_group};
             // EDEN_NX2_MESH_EMULATION_SKIP_DRAW=1: run the compute pass (and its render pass
             // break) but draw nothing, to tell the emulated geometry from the break's effects.
