@@ -214,7 +214,9 @@ json ExperimentSwitch(ToolState&, const json& params) {
     if (value == nullptr) {
         throw std::runtime_error{"unknown experiment switch"};
     }
-    const int maximum = name == "EDEN_NX2_SWAP_INTERVAL" ? 4 : name == "EDEN_NX2_SEM_FAST" ? 2 : 1;
+    const int maximum = name == "EDEN_NX2_FENCE_FLUSH_US" ? 5000 :
+                        name == "EDEN_NX2_DMA_SNAPSHOT" ? 10 :
+                        name == "EDEN_NX2_SWAP_INTERVAL" ? 4 : name == "EDEN_NX2_SEM_FAST" ? 2 : 1;
     if (params.contains("value")) {
         if (!params.at("value").is_number_integer()) {
             throw std::runtime_error{"value must be an integer"};
@@ -227,7 +229,8 @@ json ExperimentSwitch(ToolState&, const json& params) {
         LOG_INFO(Debug, "Experiment switch {}={}", name, next);
     }
     return {{"name", name},
-            {"value", VideoCore::Nx2Debug::SwitchValue(*value, name.c_str())}};
+            {"value", VideoCore::Nx2Debug::SwitchValue(
+                *value, name.c_str(), name == "EDEN_NX2_FENCE_FLUSH_US" ? 500 : 0)}};
 }
 
 json FrameTimes(ToolState& state, const json& params) {

@@ -43,6 +43,7 @@ namespace VideoCore::Nx2Debug {
 inline std::atomic<int> g_host_pace{-1};
 inline std::atomic<int> g_host_fixed_refresh{-1};
 inline std::atomic<int> g_swap_interval{-1};
+inline std::atomic<int> g_fence_flush_us{-1};
 
 /// The live switch called `name`, or null.
 [[nodiscard]] inline std::atomic<int>* FindSwitch(std::string_view name) {
@@ -54,6 +55,9 @@ inline std::atomic<int> g_swap_interval{-1};
     }
     if (name == "EDEN_NX2_SWAP_INTERVAL") {
         return &g_swap_interval;
+    }
+    if (name == "EDEN_NX2_FENCE_FLUSH_US") {
+        return &g_fence_flush_us;
     }
     return nullptr;
 }
