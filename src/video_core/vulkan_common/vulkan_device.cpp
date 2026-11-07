@@ -1650,9 +1650,15 @@ void Device::RemoveUnsuitableExtensions() {
     RemoveExtensionFeatureIfUnsuitable(extensions.robustness_2, features.robustness2,
                                        robustness2_extension_name);
 
-    // VK_EXT_shader_atomic_float: only 32-bit float adds on storage buffers are used.
+    // VK_EXT_shader_atomic_float: only 32-bit float adds on storage buffers are used, and only on
+    // AMD drivers until other vendors are validated; elsewhere a compare-exchange loop adds.
     {
-        const VkBool32 buffer_add = features.shader_atomic_float.shaderBufferFloat32AtomicAdd;
+        const VkDriverId atomic_driver = properties.driver.driverID;
+        const bool amd = atomic_driver == VK_DRIVER_ID_AMD_PROPRIETARY ||
+                         atomic_driver == VK_DRIVER_ID_AMD_OPEN_SOURCE ||
+                         atomic_driver == VK_DRIVER_ID_MESA_RADV;
+        const VkBool32 buffer_add =
+            amd ? features.shader_atomic_float.shaderBufferFloat32AtomicAdd : VK_FALSE;
         void* const next_feature = features.shader_atomic_float.pNext;
         features.shader_atomic_float = {};
         features.shader_atomic_float.sType =

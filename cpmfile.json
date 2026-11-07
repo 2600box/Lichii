@@ -285,9 +285,6 @@
         "options": [
             "SIRIT_USE_SYSTEM_SPIRV_HEADERS ON"
         ],
-        "patches": [
-            "0001-atomic-float-add.patch"
-        ],
         "repo": "eden-emulator/sirit",
         "version": "v1.0.5"
     },

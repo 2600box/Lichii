@@ -379,7 +379,10 @@ Id EmitStorageAtomicAddF32(EmitContext& ctx, const IR::Value& binding, const IR:
         const Id pointer{StoragePointer(ctx, ctx.storage_types.F32, &StorageDefinitions::F32,
                                         binding, offset, sizeof(f32))};
         const auto [scope, semantics]{AtomicArgs(ctx)};
-        return ctx.OpAtomicFAddEXT(ctx.F32[1], pointer, scope, semantics, value);
+        // Sirit has no OpAtomicFAddEXT; it takes the same operands as OpAtomicIAdd.
+        const Id result{ctx.OpAtomicIAdd(ctx.F32[1], pointer, scope, semantics, value)};
+        ctx.opcode_rewrites.emplace_back(result.value, spv::Op::OpAtomicFAddEXT);
+        return result;
     }
     const Id ssbo{ctx.ssbos[binding.U32()].U32};
     const Id base_index{StorageIndex(ctx, offset, sizeof(u32))};

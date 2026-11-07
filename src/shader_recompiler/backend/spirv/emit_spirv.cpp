@@ -602,7 +602,8 @@ void RewriteOpcodes(std::vector<u32>& code, std::span<const std::pair<u32, spv::
             return;
         }
         if (opcode == spv::Op::OpGroupNonUniformShuffleXor ||
-            opcode == spv::Op::OpGroupNonUniformQuadBroadcast) {
+            opcode == spv::Op::OpGroupNonUniformQuadBroadcast ||
+            opcode == spv::Op::OpAtomicIAdd) {
             const auto it{std::ranges::find(rewrites, code[offset + 2],
                                             &std::pair<u32, spv::Op>::first)};
             if (it != rewrites.end()) {

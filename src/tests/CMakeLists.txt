@@ -106,6 +106,7 @@ add_executable(tests
     video_core/spirv_software_matrix.cpp
     video_core/spirv_builtin_capabilities.cpp
     video_core/spirv_min_max_denorms.cpp
+    video_core/spirv_float_atomic_add.cpp
     video_core/spirv_nan_safe_min_max.cpp
     video_core/virtual_range_cache.cpp
     common/bit_field.cpp
