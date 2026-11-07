@@ -4471,6 +4471,14 @@ void MainWindow::OnGameListPrepareShaderWarm(u64 program_id, const std::string& 
 
 /// Deletes the game's warm-up files after a confirmation, showing the error when it fails.
 void MainWindow::OnGameListDeleteShaderWarm(u64 program_id) {
+    if (shader_warm_dialog && shader_warm_dialog->IsRunning()) {
+        // The builder writes these files: deleting them under it would lose the result or fail it.
+        QMessageBox::information(this, tr("Delete Shader Warm-up"),
+                                 tr("Shaders are being prepared. Try again when it is done."));
+        shader_warm_dialog->raise();
+        shader_warm_dialog->activateWindow();
+        return;
+    }
     if (QMessageBox::question(this, tr("Delete Shader Warm-up"),
                               tr("Delete the shader warm-up files of this game? You can prepare "
                                  "them again at any time."),

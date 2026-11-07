@@ -1644,7 +1644,8 @@ void RasterizerVulkan::Clear(u32 layer_count) {
     if (clear_covers_render_area && base_array_layer == 0 &&
         clear_layers.count >= framebuffer->Layers()) {
         const u32 clear_rt = regs.clear_surface.RT;
-        const u64 color_address = use_color && clear_rt < Maxwell::NumRenderTargets
+        const u64 color_address = use_color && color_full_channels &&
+                                          clear_rt < Maxwell::NumRenderTargets
                                       ? regs.rt[clear_rt].Address()
                                       : 0;
         const u64 depth_address =
