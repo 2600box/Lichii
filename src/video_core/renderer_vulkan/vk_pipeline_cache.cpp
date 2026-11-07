@@ -944,6 +944,13 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         return;
     }
     if (!pipeline_cache_filename.empty()) {
+        // A later load (another title or program) stops the earlier warm-up and waits for it, so
+        // StartComputeWarm can start this title's and warm_cancel is only cleared once no thread
+        // of the earlier load is left.
+        warm_cancel = true;
+        compute_warm_threads.clear();
+        warm_stop_callback.reset();
+        compute_warm_done = true;
         background_pipelines.Stop();
         workers.WaitForRequests();
         serialization_thread.WaitForRequests();
