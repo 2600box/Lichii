@@ -25,6 +25,7 @@ using Bytes = std::span<const u8>;
 constexpr u64 MaxAllocation = 512ULL * 1024 * 1024;
 constexpr std::array<u8, 8> ControlMagic{0x34, 0x12, 0x76, 0x98, 0xc9, 0x00, 0x00, 0x00};
 
+/// The `size` bytes of `data` at `offset`. Throws ArchiveError when they run past the end.
 Bytes Extent(Bytes data, u64 offset, u64 size) {
     if (offset > data.size() || size > data.size() - offset) {
         throw ArchiveError(
@@ -52,14 +53,17 @@ bool Is(Bytes data, u64 offset, std::string_view text) {
            std::memcmp(data.data() + offset, text.data(), text.size()) == 0;
 }
 
+/// True when the control section starts with the supported native control magic.
 bool IsControlMagic(Bytes control) {
     return control.size() >= 8 && std::memcmp(control.data(), ControlMagic.data(), 8) == 0;
 }
 
+/// True when `text` ends with `suffix`.
 bool EndsWith(std::string_view text, std::string_view suffix) {
     return text.size() >= suffix.size() && text.substr(text.size() - suffix.size()) == suffix;
 }
 
+/// ASCII lowercase copy of `text`.
 std::string Lower(std::string_view text) {
     std::string result(text);
     std::transform(result.begin(), result.end(), result.begin(), [](char c) {
@@ -77,6 +81,8 @@ struct Record {
 // ---------------------------------------------------------------------------------------------
 // Decompressors
 
+/// Decompresses one whole zstd frame, with the dictionary it names when it needs one. Throws on an
+/// unknown or oversized content size, a missing dictionary or trailing input.
 std::vector<u8> ZstdDecompress(Bytes data, const ZstdDictionaries* dictionaries) {
     const unsigned long long size = ZSTD_getFrameContentSize(data.data(), data.size());
     if (size == ZSTD_CONTENTSIZE_UNKNOWN || size == ZSTD_CONTENTSIZE_ERROR ||
@@ -118,6 +124,8 @@ std::vector<u8> ZstdDecompress(Bytes data, const ZstdDictionaries* dictionaries)
     return output;
 }
 
+/// Decompresses a raw LZ4 block that must produce exactly `expected` bytes. Throws on malformed
+/// input.
 std::vector<u8> Lz4Block(Bytes data, u64 expected) {
     if (expected > MaxAllocation) {
         throw ArchiveError("excessive LZ4 allocation");
@@ -174,6 +182,7 @@ std::vector<u8> Lz4Block(Bytes data, u64 expected) {
     return output;
 }
 
+/// Inflates a zlib stream of `size` bytes. Throws when it is incomplete or has trailing input.
 std::vector<u8> ZlibDecompress(Bytes payload, u64 size) {
     std::vector<u8> output(static_cast<size_t>(size) + 1);
     z_stream stream{};
@@ -195,6 +204,7 @@ std::vector<u8> ZlibDecompress(Bytes payload, u64 size) {
     return output;
 }
 
+/// Unpacks a DCX file (zstd or zlib payload) and checks the result against the header's size.
 std::vector<u8> DcxDecompress(Bytes data) {
     Extent(data, 0, 0x30);
     if (!Is(data, 0, std::string_view{"DCX\0", 4}) || !Is(data, 0x18, std::string_view{"DCS\0", 4}) ||
@@ -230,6 +240,8 @@ struct Member {
     Bytes payload;
 };
 
+/// The named members of a SARC archive (either byte order). Throws on any malformed header, name
+/// or member range.
 std::vector<Member> ParseSarc(Bytes data) {
     Extent(data, 0, 0x20);
     if (!Is(data, 0, "SARC")) {
@@ -308,6 +320,8 @@ struct Bnd4Member {
     Bytes payload;
 };
 
+/// The members of a BND4 archive, with DCX compressed members unpacked. Throws on unsupported
+/// formats or sizes.
 std::vector<Bnd4Member> ParseBnd4(Bytes data) {
     Extent(data, 0, 64);
     if (!Is(data, 0, "BND4") || !Is(data, 9, std::string_view{"\0\1\0", 3}) ||
@@ -375,6 +389,8 @@ u32 HeaderType(Bytes code) {
     return (Le<u32>(code, 0) >> 10) & 15;
 }
 
+/// A graphics record whose stage comes from the native program header. Throws when the code size,
+/// header stage or control version is not supported.
 Record GraphicsRecord(Bytes code, Bytes control) {
     if (code.size() <= 128 || (code.size() - 128) % 16) {
         throw ArchiveError("unsupported native graphics allocation");
@@ -389,6 +405,8 @@ Record GraphicsRecord(Bytes code, Bytes control) {
     return {GraphicsStages[stage - 1], code, control};
 }
 
+/// Every stage program of every variation in a BNSH file, task and mesh included. Throws when the
+/// version, layout or a stage's header does not check out.
 std::vector<Record> ParseBnsh(Bytes data) {
     Extent(data, 0, 0x98);
     if (!Is(data, 0, std::string_view{"BNSH\0\0\0\0", 8}) || !Is(data, 0x60, "grsc")) {
@@ -470,6 +488,8 @@ std::vector<Record> ParseBnsh(Bytes data) {
     return result;
 }
 
+/// Every BNSH file embedded in `data` with its offset, each one validated. Throws when there is
+/// none.
 std::vector<std::pair<size_t, Bytes>> FindEmbeddedBnsh(Bytes data) {
     static constexpr std::array<u8, 8> magic{'B', 'N', 'S', 'H', 0, 0, 0, 0};
     std::vector<std::pair<size_t, Bytes>> result;
@@ -497,6 +517,7 @@ std::vector<std::pair<size_t, Bytes>> FindEmbeddedBnsh(Bytes data) {
     return result;
 }
 
+/// The BNSH files of a BFSHA archive, after its header checks.
 std::vector<std::pair<size_t, Bytes>> FindBnsh(Bytes data) {
     if (data.size() < 0x20 || !Is(data, 0, "FSHA")) {
         throw ArchiveError("not a BFSHA archive");
@@ -507,6 +528,8 @@ std::vector<std::pair<size_t, Bytes>> FindBnsh(Bytes data) {
     return FindEmbeddedBnsh(data);
 }
 
+/// The records of a CGSB container (one stage, up to 16 programs). Throws when the platform or
+/// stage is not supported.
 std::vector<Record> ParseCgsb(Bytes data) {
     Extent(data, 0, 24);
     if (!Is(data, 0, std::string_view{"CGSB\x33\x22\x11\0", 8})) {
@@ -551,6 +574,8 @@ std::vector<Record> ParseCgsb(Bytes data) {
     return result;
 }
 
+/// The records of a SHN container, whose two LZ4 blocks are unpacked into `metadata` and `code`
+/// (the records point into them). Throws when it holds no supported record.
 std::vector<Record> ParseShn(Bytes data, std::vector<u8>& metadata, std::vector<u8>& code) {
     Extent(data, 0, 68);
     if (!Is(data, 0, "SHN!")) {
@@ -732,12 +757,14 @@ struct Walker {
     const std::function<void(const ShaderRecord&)>& on_record;
     const std::function<void(const std::string&)>& on_member_error;
 
+    /// Passes every record to the caller's record callback.
     void Emit(const std::vector<Record>& records) const {
         for (const auto& record : records) {
             on_record(ShaderRecord{record.stage, record.code, record.control});
         }
     }
 
+    /// Walks one archive member, reporting its error to the caller instead of stopping the walk.
     void WalkMember(Bytes payload, const std::string& name, int depth) const {
         try {
             Walk(payload, name, depth);
@@ -746,6 +773,8 @@ struct Walker {
         }
     }
 
+    /// Detects the container format by its magic and unpacks or parses it, recursing into members.
+    /// Known non-shader files are skipped; other unknown data throws.
     void Walk(Bytes data, const std::string& name, int depth) const {
         if (depth > 12) {
             throw ArchiveError("excessive container nesting");
@@ -804,6 +833,7 @@ struct Walker {
 
 ZstdDictionaries::ZstdDictionaries() = default;
 
+/// Frees every loaded dictionary.
 ZstdDictionaries::~ZstdDictionaries() {
     for (const auto& [id, dictionary] : dictionaries) {
         ZSTD_freeDDict(dictionary);
@@ -837,6 +867,7 @@ void ZstdDictionaries::Load(std::span<const u8> pack) {
     }
 }
 
+/// The dictionary with this ID, null when none was loaded.
 const ZSTD_DDict_s* ZstdDictionaries::Find(u32 id) const {
     const auto it = dictionaries.find(id);
     return it == dictionaries.end() ? nullptr : it->second;

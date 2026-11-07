@@ -784,6 +784,8 @@ bool PreloadAllPipelines() {
 }
 } // Anonymous namespace
 
+/// Stops the warm-up threads, background builds and workers, then saves the used pipeline list and
+/// the driver's pipeline cache.
 PipelineCache::~PipelineCache() {
     // Stop the warm-ups first: their builds use the members below.
     graphics_warm_threads.clear();
@@ -970,6 +972,9 @@ ComputePipeline* PipelineCache::CurrentComputePipeline() {
                      kepler_compute->regs.code_loc.Address() + qmd.program_start, key);
 }
 
+/// Loads the title's pipeline cache from disk and builds its pipelines, reporting progress through
+/// `callback`, then (unless loading was stopped) starts the background builds and the compute and
+/// graphics warm-ups.
 void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading,
                                       const VideoCore::DiskResourceLoadCallback& callback) {
     if (title_id == 0) {
@@ -1228,6 +1233,7 @@ struct WarmStamp {
     u32 cache_version{};
 };
 
+/// The marker values for `file` on this device, empty when the file's size or time cannot be read.
 std::optional<WarmStamp> CurrentStamp(const std::filesystem::path& file, const Device& device,
                                       u64 entries) {
     std::error_code ec;
@@ -1271,6 +1277,8 @@ bool WarmAlreadyDone(const std::filesystem::path& file, const std::filesystem::p
     return false;
 }
 
+/// Writes the marker for `file` next to it, or in the title's shader folder when that write
+/// fails.
 void WriteWarmMarker(const std::filesystem::path& file, const std::filesystem::path& title_file,
                      const Device& device, u64 entries) {
     const auto stamp = CurrentStamp(file, device, entries);
@@ -1294,6 +1302,7 @@ void WriteWarmMarker(const std::filesystem::path& file, const std::filesystem::p
 struct WarmProgressThrottle {
     std::atomic<s64> last{};
 
+    /// True for the first caller once 250 ms have passed since the last one it let through.
     bool Due() {
         const s64 now = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now().time_since_epoch())
@@ -1794,6 +1803,8 @@ bool PipelineCache::WarmGraphicsLibraries(ShaderPools& pools, const GraphicsPipe
     return pipeline && !pipeline->Failed();
 }
 
+/// Per-frame upkeep: reports library counters, frees evicted and retired pipelines the GPU is done
+/// with, and every 600 frames evicts unused pipelines and forgets old render target records.
 void PipelineCache::TickFrame() {
     ++frame_count;
     native_wait_budget_us =
@@ -2079,6 +2090,9 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) {
     return discard ? nullptr : pipeline;
 }
 
+/// Translates the key's stages and creates the pipeline, on the library route when it qualifies.
+/// Null when the pipeline cannot run on this device (or, with `libraries_only`, takes the
+/// monolithic route) or a stage fails to translate.
 std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     ShaderPools& pools, const GraphicsPipelineCacheKey& key,
     std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,

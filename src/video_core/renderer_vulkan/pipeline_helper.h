@@ -244,6 +244,8 @@ public:
         });
     }
 
+    /// The push constant range every pipeline layout uses (rescaling and render area data) and the
+    /// stages that see it. Compute leaves out the down factor.
     VkPushConstantRange PushConstantRange() const {
         using Shader::Backend::SPIRV::RenderAreaLayout;
         using Shader::Backend::SPIRV::RescalingLayout;
@@ -302,6 +304,8 @@ public:
         return bindings.empty();
     }
 
+    /// Pipeline layout with `descriptor_set_layout` as its only set (no set when it is null) and
+    /// the shared push constant range.
     vk::PipelineLayout CreatePipelineLayout(VkDescriptorSetLayout descriptor_set_layout) const {
         const VkPushConstantRange range{PushConstantRange()};
         return device->GetLogical().CreatePipelineLayout({

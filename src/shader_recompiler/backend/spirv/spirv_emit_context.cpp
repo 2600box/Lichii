@@ -274,6 +274,8 @@ void Name(EmitContext& ctx, Id object, std::string_view format_str, Args&&... ar
                          .c_str());
 }
 
+/// Declares one uniform block per constant buffer descriptor, viewed as an array of `type`, in
+/// the context's descriptor set from `binding` on.
 void DefineConstBuffers(EmitContext& ctx, const Info& info, Id UniformDefinitions::*member_type,
                         u32 binding, Id type, char type_char, u32 element_size) {
     const Id array_type{ctx.TypeArray(type, ctx.Const(65536U / element_size))};
@@ -304,6 +306,8 @@ void DefineConstBuffers(EmitContext& ctx, const Info& info, Id UniformDefinition
     }
 }
 
+/// Declares one storage buffer per storage buffer descriptor, viewed as a runtime array of `type`,
+/// in the context's descriptor set from `binding` on.
 void DefineSsbos(EmitContext& ctx, StorageTypeDefinition& type_def,
                  Id StorageDefinitions::*member_type, const Info& info, u32 binding, Id type,
                  u32 stride) {
@@ -471,6 +475,8 @@ void VectorTypes::Define(Sirit::Module& sirit_ctx, Id base_type, std::string_vie
     }
 }
 
+/// Starts the SPIR-V module of `program`: common types and interfaces, then every resource in the
+/// descriptor set and binding ranges `bindings` gives (one shared range when bindings are unified).
 EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_info_,
                          IR::Program& program, Bindings& bindings)
     : Sirit::Module(profile_.supported_spirv), profile{profile_}, runtime_info{runtime_info_},
@@ -1558,6 +1564,8 @@ void EmitContext::DefineStorageBuffers(const Info& info, u32& binding) {
     }
 }
 
+/// Declares a sampled buffer image per texture buffer descriptor and advances `binding`. Throws on
+/// arrays of texture buffers.
 void EmitContext::DefineTextureBuffers(const Info& info, u32& binding) {
     if (info.texture_buffer_descriptors.empty()) {
         return;
@@ -1586,6 +1594,7 @@ void EmitContext::DefineTextureBuffers(const Info& info, u32& binding) {
     }
 }
 
+/// Declares a storage buffer image per image buffer descriptor and advances `binding`.
 void EmitContext::DefineImageBuffers(const Info& info, u32& binding) {
     image_buffers.reserve(info.image_buffer_descriptors.size());
     for (const ImageBufferDescriptor& desc : info.image_buffer_descriptors) {
@@ -1615,6 +1624,8 @@ void EmitContext::DefineImageBuffers(const Info& info, u32& binding) {
     }
 }
 
+/// Declares a sampled image (or array of them) per texture descriptor, advancing `binding` and
+/// `scaling_index` for each.
 void EmitContext::DefineTextures(const Info& info, u32& binding, u32& scaling_index) {
     textures.reserve(info.texture_descriptors.size());
     for (const TextureDescriptor& desc : info.texture_descriptors) {
@@ -1646,6 +1657,8 @@ void EmitContext::DefineTextures(const Info& info, u32& binding, u32& scaling_in
     }
 }
 
+/// Declares a storage image per image descriptor, advancing `binding` and `scaling_index` for
+/// each.
 void EmitContext::DefineImages(const Info& info, u32& binding, u32& scaling_index) {
     images.reserve(info.image_descriptors.size());
     for (const ImageDescriptor& desc : info.image_descriptors) {

@@ -10,6 +10,7 @@
 namespace Vulkan {
 
 namespace {
+/// Raises `target` to `value` when it is larger, safe against concurrent callers.
 void StoreMax(std::atomic<u64>& target, u64 value) {
     u64 previous = target.load(std::memory_order_relaxed);
     while (previous < value &&
@@ -112,6 +113,7 @@ std::shared_ptr<const GplLibrary> GraphicsPipelineLibraryCache::GetOrCreate(
     return library;
 }
 
+/// Counts one link (unoptimized or optimized) and its time for the next report.
 void GraphicsPipelineLibraryCache::RecordLink(bool optimized, std::chrono::nanoseconds time) {
     const size_t index = optimized ? 1 : 0;
     const u64 ns = static_cast<u64>(time.count());

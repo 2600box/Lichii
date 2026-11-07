@@ -78,6 +78,8 @@ u128 Hash128(std::span<const u8> bytes) {
     return Common::CityHash128(reinterpret_cast<const char*>(bytes.data()), bytes.size());
 }
 
+/// Bytes after an env record's tables for `stage`: 16 for compute, else the 80-byte SPH plus the
+/// geometry or task/mesh extras.
 size_t TailSize(u32 stage) {
     if (stage == 5) {
         return 16;

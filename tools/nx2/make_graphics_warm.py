@@ -91,6 +91,7 @@ def runtime_code(sph, instructions, offsets):
 
 
 def read_override(path):
+    """Instructions, address map offsets and texture buffer index of a lowered override record."""
     data = Path(path).read_bytes()
     magic, version, source_size, count, texture_buffer, map_count = struct.unpack_from('<6I', data)
     if magic != 0x4E454445 or version != 0x3230564F:
@@ -107,6 +108,7 @@ def local_memory(sph):
 
 
 def tail_size(stage):
+    """Bytes after an env record's tables: 16 for compute, else the SPH plus stage extras."""
     return 16 if stage == 5 else 80 + (32 if stage == 3 else 0) + (92 if stage in (7, 8) else 0)
 
 
@@ -146,6 +148,7 @@ def mode(values):
 
 
 def make_entry(stage, code, texture_buffer, bank1, attr_types, template):
+    """Env record and pipeline key for one lowered vertex or fragment program."""
     sph = code[:80]
     bound = texture_buffer if texture_buffer != 0xFFFFFFFF else (0 if stage == 0 else 2)
     cbufs = b''.join(struct.pack('<QI', (1 << 32) | off, struct.unpack_from('<I', bank1, off)[0])
@@ -184,6 +187,7 @@ def sweep(exe, scratch, tag, env, key, guess):
 
 
 def main():
+    """Builds the graphics warm file from the dump and runtime caches; --validate checks SPIR-V."""
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--corpus', default='./corpus',
                     help='static shader dump folder (extract_static_shaders.py output)')
@@ -232,6 +236,7 @@ def main():
             skipped[p['stage']].add(p['code_sha256'])
 
     def lower(program):
+        """Lowers one program; returns it with its record (None on failure) and the error."""
         record = work / f"{program['code_sha256']}.ovr"
         err = None
         if not record.exists():
@@ -275,6 +280,7 @@ def main():
                 by_archive[a].add(b['uh'])
 
     def attr_types(b):
+        """Most common attribute type per slot among other vertex programs of the same archives."""
         others = set().union(*(by_archive[a] for a in b['archives'])) - {b['uh']}
         counts = [collections.Counter() for _ in range(32)]
         for uh in others:
@@ -317,6 +323,7 @@ def main():
     names = list(matched)
 
     def reference(job):
+        """SPIR-V digest of a runtime record, retried with guesses when a read was not recorded."""
         j, i, raw, key = job
         digest, err = sweep(args.sweep, scratch, f'r{j}', raw, key, False)
         if digest is None:  # unrecorded read in the runtime record: guess it

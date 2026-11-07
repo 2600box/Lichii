@@ -258,6 +258,9 @@ vk::Pipeline ComputePipeline::MakeComputePipeline(bool fast) {
     return result;
 }
 
+/// Creates the descriptor layout (descriptor buffer, push descriptor or sets) and queues the build
+/// on `thread_worker`, or builds now without one. With fast first builds an unoptimized pipeline
+/// comes first and the optimized one follows on a worker.
 ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk::PipelineCache& pipeline_cache_,
                                  DescriptorPool& descriptor_pool,
                                  GuestDescriptorQueue& guest_descriptor_queue_,
@@ -413,6 +416,9 @@ bool ComputePipeline::CanReplaceOcarinaUpscale() const {
            std::ranges::none_of(info.storage_buffers_descriptors, &Shader::StorageBufferDescriptor::is_written);
 }
 
+/// Binds the dispatch's buffers, textures and images and records the pipeline and descriptor
+/// binds, swapping in the optimized pipeline once ready and waiting for an unbuilt one. False when
+/// the dispatch must be skipped.
 bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
                                 Tegra::MemoryManager& gpu_memory, Scheduler& scheduler,
                                 BufferCache& buffer_cache, TextureCache& texture_cache,

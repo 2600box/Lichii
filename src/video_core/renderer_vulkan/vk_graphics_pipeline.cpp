@@ -307,6 +307,8 @@ std::chrono::nanoseconds GraphicsPipeline::TakeHoldTime() noexcept {
 }
 
 // TODO(crueter): This is the worst-formatted code I have EVER seen
+/// Creates the descriptor layouts (one set per stage on the library route) and queues the build on
+/// `worker_thread`: libraries and a link, a fast first build, or one monolithic pipeline.
 GraphicsPipeline::GraphicsPipeline(
     Scheduler& scheduler_, BufferCache& buffer_cache_, TextureCache& texture_cache_,
     vk::PipelineCache& pipeline_cache_, VideoCore::ShaderNotify* shader_notify,
@@ -598,6 +600,8 @@ void GraphicsPipeline::AddTransition(GraphicsPipeline* transition) {
     transitions.push_back(transition);
 }
 
+/// Binds the draw's buffers, textures and images for every enabled stage and updates the render
+/// targets, then records the draw state. False when the draw must be skipped.
 template <typename Spec>
 bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     boost::container::small_vector<VideoCommon::ImageViewInOut, 160> views;
@@ -922,6 +926,9 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     return ConfigureDraw(rescaling, render_area);
 }
 
+/// Writes the descriptors, swaps in the optimized pipeline once ready, holds the draw for an
+/// unbuilt one, and records the pipeline, push constant and descriptor binds. False when the
+/// draw must be skipped (descriptor count mismatch or no descriptor memory).
 bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                                      const RenderAreaPushConstant& render_area) {
     if (guest_descriptor_queue.UpdateCount() != num_descriptor_entries) {
@@ -1666,6 +1673,8 @@ void GraphicsPipeline::FillStates(PipelineStates& s) const {
     };
 }
 
+/// Builds the monolithic pipeline from every stage module, unoptimized when `fast` is set. Null
+/// for a mesh pipeline on a device without mesh shaders.
 vk::Pipeline GraphicsPipeline::MakePipeline(VkRenderPass render_pass, bool fast) {
     if (IsMeshPipeline() && !device.IsExtMeshShaderSupported() && !mesh_emulation) {
         return {};
@@ -1839,11 +1848,15 @@ constexpr bool IsPreRasterizationStage(size_t stage) {
     return stage + 1 < Maxwell::MaxShaderStage;
 }
 
+/// True when `stage` belongs to the `part` library (vertex to geometry for pre-rasterization,
+/// fragment otherwise).
 bool InPart(GplPart part, size_t stage) {
     return part == GplPart::PreRasterization ? IsPreRasterizationStage(stage)
                                              : !IsPreRasterizationStage(stage);
 }
 
+/// Create flags of a shader library, keeping link time optimization info when optimized links are
+/// on.
 VkPipelineCreateFlags LibraryFlags() {
     VkPipelineCreateFlags flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
     if (GplOptimizeEnabled()) {
@@ -1853,6 +1866,8 @@ VkPipelineCreateFlags LibraryFlags() {
 }
 } // Anonymous namespace
 
+/// Cache key of the `part` library: everything it is built from (stages, SPIR-V hashes, set
+/// layouts, render pass and the fixed state that part takes), so equal keys give the same library.
 std::string GraphicsPipeline::ShaderLibraryKey(GplPart part, const PipelineStates& s,
                                                VkRenderPass render_pass) const {
     GplKeyWriter key_writer;
@@ -1954,6 +1969,7 @@ std::string GraphicsPipeline::ShaderLibraryKey(GplPart part, const PipelineState
     return key_writer.Data();
 }
 
+/// Builds the `part` shader library with its own per-stage set layouts and pipeline layout.
 GplLibrary GraphicsPipeline::MakeShaderLibrary(GplPart part, const PipelineStates& s,
                                                VkRenderPass render_pass) const {
     GplLibrary library;
@@ -2032,6 +2048,8 @@ GplLibrary GraphicsPipeline::MakeShaderLibrary(GplPart part, const PipelineState
     return library;
 }
 
+/// Links the vertex input, both shader libraries and the fragment output library into a pipeline,
+/// with link time optimization when `optimized` is set.
 vk::Pipeline GraphicsPipeline::LinkLibraries(VkRenderPass render_pass, bool optimized) {
     const std::array<VkPipeline, 4> libraries{
         *vertex_input_library,

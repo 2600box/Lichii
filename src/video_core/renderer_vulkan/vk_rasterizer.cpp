@@ -1508,6 +1508,9 @@ void RasterizerVulkan::DrawTexture() {
                          sampler->Handle(), dst_region, src_region, src_size);
 }
 
+/// Clears the selected color, depth and stencil targets over `layer_count` layers, with a clear
+/// attachment or a blit when only some channels are written. Also tells the pipeline cache which
+/// targets were cleared (heavy draw skip).
 void RasterizerVulkan::Clear(u32 layer_count) {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Clear};
     if (Tegra::Engines::g_nx2_trace_draws_after_upscale > 0) {
