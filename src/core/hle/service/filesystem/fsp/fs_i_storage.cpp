@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <thread>
 
 #include "common/settings.h"
@@ -40,7 +41,11 @@ Result IStorage::Read(
     // Switch 2 storage is many times faster, and a Switch 2 title that streams a movie with
     // hundreds of reads a second (Ocarina of Time's opening: 300-460) sleeps most of each second
     // on the thread that also hands decoder images back, so its video falls seconds behind.
-    if (!Settings::CurrentProgramIsSwitch2()) {
+    static const bool keep_throttle = [] {
+        const char* v = std::getenv("EDEN_NX2_AB_FS_THROTTLE");
+        return v != nullptr && v[0] == '1';
+    }();
+    if (keep_throttle || !Settings::CurrentProgramIsSwitch2()) {
         const auto now = std::chrono::steady_clock::now();
         if (now < next_read_tick) {
             std::this_thread::sleep_for(next_read_tick - now);

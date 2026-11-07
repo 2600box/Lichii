@@ -2859,7 +2859,11 @@ private:
         // of Time's title movie went in at ~330 packets a second (2,600 queued), and until the
         // last was in, its pictures came at 20-28 fps, so the video started ~11 s behind its
         // audio. End of stream is never refused.
-        if (!end) {
+        static const bool backpressure = [] {
+            const char* v = std::getenv("EDEN_NX2_AB_BACKPRESSURE");
+            return v == nullptr || v[0] != '0';
+        }();
+        if (!end && backpressure) {
             std::scoped_lock lk{m_mutex};
             if (m_inputs.Full()) {
                 if (Nx2VideoTraceEnabled()) {
@@ -2995,7 +2999,11 @@ private:
     // (m_mutex held). Returns true when the only frame left is late and more input is queued:
     // decode on before filling an image.
     bool DropOvertakenFrames() {
-        if (m_decoded.empty()) {
+        static const bool pacing = [] {
+            const char* v = std::getenv("EDEN_NX2_VDEC_PACE");
+            return v == nullptr || v[0] != '0';
+        }();
+        if (!pacing || m_decoded.empty()) {
             return false;
         }
         const auto due = DuePts();

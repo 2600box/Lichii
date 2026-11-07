@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+
 #include "core/hle/service/am/am.h"
 #include "core/hle/service/am/button_poller.h"
 #include "core/hle/service/am/event_observer.h"
@@ -31,7 +33,9 @@ void LoopProcess(Core::System& system) {
     // thread every other request queued behind it: Ocarina of Time's movie thread got its decoder
     // images back at ~33 fps while presenting at 60, and the video fell ~10 s behind its audio.
     // Each service keeps its own lock, as with bsdsocket's extra threads.
-    server_manager->StartAdditionalHostThreads("am", 2);
+    if (const char* v = std::getenv("EDEN_NX2_AB_AM_THREADS"); v == nullptr || v[0] != '0') {
+        server_manager->StartAdditionalHostThreads("am", 2);
+    }
     ServerManager::RunServer(std::move(server_manager));
 }
 
