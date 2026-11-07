@@ -1,17 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-<<<<<<< HEAD
 #include <filesystem>
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
 #include <QProcess>
 #include <QProcessEnvironment>
-=======
-#include <QCryptographicHash>
-#include <QDir>
->>>>>>> origin/nx2
 #include <QPushButton>
 #include <QRadioButton>
 #include <QSaveFile>
@@ -19,10 +14,7 @@
 #include <qdesktopservices.h>
 #include "common/logging.h"
 #include "common/scm_rev.h"
-<<<<<<< HEAD
 #include "frontend_common/update_installer.h"
-=======
->>>>>>> origin/nx2
 #include "qt_common/abstract/frontend.h"
 #include "qt_common/abstract/progress.h"
 #include "ui_update_dialog.h"
@@ -146,7 +138,6 @@ void UpdateDialog::Restart(QWidget* window, const QString& target) {
 }
 
 void UpdateDialog::Download() {
-<<<<<<< HEAD
 #ifdef __linux__
     if (Common::Net::CurrentLinuxPackage() == Common::Net::LinuxPackage::AppImage &&
         m_asset.filename.ends_with(".AppImage")) {
@@ -158,8 +149,6 @@ void UpdateDialog::Download() {
     }
 #endif
 
-=======
->>>>>>> origin/nx2
     // The application folder is read-only inside an AppImage and is the app bundle on macOS.
     auto default_dir = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
     if (default_dir.isEmpty()) {
