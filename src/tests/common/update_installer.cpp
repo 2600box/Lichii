@@ -108,9 +108,32 @@ TEST_CASE("Rollback without a previous copy fails and changes nothing", "[update
 
 TEST_CASE("Only an existing file in a writable folder can be replaced", "[updater]") {
     TempDir dir;
-    CHECK_FALSE(UpdateInstaller::CanReplace(dir.path / "missing.AppImage"));
+    const auto target = dir.path / "lichii.AppImage";
+    CHECK_FALSE(UpdateInstaller::CanReplace(target));
     CHECK_FALSE(UpdateInstaller::CanReplace(dir.path));
-    CHECK_FALSE(fs::exists(dir.path / ".lichii-update-write-test"));
+    Write(target, "x");
+    Write(dir.path / ".lichii-update-write-test", "kept");
+    CHECK(UpdateInstaller::CanReplace(target));
+    CHECK(Read(dir.path / ".lichii-update-write-test") == "kept");
+    std::size_t count = 0;
+    for ([[maybe_unused]] const auto& entry : fs::directory_iterator{dir.path}) {
+        ++count;
+    }
+    CHECK(count == 2);
+}
+
+TEST_CASE("Only one holder at a time gets the lock", "[updater]") {
+    TempDir dir;
+    const auto path = UpdateInstaller::LockPath(dir.path / "lichii.AppImage");
+    CHECK(path == dir.path / "lichii.AppImage.lock");
+    {
+        const UpdateInstaller::Lock first{path};
+        CHECK(first.Held());
+        const UpdateInstaller::Lock second{path};
+        CHECK_FALSE(second.Held());
+    }
+    const UpdateInstaller::Lock third{path};
+    CHECK(third.Held());
 }
 
 TEST_CASE("Path list entries inside a folder are removed", "[updater]") {

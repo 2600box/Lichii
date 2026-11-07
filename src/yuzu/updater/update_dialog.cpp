@@ -176,6 +176,14 @@ void UpdateDialog::Download() {
 }
 
 void UpdateDialog::InstallInPlace(const std::filesystem::path& target) {
+    const UpdateInstaller::Lock lock{UpdateInstaller::LockPath(target)};
+    if (!lock.Held()) {
+        QtCommon::Frontend::Critical(tr("Failed to install the update"),
+                                     tr("Another Lichii window is already updating this "
+                                        "installation."));
+        return;
+    }
+
     const auto staged = UpdateInstaller::StagedPath(target);
     if (!DownloadTo(QString::fromStdString(staged.string()))) {
         return;

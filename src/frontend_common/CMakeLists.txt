@@ -14,6 +14,7 @@ add_library(frontend_common STATIC
     play_time_manager.cpp
     play_time_manager.h
     settings_generator.h settings_generator.cpp
+    update_installer.h update_installer.cpp
     mod_manager.h mod_manager.cpp)
 
 if (ENABLE_UPDATE_CHECKER)
@@ -21,9 +22,7 @@ if (ENABLE_UPDATE_CHECKER)
     target_link_libraries(frontend_common PRIVATE nlohmann_json::nlohmann_json)
     target_sources(frontend_common PRIVATE
         update_checker.cpp
-        update_checker.h
-        update_installer.cpp
-        update_installer.h)
+        update_checker.h)
     target_link_libraries(frontend_common PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 endif()
 

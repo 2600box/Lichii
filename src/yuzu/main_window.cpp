@@ -1683,8 +1683,12 @@ void MainWindow::ConnectMenuEvents() {
         if (answer != QtCommon::Frontend::Yes) {
             return;
         }
+        const UpdateInstaller::Lock lock{UpdateInstaller::LockPath(target)};
         std::error_code ec;
-        if (!UpdateInstaller::Rollback(target, ec)) {
+        if (!lock.Held()) {
+            ec = std::make_error_code(std::errc::device_or_resource_busy);
+        }
+        if (!lock.Held() || !UpdateInstaller::Rollback(target, ec)) {
             LOG_ERROR(Frontend, "Could not restore the previous version: {}", ec.message());
             QtCommon::Frontend::Critical(tr("Failed to restore"),
                                          tr("Could not restore the previous version: %1")

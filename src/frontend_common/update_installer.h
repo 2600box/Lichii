@@ -3,12 +3,32 @@
 
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <string_view>
 #include <system_error>
 
 namespace UpdateInstaller {
+
+// Exclusive lock on a file, held until destruction and released by the system if the process dies.
+// It keeps two running copies from staging, swapping or rolling back the same install at once.
+class Lock {
+public:
+    explicit Lock(const std::filesystem::path& path);
+    ~Lock();
+    Lock(const Lock&) = delete;
+    Lock& operator=(const Lock&) = delete;
+
+    // Whether this object holds the lock, which is false while another holds it.
+    bool Held() const;
+
+private:
+    std::intptr_t handle;
+};
+
+// Where the lock for `target` lives, beside it.
+std::filesystem::path LockPath(const std::filesystem::path& target);
 
 // Where a download is staged before it replaces `target`; always beside it, so the final step is
 // a rename on one filesystem.
