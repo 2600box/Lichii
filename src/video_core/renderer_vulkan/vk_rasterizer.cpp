@@ -1780,9 +1780,10 @@ void RasterizerVulkan::DispatchCompute() {
 #ifdef EGLANTINE_STREAMLINE
     const bool can_replace = OcarinaDlssEnabled() && pipeline->CanReplaceOcarinaUpscale() &&
                              !indirect_address && !frame_dump.Capturing();
-    // Until a dispatch overwrites the scene, each one binds only after the effects are marked.
+    // Until a dispatch overwrites the scene, each direct one binds only after the effects are
+    // marked. The indirect path records its bind at once.
     const bool marking_effects = oot_effects_frame == render_trace_frame && OcarinaDlssEnabled() &&
-                                 !frame_dump.Capturing();
+                                 !indirect_address && !frame_dump.Capturing();
 #else
     constexpr bool can_replace = false;
     constexpr bool marking_effects = false;
