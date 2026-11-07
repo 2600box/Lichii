@@ -142,12 +142,12 @@ TEST_CASE("Asset digest and size come from the release JSON", "[updater]") {
          {{{"browser_download_url",
             "https://github.com/zortos293/Lichii/releases/download/build-71/"
             "lichii-windows-x86_64.zip"},
-           {"size", 1234},
+           {"size", u64{1234}},
            {"digest", "sha256:" + sha}},
           {{"browser_download_url",
             "https://github.com/zortos293/Lichii/releases/download/build-71/"
             "lichii-linux-x86_64.AppImage"},
-           {"size", 5},
+           {"size", u64{5}},
            {"digest", "sha256:zz"}},
           {{"browser_download_url",
             "https://github.com/zortos293/Lichii/releases/download/build-71/"
