@@ -1638,8 +1638,14 @@ void Device::RemoveUnsuitableExtensions() {
                                        VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME);
 
     // VK_EXT_robustness2
-    // Keep robustBufferAccess2: games read storage buffers out of bounds and AMD returns garbage
-    // without it (Ocarina's Hyrule Field fog volume turned the sky white).
+    // AMD keeps robustBufferAccess2: games read storage buffers out of bounds and AMD returned
+    // garbage without it (Ocarina's Hyrule Field fog volume turned the sky white).
+    const VkDriverId robustness_driver = properties.driver.driverID;
+    if (robustness_driver != VK_DRIVER_ID_AMD_PROPRIETARY &&
+        robustness_driver != VK_DRIVER_ID_AMD_OPEN_SOURCE &&
+        robustness_driver != VK_DRIVER_ID_MESA_RADV) {
+        features.robustness2.robustBufferAccess2 = VK_FALSE;
+    }
     features.robustness2.robustImageAccess2 = VK_FALSE;
     extensions.robustness_2 = features.robustness2.nullDescriptor;
 
