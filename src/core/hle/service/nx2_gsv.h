@@ -1981,9 +1981,10 @@ private:
         const u32 fps_limit =
             forced_fps_limit != 0 ? forced_fps_limit : Settings::values.fps_limit.GetValue();
         // With a frame rate limit other than 60 Hz the vsync event already paces the game; holding
-        // its swap interval here as well kept it at 60 fps (interval 2 of a 120 Hz event).
-        const bool speed_limited = Nx2VsyncRateHz() == 60 &&
-                                   Settings::values.use_speed_limit.GetValue() &&
+        // its swap interval here as well kept it at 60 fps (interval 2 of a 120 Hz event). Only an
+        // explicit FPS limit still applies then.
+        const bool timer_paced = Nx2VsyncRateHz() != 60;
+        const bool speed_limited = !timer_paced && Settings::values.use_speed_limit.GetValue() &&
                                    Settings::SpeedLimit() != 0;
         if (!speed_limited && fps_limit == 0) {
             return;
@@ -1993,9 +1994,11 @@ private:
                      "nx2:vi2 present #{} swap interval {} at {} Hz, FPS limit {} (word 12 = {:#x})",
                      m_presents, swap_interval, refresh_rate, fps_limit, timing);
         }
-        const auto vblank_interval = std::chrono::nanoseconds{
-            100'000'000'000LL * swap_interval / refresh_rate /
-            (speed_limited ? Settings::SpeedLimit() : 100)};
+        const auto vblank_interval =
+            timer_paced ? std::chrono::nanoseconds{0}
+                        : std::chrono::nanoseconds{100'000'000'000LL * swap_interval /
+                                                   refresh_rate /
+                                                   (speed_limited ? Settings::SpeedLimit() : 100)};
         const auto interval = PacedInterval(vblank_interval, fps_limit);
         if (trace) {
             m_frame_trace.target_ms = std::chrono::duration<double, std::milli>(interval).count();

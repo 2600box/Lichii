@@ -1209,11 +1209,20 @@ std::vector<Patch> PatchManager::GetPatches(VirtualFile update_raw) const {
         if (patch.title_id != title_id) {
             continue;
         }
-        const auto patch_disabled =
-            std::find(disabled.begin(), disabled.end(), patch.name) != disabled.end();
-        out.push_back({.enabled = !patch_disabled,
+        const auto is_disabled = [&](std::string_view name) {
+            return std::find(disabled.begin(), disabled.end(), name) != disabled.end();
+        };
+        // Name an enabled built-in that contains this one, so unchecking only this one is not
+        // mistaken for turning the change off.
+        const auto replacing = std::ranges::find_if(BUILTIN_PATCHES, [&](const BuiltinPatch& other) {
+            return other.title_id == title_id && other.replaces == patch.name &&
+                   !is_disabled(other.name);
+        });
+        out.push_back({.enabled = !is_disabled(patch.name),
                        .name = std::string{patch.name},
-                       .version = "IPS",
+                       .version = replacing != BUILTIN_PATCHES.end()
+                                      ? fmt::format("IPS, replaced by {}", replacing->name)
+                                      : std::string{"IPS"},
                        .type = PatchType::Mod,
                        .program_id = title_id,
                        .title_id = title_id,
