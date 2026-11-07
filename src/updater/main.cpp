@@ -46,6 +46,14 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
         CloseHandle(process);
         if (wait != WAIT_OBJECT_0) {
             Log(install_dir, "Lichii did not close in time, the update was not installed");
+            if (staging.filename() == ".update-staging") {
+                std::error_code ignored;
+                fs::remove_all(staging, ignored);
+            }
+            MessageBoxW(nullptr,
+                        L"Lichii did not close in time, so the update was not installed. Your "
+                        L"installation was not changed. Try the update again.",
+                        L"Lichii update", MB_OK | MB_ICONINFORMATION);
             return 1;
         }
     }

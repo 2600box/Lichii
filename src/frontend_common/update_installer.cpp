@@ -330,13 +330,15 @@ bool Install(const fs::path& staging, const fs::path& install_dir, std::error_co
         steps.back().placed_new = true;
     }
 
-    fs::remove_all(backup, ec);
-    fs::rename(pending_backup, backup, ec);
+    // The new version is in place, so a backup that cannot be swapped no longer fails the install.
     std::error_code cleanup_ec;
+    fs::remove_all(backup, cleanup_ec);
+    fs::rename(pending_backup, backup, cleanup_ec);
     if (!fs::equivalent(staging, backup, cleanup_ec)) {
         fs::remove_all(staging, cleanup_ec);
     }
-    return !ec;
+    ec.clear();
+    return true;
 }
 
 std::string StripPathListEntries(std::string_view list, std::string_view dir) {
