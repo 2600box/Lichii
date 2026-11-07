@@ -1643,13 +1643,44 @@ void RasterizerVulkan::Clear(u32 layer_count) {
     // target is rebuilt this frame; a scissored or partial clear may patch a tile of a cache.
     if (clear_covers_render_area && base_array_layer == 0 &&
         clear_layers.count >= framebuffer->Layers()) {
+        // The framebuffer may be smaller than an attachment (an atlas or array drawn in parts):
+        // the clear has to cover the attachment's own size and layers, scaled like the
+        // framebuffer. A pitch-linear width is in bytes and never matches, so it never counts.
+        const auto covers = [&](u32 width, u32 height, u32 layers) {
+            return render_area.width >= ((width * up_scale) >> down_shift) &&
+                   render_area.height >= ((height * up_scale) >> down_shift) &&
+                   framebuffer->Layers() >= (std::max)(layers, 1U);
+        };
         const u32 clear_rt = regs.clear_surface.RT;
-        const u64 color_address = use_color && color_full_channels &&
-                                          clear_rt < Maxwell::NumRenderTargets
-                                      ? regs.rt[clear_rt].Address()
-                                      : 0;
-        const u64 depth_address =
-            (use_depth || use_stencil) && regs.zeta_enable != 0 ? regs.zeta.Address() : 0;
+        u64 color_address = 0;
+        if (use_color && color_full_channels && clear_rt < Maxwell::NumRenderTargets) {
+            const auto& rt = regs.rt[clear_rt];
+            const u32 layers = rt.tile_mode.dim_control.Value() ==
+                                       Maxwell::TileMode::DimensionControl::DefineArraySize
+                                   ? rt.depth.Value()
+                                   : 1U;
+            if (rt.tile_mode.is_pitch_linear.Value() == 0 &&
+                covers(rt.width, rt.height, layers)) {
+                color_address = rt.Address();
+            }
+        }
+        // A combined depth/stencil target counts only when every aspect it has is cleared in
+        // full: depth, and stencil with all of its bits written.
+        u64 depth_address = 0;
+        const bool depth_complete = !framebuffer->HasAspectDepthBit() || use_depth;
+        const bool stencil_complete =
+            !framebuffer->HasAspectStencilBit() || (use_stencil && regs.stencil_front_mask == 0xFF);
+        if ((use_depth || use_stencil) && depth_complete && stencil_complete &&
+            regs.zeta_enable != 0) {
+            const auto& zeta = regs.zeta_size;
+            const u32 layers =
+                zeta.dim_control.Value() == Maxwell::ZetaSize::DimensionControl::DefineArraySize
+                    ? zeta.depth.Value()
+                    : 1U;
+            if (covers(zeta.width, zeta.height, layers)) {
+                depth_address = regs.zeta.Address();
+            }
+        }
         pipeline_cache.NoteClear(color_address, depth_address);
     }
     const bool can_defer_clear = ENABLE_DEFERRED_CLEAR && (!regs.clear_control.use_scissor || clear_covers_render_area) &&
