@@ -44,6 +44,9 @@ inline std::atomic<int> g_host_pace{-1};
 inline std::atomic<int> g_host_fixed_refresh{-1};
 inline std::atomic<int> g_swap_interval{-1};
 inline std::atomic<int> g_fence_flush_us{-1};
+/// EDEN_NX2_SEM_FAST (puller.cpp, docs/nx2/acquire-candidate.md): 0 drain every pending acquire
+/// poll, 1 resume on a completed-release latch, 2 also defer unmet polls within 16 polls / 1 ms.
+inline std::atomic<int> g_sem_fast{-1};
 
 /// The live switch called `name`, or null.
 [[nodiscard]] inline std::atomic<int>* FindSwitch(std::string_view name) {
@@ -55,6 +58,9 @@ inline std::atomic<int> g_fence_flush_us{-1};
     }
     if (name == "EDEN_NX2_SWAP_INTERVAL") {
         return &g_swap_interval;
+    }
+    if (name == "EDEN_NX2_SEM_FAST") {
+        return &g_sem_fast;
     }
     if (name == "EDEN_NX2_FENCE_FLUSH_US") {
         return &g_fence_flush_us;
