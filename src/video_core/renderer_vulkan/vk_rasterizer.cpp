@@ -333,6 +333,7 @@ const RasterizerVulkan::MeshArena& RasterizerVulkan::AcquireMeshArena() {
             continue;
         }
         arena.counted = true;
+        arena.counter.Invalidate();
         u32 words;
         std::memcpy(&words, arena.counter.Mapped().data(), sizeof(words));
         const u64 needed{u64{words} * 4};
@@ -375,6 +376,7 @@ const RasterizerVulkan::MeshArena& RasterizerVulkan::AcquireMeshArena() {
     // The GPU is done with this arena, and this submission's commands have not been sent yet.
     const u32 zero{};
     std::memcpy(it->counter.Mapped().data(), &zero, sizeof(zero));
+    it->counter.Flush();
     it->tick = tick;
     it->counted = false;
     mesh_arena_current = static_cast<size_t>(std::distance(mesh_arenas.begin(), it));
