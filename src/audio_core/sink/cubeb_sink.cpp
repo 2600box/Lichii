@@ -43,7 +43,7 @@ public:
                     StreamType type_, Core::System& system_)
         : SinkStream(system_, type_), ctx{ctx_} {
 #ifdef _WIN32
-        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        com_init_result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 #endif
         name = name_;
         device_channels = device_channels_;
@@ -109,14 +109,14 @@ public:
     ~CubebSinkStream() override {
         LOG_DEBUG(Service_Audio, "Destructing cubeb stream {}", name);
 
-        if (!ctx) {
-            return;
+        if (ctx) {
+            Finalize();
         }
 
-        Finalize();
-
 #ifdef _WIN32
-        CoUninitialize();
+        if (SUCCEEDED(com_init_result)) {
+            CoUninitialize();
+        }
 #endif
     }
 
@@ -222,6 +222,10 @@ private:
     cubeb* ctx{};
     /// Cubeb stream backend
     cubeb_stream* stream_backend{};
+#ifdef _WIN32
+    /// Result of this stream's COM initialization, balanced only when it succeeded
+    HRESULT com_init_result{};
+#endif
 };
 
 /// Resolve enabled input and output devices independently, using defaults when unspecified.
