@@ -31,21 +31,6 @@ STICK = {"type": "array", "items": {"type": "number", "minimum": -1, "maximum": 
 
 TOOLS = [
     {
-        "name": "switch",
-        "description": "Test package only: read or set a live pacing or semaphore experiment. "
-                       "Use HOST_PACE_FIXED_REFRESH=1 only after disabling VRR/G-Sync/FreeSync.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "enum": ["EDEN_NX2_HOST_PACE",
-                         "EDEN_NX2_HOST_PACE_FIXED_REFRESH", "EDEN_NX2_SEM_FAST",
-                         "EDEN_NX2_SWAP_INTERVAL"]},
-                "value": {"type": "integer", "minimum": 0, "maximum": 4},
-            },
-            "required": ["name"],
-        },
-    },
-    {
         "name": "status",
         "description": "Game title, program id, build, renderer, paused state, presented frame "
                        "count and fps (measured over fps_window_ms), dump directory, live log "
@@ -440,6 +425,10 @@ def call_once(adapter, request_text, out, stdout):
     """--call: one request, its JSON result on stdout, its PNG (if any) saved to `out`."""
     try:
         request = json.loads(request_text)
+        if request["method"] == "switch":
+            result = adapter.emulator.call("switch", request.get("params") or {}, 5)
+            stdout.write(json.dumps(result, indent=1) + "\n")
+            return 0
         result, png = adapter.run(request["method"], request.get("params") or {})
     except (EmulatorError, KeyError, ValueError, TypeError, AttributeError) as error:
         message = f"missing {error} in the request" if isinstance(error, KeyError) else str(error)
