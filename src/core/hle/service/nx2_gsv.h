@@ -1522,6 +1522,7 @@ struct Nx2NativeObjects {
         // A decoder image the client reads on the GPU (gsv 428/426): written block-linear.
         bool gpu_read{};
         bool pitch_frame{}; // holds a frame written before gpu_read was set
+        std::shared_ptr<std::mutex> decoder_mutex;
         u32 gpu_maps{};     // outstanding 426 maps
         bool mapped_here{}; // 426 added its GPU mapping (no other mapping covered it)
     };
@@ -1531,6 +1532,12 @@ struct Nx2NativeObjects {
     std::optional<VideoTrace> last_video_write;
     u32 next_memory{1};
     u32 next_image{1};
+
+    std::shared_ptr<std::mutex> DecoderMutex(u32 id) {
+        std::scoped_lock lk{mutex};
+        const auto image = images.find(id);
+        return image != images.end() ? image->second.decoder_mutex : nullptr;
+    }
 };
 
 // GameChat's graphics side (nn::chat::gsv), handed out by gsv 1202. Read from the SDK's
@@ -3272,6 +3279,11 @@ private:
     // Writes a decoded frame into an output image; returns the size the frame reports.
     std::pair<u32, u32> WriteImage(Tegra::Host1x::Nx2VideoDecoder* decoder, u32 image_id,
                                    const Decoded& frame, std::vector<u8>& bytes) {
+        const auto image_mutex = m_objects->DecoderMutex(image_id);
+        std::unique_lock<std::mutex> image_lock;
+        if (image_mutex) {
+            image_lock = std::unique_lock{*image_mutex};
+        }
         u64 address{};
         u32 parent{};
         u64 parent_offset{};
@@ -3280,7 +3292,7 @@ private:
         {
             std::scoped_lock lk{m_objects->mutex};
             const auto image = m_objects->images.find(image_id);
-            if (image == m_objects->images.end()) {
+            if (image == m_objects->images.end() || image->second.decoder_mutex != image_mutex) {
                 if (Nx2VideoTraceEnabled()) {
                     LOG_INFO(Service, "nx2:vdec trace write skipped syncpoint={} image={} destroyed",
                              m_syncpoint, image_id);
@@ -4033,6 +4045,11 @@ private:
     // (offset 0 once mapped). 426 maps the image at its own address for the GPU: decoder pool
     // memory is process memory (114) that no GPU mapping covers, and the blit read zeros.
     bool QueryDecoderImage(HLERequestContext& ctx, u32 handle) {
+        const auto image_mutex = m_objects->DecoderMutex(handle);
+        if (!image_mutex) {
+            return false;
+        }
+        std::scoped_lock image_lock{*image_mutex};
         const bool map = ctx.GetCommand() == 426;
         u64 address{};
         u64 size{};
@@ -4044,7 +4061,7 @@ private:
         {
             std::scoped_lock lk{m_objects->mutex};
             const auto image = m_objects->images.find(handle);
-            if (image == m_objects->images.end() || !image->second.decoder) {
+            if (image == m_objects->images.end() || image->second.decoder_mutex != image_mutex) {
                 return false;
             }
             const auto memory = m_objects->memories.find(image->second.memory);
@@ -4103,6 +4120,11 @@ private:
     void UnmapNativeImage(HLERequestContext& ctx) {
         const auto* w = ctx.CommandBuffer();
         const u32 handle = w[2];
+        const auto image_mutex = m_objects->DecoderMutex(handle);
+        std::unique_lock<std::mutex> image_lock;
+        if (image_mutex) {
+            image_lock = std::unique_lock{*image_mutex};
+        }
         std::optional<std::pair<u64, u64>> unmap;
         {
             std::scoped_lock lk{m_objects->mutex};
@@ -4155,6 +4177,7 @@ private:
             image.size = layout.size;
             image.offset = layout.size * i;
             image.decoder = true;
+            image.decoder_mutex = std::make_shared<std::mutex>();
         }
         LOG_INFO(Service, "nx2:gsv 911 decoder images {}..{} code={} {}x{} in memory {}", first,
                  first + count - 1, layout.code, layout.width, layout.height, w[19]);
@@ -4198,6 +4221,11 @@ private:
         const u32 id = ctx.CommandBuffer()[2];
         if (Nx2VideoTraceEnabled()) {
             LOG_INFO(Service, "nx2:vdec trace destroy image={} command={}", id, ctx.GetCommand());
+        }
+        const auto image_mutex = m_objects->DecoderMutex(id);
+        std::unique_lock<std::mutex> image_lock;
+        if (image_mutex) {
+            image_lock = std::unique_lock{*image_mutex};
         }
         std::optional<std::pair<u64, u64>> unmap;
         {
