@@ -706,13 +706,14 @@ FN_MAX_LIMIT_LIST
         return properties.properties.limits.maxTessellationPatchSize;
     }
 
-    /// Returns true if the device supports task and mesh shaders (VK_EXT_mesh_shader).
-    /// EDEN_NX2_GPL=1 and the device has VK_EXT_graphics_pipeline_library with fast linking:
-    /// graphics pipelines are linked from per-stage libraries.
+    /// Graphics pipelines are linked from per-stage libraries: the use_graphics_pipeline_library
+    /// setting (or EDEN_NX2_GPL=1) is on and the device has VK_EXT_graphics_pipeline_library
+    /// with fast linking.
     bool IsExtGraphicsPipelineLibrarySupported() const {
         return graphics_pipeline_library_enabled;
     }
 
+    /// Returns true if the device supports task and mesh shaders (VK_EXT_mesh_shader).
     bool IsExtMeshShaderSupported() const {
         return extensions.mesh_shader && features.mesh_shader.taskShader &&
                features.mesh_shader.meshShader;

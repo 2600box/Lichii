@@ -1532,16 +1532,6 @@ void RasterizerVulkan::Clear(u32 layer_count) {
     if (!use_color && !use_depth && !use_stencil) {
         return;
     }
-    {
-        const u32 clear_rt = regs.clear_surface.RT;
-        const u64 color_address = use_color && clear_rt < Maxwell::NumRenderTargets
-                                      ? regs.rt[clear_rt].Address()
-                                      : 0;
-        const u64 depth_address =
-            (use_depth || use_stencil) && regs.zeta_enable != 0 ? regs.zeta.Address() : 0;
-        pipeline_cache.NoteClear(color_address, depth_address);
-    }
-
     std::scoped_lock lock{texture_cache.mutex};
     texture_cache.UpdateRenderTargets(true);
     const Framebuffer* const framebuffer = texture_cache.GetFramebuffer();
@@ -1649,6 +1639,18 @@ void RasterizerVulkan::Clear(u32 layer_count) {
         clear_rect.rect.offset.x == 0 && clear_rect.rect.offset.y == 0 &&
         clear_rect.rect.extent.width >= render_area.width &&
         clear_rect.rect.extent.height >= render_area.height;
+    // Heavy skip (CurrentTargetIsRedrawn): only a clear of the whole target, every layer, says the
+    // target is rebuilt this frame; a scissored or partial clear may patch a tile of a cache.
+    if (clear_covers_render_area && base_array_layer == 0 &&
+        clear_layers.count >= framebuffer->Layers()) {
+        const u32 clear_rt = regs.clear_surface.RT;
+        const u64 color_address = use_color && clear_rt < Maxwell::NumRenderTargets
+                                      ? regs.rt[clear_rt].Address()
+                                      : 0;
+        const u64 depth_address =
+            (use_depth || use_stencil) && regs.zeta_enable != 0 ? regs.zeta.Address() : 0;
+        pipeline_cache.NoteClear(color_address, depth_address);
+    }
     const bool can_defer_clear = ENABLE_DEFERRED_CLEAR && (!regs.clear_control.use_scissor || clear_covers_render_area) &&
                                  clear_layers.covers_all_layers &&
                                  !scheduler.IsRenderPassActive() &&
