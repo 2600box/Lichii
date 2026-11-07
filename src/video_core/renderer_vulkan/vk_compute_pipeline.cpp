@@ -258,6 +258,24 @@ vk::Pipeline ComputePipeline::MakeComputePipeline(bool fast) {
     return result;
 }
 
+namespace {
+double Milliseconds(std::chrono::steady_clock::duration duration) {
+    return std::chrono::duration<double, std::milli>(duration).count();
+}
+
+// A dispatch that reached its pipeline before the build finished waits on the scheduler thread.
+void ReportDispatchWait(u64 shader_hash, std::chrono::steady_clock::duration elapsed,
+                        bool built_here) {
+    if (elapsed < std::chrono::milliseconds{20}) {
+        return;
+    }
+    LOG_INFO(Render_Vulkan,
+             "Nx2Perf compute first dispatch: {:016x} waited {:.1f} ms for its pipeline ({})",
+             shader_hash, Milliseconds(elapsed),
+             built_here ? "built on the scheduler thread" : "built by a worker");
+}
+} // Anonymous namespace
+
 /// Creates the descriptor layout (descriptor buffer, push descriptor or sets) and queues the build
 /// on `thread_worker`, or builds now without one. With fast first builds an unoptimized pipeline
 /// comes first and the optimized one follows on a worker.
@@ -682,9 +700,12 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     if (!is_built.load(std::memory_order::relaxed)) {
         // Wait for the pipeline to be built
         scheduler.Record([this](vk::CommandBuffer) {
+            const auto begin = std::chrono::steady_clock::now();
+            const bool claimed = !build_claimed.load(std::memory_order::relaxed);
             RunBuild();
             std::unique_lock lock{build_mutex};
             build_condvar.wait(lock, [this] { return is_built.load(std::memory_order::relaxed); });
+            ReportDispatchWait(shader_hash, std::chrono::steady_clock::now() - begin, claimed);
         });
     }
 
