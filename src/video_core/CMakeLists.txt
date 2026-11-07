@@ -121,6 +121,7 @@ add_library(video_core STATIC
     nx2_fast_draw.h
     nx2_profile.h
     nx2_perf.h
+    nx2_egla66_sweep3.h
     nx2_download_trace.h
     pending_maps.h
     present.h

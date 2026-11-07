@@ -27,6 +27,7 @@
 #include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_egla66_sweep3.h"
 #include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_profile.h"
 
@@ -435,6 +436,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
 #endif
     u64 read_position = 0;
     while (!stop_token.stop_requested()) {
+        Nx2Egla66Sweep3::Report();
         Nx2Profile::Report("GPU back thread");
         u64 available = published.load(std::memory_order_acquire);
         if (available == read_position) {

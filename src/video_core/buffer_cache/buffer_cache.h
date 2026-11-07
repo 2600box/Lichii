@@ -25,6 +25,7 @@
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
+#include "video_core/nx2_egla66_sweep3.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/texture_cache/util.h"
@@ -1981,6 +1982,15 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
         return;
     }
     const auto& array = maxwell3d->regs.vertex_streams[index];
+    if (Nx2Egla66Sweep3::vstream && array.enable == 0) {
+        // Binds nothing, so no address to translate: writes to the stream registers mark streams
+        // dirty draw after draw, and these translations were a third of the back's in Mario Kart
+        // World races.
+        Nx2Egla66Sweep3::Count(Nx2Egla66Sweep3::g_vstream_skipped);
+        channel_state->vertex_buffers[index] = NULL_BINDING;
+        UpdateVertexBufferSlot(index, NULL_BINDING);
+        return;
+    }
     const auto& limit = maxwell3d->regs.vertex_stream_limits[index];
     const GPUVAddr gpu_addr_begin = array.Address();
     const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
