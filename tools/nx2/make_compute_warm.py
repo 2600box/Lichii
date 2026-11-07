@@ -89,7 +89,7 @@ def main():
     ap.add_argument('--work', default='./work/compute-ovr',
                     help='folder for the lowered override records (reused between runs)')
     ap.add_argument('--out', default='./warm-compute.bin')
-    ap.add_argument('--version', type=int, default=53)
+    ap.add_argument('--version', type=int, default=54)
     ap.add_argument('--jobs', type=int, default=6)
     args = ap.parse_args()
 
