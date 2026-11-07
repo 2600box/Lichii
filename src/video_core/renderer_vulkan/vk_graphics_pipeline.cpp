@@ -99,7 +99,7 @@ DescriptorLayoutBuilder MakeBuilder(const Device& device, std::span<const Shader
         if (mesh_emulation->has_task) {
             builder.AddMeshEmulationOutput(mesh_emulation->payload_binding);
             builder.AddMeshEmulationOutput(mesh_emulation->offsets_binding);
-            builder.AddMeshEmulationOutput(mesh_emulation->map_binding);
+            builder.AddMeshEmulationOutput(mesh_emulation->args_binding);
         }
     }
     return builder;
@@ -778,7 +778,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         }
         guest_descriptor_queue.AddBuffer(mesh_output_buffer, mesh_output_offset, mesh_output_size);
         if (mesh_emulation->has_task) {
-            for (size_t index = 0; index < 3; ++index) { // payload, offsets, map
+            for (size_t index = 0; index < 3; ++index) { // payload, offsets, arguments
                 const MeshEmulationBuffer& task_buffer{mesh_task_buffers[index]};
                 if (!task_buffer.buffer) {
                     return false;
@@ -923,8 +923,8 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             memory_barrier(VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-            // 2. Distribution: each task's first mesh workgroup, the task of each mesh workgroup,
-            //    and the mesh dispatch and draw arguments.
+            // 2. Distribution: each task's first mesh workgroup, the draw's place in the output
+            //    arena, and the mesh dispatch and draw arguments.
             const VkDescriptorSet distribution_set{distribution_allocator.Commit()};
             std::array<VkDescriptorBufferInfo, 4> buffer_infos{};
             std::array<VkWriteDescriptorSet, 4> writes{};
@@ -951,7 +951,8 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             const Shader::Backend::SPIRV::MeshEmulationDistributionConstants constants{
                 .tasks = groups,
                 .payload_words = mesh_emulation->payload_stride,
-                .capacity = capacity,
+                .capacity_words = capacity,
+                .block_words = mesh_emulation->block_words,
                 .vertices_per_group = mesh_emulation->max_primitives * 3,
             };
             cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *distribution_pipeline);
@@ -965,10 +966,10 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
                                VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT);
-            // 3. The mesh workgroups, as many as the tasks asked for (up to the capacity).
+            // 3. The mesh workgroups, as many as the tasks asked for (up to the arena's end).
             cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_COMPUTE, *mesh_compute_pipeline);
             bind_program_state();
-            cmdbuf.DispatchIndirect(task_buffers[3].buffer, task_buffers[3].offset);
+            cmdbuf.DispatchIndirect(task_buffers[2].buffer, task_buffers[2].offset);
             memory_barrier(VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
@@ -1087,7 +1088,22 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         // The mesh program (stage 0, or mesh_stage after a task program in stage 0) is built as
         // a compute shader, and so is the task program; the draw uses the vertex shader that
         // reads the mesh program's output.
-        const auto make_compute = [&](VkShaderModule module, VkPipelineLayout layout) {
+        // Votes, ballots and shuffles span the guest's 32-thread warp, which a driver may split
+        // in compute shaders too (RDNA runs them wave64).
+        const VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT compute_subgroup_size_ci{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT,
+            .pNext = nullptr,
+            .requiredSubgroupSize = GuestWarpSize,
+        };
+        const auto make_compute = [&](VkShaderModule module, VkPipelineLayout layout,
+                                      const Shader::Info* info) {
+            const bool uses_warp_ops{info && (info->uses_subgroup_vote ||
+                                              info->uses_subgroup_invocation_id ||
+                                              info->uses_subgroup_shuffles ||
+                                              info->uses_subgroup_mask ||
+                                              info->uses_quad_shuffles || info->uses_fswzadd)};
+            const bool force_warp_size{uses_warp_ops && device.IsExtSubgroupSizeControlSupported() &&
+                                       device.IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT)};
             return device.GetLogical().CreateComputePipeline(
                 VkComputePipelineCreateInfo{
                     .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
@@ -1095,7 +1111,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
                     .flags = 0,
                     .stage{
                         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                        .pNext = nullptr,
+                        .pNext = force_warp_size ? &compute_subgroup_size_ci : nullptr,
                         .flags = 0,
                         .stage = VK_SHADER_STAGE_COMPUTE_BIT,
                         .module = module,
@@ -1109,12 +1125,15 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
                 *pipeline_cache);
         };
         mesh_vertex_module = BuildShader(device, mesh_emulation->vertex_spirv);
-        mesh_compute_pipeline =
-            make_compute(*spv_modules[mesh_emulation->mesh_stage], *pipeline_layout);
+        mesh_compute_pipeline = make_compute(*spv_modules[mesh_emulation->mesh_stage],
+                                             *pipeline_layout,
+                                             &stage_infos[mesh_emulation->mesh_stage]);
         if (mesh_emulation->has_task) {
-            task_compute_pipeline = make_compute(*spv_modules[0], *pipeline_layout);
+            task_compute_pipeline =
+                make_compute(*spv_modules[0], *pipeline_layout, &stage_infos[0]);
             distribution_module = BuildShader(device, mesh_emulation->distribution_spirv);
-            distribution_pipeline = make_compute(*distribution_module, *distribution_layout);
+            distribution_pipeline =
+                make_compute(*distribution_module, *distribution_layout, nullptr);
         }
     }
     FixedPipelineState::DynamicState dynamic{};

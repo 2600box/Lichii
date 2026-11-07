@@ -2010,7 +2010,7 @@ void EmitContext::DefineMeshEmulationOutput() {
         return;
     }
     // u32 arrays: the output MeshEpilogue writes each workgroup's block to
-    // (EmitMeshEmulationVertex) and the task payload, offset and map buffers (RuntimeInfo).
+    // (EmitMeshEmulationVertex) and the task payload, offset and argument buffers (RuntimeInfo).
     // Sirit shares identical types, so reuse the u32 storage buffer type when the program's own
     // storage buffers declared it: decorating it again would be invalid SPIR-V.
     AddExtension("SPV_KHR_storage_buffer_storage_class");
@@ -2046,7 +2046,8 @@ void EmitContext::DefineMeshEmulationOutput() {
     if (has_task) {
         mesh_task_offsets_buffer =
             define(runtime_info.mesh_task_offsets_binding, "mesh_emulation_task_offsets");
-        mesh_task_map_buffer = define(runtime_info.mesh_task_map_binding, "mesh_emulation_task_map");
+        mesh_task_args_buffer =
+            define(runtime_info.mesh_task_args_binding, "mesh_emulation_task_args");
         mesh_group_index = AddGlobalVariable(TypePointer(spv::StorageClass::Private, U32[1]),
                                              spv::StorageClass::Private);
         Name(mesh_group_index, "mesh_group_index");

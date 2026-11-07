@@ -412,11 +412,11 @@ public:
     /// pointer type to one of its words.
     Id mesh_output_buffer{};
     Id mesh_output_u32{};
-    // With a task program: its payload, offset and map buffers (RuntimeInfo), and the mesh
+    // With a task program: its payload, offset and argument buffers (RuntimeInfo), and the mesh
     // workgroup's index within its task (what the mesh program reads at input address 0).
     Id mesh_task_payload_buffer{};
     Id mesh_task_offsets_buffer{};
-    Id mesh_task_map_buffer{};
+    Id mesh_task_args_buffer{};
     Id mesh_group_index{};
 
     Id load_const_func_u8{};

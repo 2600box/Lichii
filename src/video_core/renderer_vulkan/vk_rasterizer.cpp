@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <condition_variable>
 #include <memory>
@@ -319,6 +320,67 @@ void RasterizerVulkan::ReadMeshEmulationProbe() {
              probe.frame, probe.groups, triangles, degenerate, outside, bad_index, sample);
 }
 
+const RasterizerVulkan::MeshArena& RasterizerVulkan::AcquireMeshArena() {
+    const u64 tick{scheduler.CurrentTick()};
+    if (mesh_arena_current < mesh_arenas.size() && mesh_arenas[mesh_arena_current].tick == tick) {
+        return mesh_arenas[mesh_arena_current];
+    }
+    // A finished submission's counter holds the words its draws asked for, including those
+    // that did not fit: grow later arenas to hold them.
+    const u64 max_size{(std::min)(u64{1} << 30, u64{device.GetMaxStorageBufferRange()})};
+    for (MeshArena& arena : mesh_arenas) {
+        if (arena.counted || !scheduler.IsFree(arena.tick)) {
+            continue;
+        }
+        arena.counted = true;
+        u32 words;
+        std::memcpy(&words, arena.counter.Mapped().data(), sizeof(words));
+        const u64 needed{u64{words} * 4};
+        if (needed > arena.size && mesh_arena_size < max_size) {
+            mesh_arena_size = (std::min)(std::bit_ceil(needed + needed / 4), max_size);
+            LOG_INFO(Render_Vulkan, "Mesh emulation: a submission needed {} MiB of output, arenas "
+                                    "grow to {} MiB",
+                     needed >> 20, mesh_arena_size >> 20);
+        }
+    }
+    std::erase_if(mesh_arenas, [&](const MeshArena& arena) {
+        return arena.counted && arena.size < mesh_arena_size;
+    });
+    auto it{std::ranges::find_if(mesh_arenas, [](const MeshArena& arena) { return arena.counted; })};
+    if (it == mesh_arenas.end()) {
+        const auto make_buffer = [&](u64 size, VkBufferUsageFlags usage, MemoryUsage memory) {
+            return memory_allocator.CreateBuffer(
+                VkBufferCreateInfo{
+                    .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                    .pNext = nullptr,
+                    .flags = 0,
+                    .size = size,
+                    .usage = usage,
+                    .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                    .queueFamilyIndexCount = 0,
+                    .pQueueFamilyIndices = nullptr,
+                },
+                memory);
+        };
+        it = mesh_arenas.insert(
+            mesh_arenas.end(),
+            MeshArena{
+                .buffer = make_buffer(mesh_arena_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                      MemoryUsage::DeviceLocal),
+                .counter = make_buffer(sizeof(u32), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                       MemoryUsage::Download),
+                .size = mesh_arena_size,
+            });
+    }
+    // The GPU is done with this arena, and this submission's commands have not been sent yet.
+    const u32 zero{};
+    std::memcpy(it->counter.Mapped().data(), &zero, sizeof(zero));
+    it->tick = tick;
+    it->counted = false;
+    mesh_arena_current = static_cast<size_t>(std::distance(mesh_arenas.begin(), it));
+    return *it;
+}
+
 RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra::GPU& gpu_,
                                    Tegra::MaxwellDeviceMemoryManager& device_memory_,
                                    const Device& device_, MemoryAllocator& memory_allocator_,
@@ -588,29 +650,33 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         const bool has_task{pipeline->MeshEmulationHasTask()};
         const bool probe_draw{probe && !has_task && !mesh_probe.pending && groups != 0 &&
                               render_trace_frame % 60 == 0};
-        // With a task program the draw's groups are task workgroups, and the output holds the
-        // mesh workgroups they ask for, up to a budget (the distribution pass clamps to it).
-        constexpr u64 TaskOutputBudget{48ULL << 20};
-        constexpr u64 MaxMeshGroupsPerTask{256};
+        // With a task program the draw's groups are task workgroups. The mesh workgroups they ask
+        // for are only known on the GPU, so their output goes to the submission's arena.
         const u64 block_bytes{pipeline->MeshEmulationBlockBytes()};
-        const u32 output_groups{
-            has_task ? static_cast<u32>((std::max)(
-                           u64{1}, (std::min)(u64{groups} * MaxMeshGroupsPerTask,
-                                              TaskOutputBudget / (std::max)(block_bytes, u64{4}))))
-                     : groups};
-        const u64 bytes{(std::max)(u64{output_groups} * block_bytes, u64{4})};
-        const StagingBufferRef output{staging_pool.Request(
-            bytes, probe_draw ? MemoryUsage::Download : MemoryUsage::DeviceLocal)};
-        pipeline->SetMeshEmulationOutput(output.buffer, output.offset, bytes, groups);
+        StagingBufferRef output{};
+        u64 bytes{};
+        if (has_task) {
+            const MeshArena& arena{AcquireMeshArena()};
+            bytes = arena.size;
+            pipeline->SetMeshEmulationOutput(*arena.buffer, 0, bytes, groups);
+        } else {
+            bytes = (std::max)(u64{groups} * block_bytes, u64{4});
+            output = staging_pool.Request(bytes, probe_draw ? MemoryUsage::Download
+                                                            : MemoryUsage::DeviceLocal);
+            pipeline->SetMeshEmulationOutput(output.buffer, output.offset, bytes, groups);
+        }
         mesh_emulation_indirect = {};
         if (mesh_task_probe.pending && scheduler.IsFree(mesh_task_probe.tick)) {
             mesh_task_probe.pending = false;
-            std::array<u32, 4> words{};
+            std::array<u32, Shader::Backend::SPIRV::MESH_EMULATION_ARGS_WORDS> words{};
             std::memcpy(words.data(), mesh_task_probe.args.data(), sizeof(words));
             LOG_INFO(Render_Vulkan,
                      "Mesh emulation task probe: {} tasks asked for {} mesh workgroups, {} "
-                     "dispatched (capacity {})",
-                     mesh_task_probe.tasks, words[3], words[0], mesh_task_probe.capacity);
+                     "dispatched at arena word {} (arena {} words)",
+                     mesh_task_probe.tasks,
+                     words[Shader::Backend::SPIRV::MESH_EMULATION_ARGS_REQUESTED], words[0],
+                     words[Shader::Backend::SPIRV::MESH_EMULATION_ARGS_BASE],
+                     mesh_task_probe.capacity);
         }
         if (has_task && groups != 0) {
             const bool task_probe{probe && !mesh_task_probe.pending &&
@@ -626,19 +692,23 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
             const auto payload{
                 request(u64{groups} * pipeline->MeshEmulationPayloadStride() * 4).first};
             const auto offsets{request(u64{groups} * 4).first};
-            const auto map{request(u64{output_groups} * 4).first};
+            constexpr u64 args_bytes{Shader::Backend::SPIRV::MESH_EMULATION_ARGS_WORDS * 4};
             const auto [args, args_span] =
-                request(32, task_probe ? MemoryUsage::Download : MemoryUsage::DeviceLocal);
-            if (task_probe && args_span.size() >= 16) {
+                request(args_bytes, task_probe ? MemoryUsage::Download : MemoryUsage::DeviceLocal);
+            const u32 capacity_words{static_cast<u32>(
+                (std::min)(bytes / 4, u64{(std::numeric_limits<u32>::max)()}))};
+            if (task_probe && args_span.size() >= args_bytes) {
                 mesh_task_probe = {
                     .args = args_span,
                     .tick = scheduler.CurrentTick(),
                     .tasks = groups,
-                    .capacity = output_groups,
+                    .capacity = capacity_words,
                     .pending = true,
                 };
             }
-            pipeline->SetMeshEmulationTaskBuffers(payload, offsets, map, args, output_groups);
+            const MeshArena& arena{mesh_arenas[mesh_arena_current]};
+            pipeline->SetMeshEmulationTaskBuffers(
+                payload, offsets, args, {*arena.counter, 0, sizeof(u32)}, capacity_words);
             mesh_emulation_indirect = {args.buffer, args.offset};
         }
         if (probe_draw && output.mapped_span.size() >= output.offset + bytes) {

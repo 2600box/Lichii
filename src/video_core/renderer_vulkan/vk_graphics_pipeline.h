@@ -84,13 +84,13 @@ struct MeshEmulationSetup {
     u32 block_words{};    ///< output words per mesh workgroup
     u32 max_primitives{}; ///< triangles per mesh workgroup
     // With a task program (stage 0, the mesh program at mesh_stage): its payload buffer and the
-    // distribution pass's offsets and map (Shader::RuntimeInfo), and that pass's shader.
+    // distribution pass's offsets and arguments (Shader::RuntimeInfo), and that pass's shader.
     bool has_task{};
     u32 mesh_stage{};
     u32 payload_stride{};
     u32 payload_binding{};
     u32 offsets_binding{};
-    u32 map_binding{};
+    u32 args_binding{};
     std::vector<u32> distribution_spirv;
     // Output layout, for the readback diagnostics.
     u32 max_vertices{};
@@ -194,14 +194,15 @@ public:
         VkDeviceSize offset{};
         VkDeviceSize size{};
     };
-    /// With a task program: the task payload, offset, map and argument buffers, the capacity
-    /// of the output buffer in mesh workgroups (the draw's group count is the task's).
+    /// With a task program: the task payload, offset and argument buffers, the arena counter,
+    /// and the words of the output arena (the draw's group count is the task's).
     void SetMeshEmulationTaskBuffers(const MeshEmulationBuffer& payload,
                                      const MeshEmulationBuffer& offsets,
-                                     const MeshEmulationBuffer& map,
-                                     const MeshEmulationBuffer& args, u32 capacity) noexcept {
-        mesh_task_buffers = {payload, offsets, map, args};
-        mesh_capacity = capacity;
+                                     const MeshEmulationBuffer& args,
+                                     const MeshEmulationBuffer& counter,
+                                     u32 capacity_words) noexcept {
+        mesh_task_buffers = {payload, offsets, args, counter};
+        mesh_capacity = capacity_words;
     }
 
     [[nodiscard]] bool MeshEmulationHasTask() const noexcept {
@@ -345,7 +346,7 @@ private:
     VkDeviceSize mesh_output_size{};
     u32 mesh_groups{};
     // With a task program: its compute pipeline, the distribution pass between it and the mesh
-    // dispatch, and the per-draw buffers (payload, offsets, map, arguments).
+    // dispatch, and the per-draw buffers (payload, offsets, arguments, arena counter).
     vk::Pipeline task_compute_pipeline;
     vk::ShaderModule distribution_module;
     vk::DescriptorSetLayout distribution_set_layout;

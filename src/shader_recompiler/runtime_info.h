@@ -125,12 +125,13 @@ struct RuntimeInfo {
     u32 mesh_output_binding{};
     /// Mesh emulation with a task program (mesh_as_compute on both). The task's compute shader
     /// writes its payload (count at word 1) to the payload buffer, task_payload_words words per
-    /// task workgroup. Each mesh workgroup finds its task in the map buffer (task of each mesh
-    /// workgroup) and its index within the task's in the offsets buffer (first mesh workgroup
-    /// of each task), and copies that task's payload. ~0 when there is no task program.
+    /// task workgroup. Each mesh workgroup finds its task by a binary search of the offsets
+    /// buffer (first mesh workgroup of each task) and copies that task's payload. The arguments
+    /// buffer holds the draw's output base and task count (MESH_EMULATION_ARGS_*). ~0 when there
+    /// is no task program.
     u32 mesh_task_payload_binding{~0U};
     u32 mesh_task_offsets_binding{~0U};
-    u32 mesh_task_map_binding{~0U};
+    u32 mesh_task_args_binding{~0U};
     u32 mesh_task_payload_stride{}; ///< payload buffer words per task workgroup
 };
 

@@ -1628,13 +1628,13 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         mesh_emulation.emplace();
         mesh_emulation->output_binding = output_binding;
         if (has_task) {
-            // After the output: the task payload, offset and map buffers.
+            // After the output: the task payload, offset and argument buffers.
             mesh_emulation->has_task = true;
             mesh_emulation->mesh_stage = static_cast<u32>(mesh_index - 1);
             mesh_emulation->payload_stride = (std::max)(programs[1].mesh.payload_words, 2U);
             mesh_emulation->payload_binding = output_binding + 1;
             mesh_emulation->offsets_binding = output_binding + 2;
-            mesh_emulation->map_binding = output_binding + 3;
+            mesh_emulation->args_binding = output_binding + 3;
             mesh_emulation->distribution_spirv =
                 Shader::Backend::SPIRV::EmitMeshEmulationDistribution(profile);
         }
@@ -1752,12 +1752,13 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             if (mesh_emulation->has_task) {
                 runtime_info.mesh_task_payload_binding = mesh_emulation->payload_binding;
                 runtime_info.mesh_task_offsets_binding = mesh_emulation->offsets_binding;
-                runtime_info.mesh_task_map_binding = mesh_emulation->map_binding;
+                runtime_info.mesh_task_args_binding = mesh_emulation->args_binding;
                 runtime_info.mesh_task_payload_stride = mesh_emulation->payload_stride;
             }
             if (program.stage == Shader::Stage::Mesh) {
                 mesh_emulation->vertex_spirv = Shader::Backend::SPIRV::EmitMeshEmulationVertex(
                     profile, program.mesh, mesh_emulation->output_binding,
+                    mesh_emulation->has_task ? mesh_emulation->args_binding : ~0U,
                     runtime_info.convert_depth_mode && !profile.support_native_ndc);
             }
         }

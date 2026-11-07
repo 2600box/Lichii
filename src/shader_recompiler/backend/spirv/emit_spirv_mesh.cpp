@@ -167,7 +167,13 @@ void ComputeMeshEpilogue(EmitContext& ctx) {
     const u32 vertex_words{mesh.max_vertices * vertex_lines};
     const Id workgroup{
         ctx.OpCompositeExtract(ctx.U32[1], ctx.OpLoad(ctx.U32[3], ctx.workgroup_id), 0U)};
-    const Id block{ctx.OpIMul(ctx.U32[1], workgroup, ctx.Const(MeshEmulationBlockWords(mesh)))};
+    Id block{ctx.OpIMul(ctx.U32[1], workgroup, ctx.Const(MeshEmulationBlockWords(mesh)))};
+    if (Sirit::ValidId(ctx.mesh_task_args_buffer)) {
+        // With a task program the draw's blocks start where the distribution pass put them.
+        block = ctx.OpIAdd(ctx.U32[1], block,
+                           ctx.OpLoad(ctx.U32[1], BufferWord(ctx, ctx.mesh_task_args_buffer,
+                                                             ctx.Const(MESH_EMULATION_ARGS_BASE))));
+    }
     const Id count{ctx.OpUMin(ctx.U32[1], ctx.OpLoad(ctx.U32[1], ctx.mesh_primitive_count),
                               ctx.Const(mesh.max_primitives))};
     const Id invocation{LocalInvocation(ctx)};
@@ -358,9 +364,25 @@ void EmitMeshPrologue(EmitContext& ctx) {
             // Mesh emulation with a task: find this workgroup's task and its index within the
             // task's mesh workgroups, and copy the task's payload into the input region. Words
             // past the payload are clamped to its last one, so every store writes a real word.
+            // The task is the last one whose first mesh workgroup is not past this one: a
+            // branchless binary search of the offsets (tasks with no mesh workgroups share the
+            // next task's offset and lose to it), unrolled for up to 2^17 tasks.
             const Id global{WorkgroupX(ctx)};
-            const Id task{
-                ctx.OpLoad(ctx.U32[1], BufferWord(ctx, ctx.mesh_task_map_buffer, global))};
+            const Id tasks{ctx.OpLoad(ctx.U32[1], BufferWord(ctx, ctx.mesh_task_args_buffer,
+                                                             ctx.Const(MESH_EMULATION_ARGS_TASKS)))};
+            const Id last_task{ctx.OpISub(ctx.U32[1], ctx.OpUMax(ctx.U32[1], tasks, ctx.Const(1U)),
+                                          ctx.Const(1U))};
+            Id task{ctx.u32_zero_value};
+            Id remaining{tasks};
+            for (u32 step_index = 0; step_index < 17; ++step_index) {
+                const Id half{ctx.OpShiftRightLogical(ctx.U32[1], remaining, ctx.Const(1U))};
+                const Id middle{ctx.OpUMin(ctx.U32[1], ctx.OpIAdd(ctx.U32[1], task, half), last_task)};
+                const Id first{ctx.OpLoad(ctx.U32[1],
+                                          BufferWord(ctx, ctx.mesh_task_offsets_buffer, middle))};
+                task = ctx.OpSelect(ctx.U32[1], ctx.OpULessThanEqual(ctx.U1, first, global), middle,
+                                    task);
+                remaining = ctx.OpISub(ctx.U32[1], remaining, half);
+            }
             const Id first_group{
                 ctx.OpLoad(ctx.U32[1], BufferWord(ctx, ctx.mesh_task_offsets_buffer, task))};
             ctx.OpStore(ctx.mesh_group_index, ctx.OpISub(ctx.U32[1], global, first_group));
@@ -430,7 +452,7 @@ void EmitMeshEpilogue(EmitContext& ctx) {
 }
 
 std::vector<u32> EmitMeshEmulationVertex(const Profile& profile, const MeshInfo& mesh, u32 binding,
-                                         bool convert_depth) {
+                                         u32 args_binding, bool convert_depth) {
     Sirit::Module module{profile.supported_spirv};
     module.AddCapability(spv::Capability::Shader);
     module.SetMemoryModel(spv::AddressingModel::Logical, spv::MemoryModel::GLSL450);
@@ -461,6 +483,15 @@ std::vector<u32> EmitMeshEmulationVertex(const Profile& profile, const MeshInfo&
     module.Decorate(buffer, spv::Decoration::DescriptorSet, 0U);
     module.Name(buffer, "mesh_emulation_output");
     const Id buffer_u32{module.TypePointer(spv::StorageClass::StorageBuffer, u32_type)};
+    Id args{};
+    if (args_binding != ~0U) {
+        args = module.AddGlobalVariable(
+            module.TypePointer(spv::StorageClass::StorageBuffer, struct_type),
+            spv::StorageClass::StorageBuffer);
+        module.Decorate(args, spv::Decoration::Binding, args_binding);
+        module.Decorate(args, spv::Decoration::DescriptorSet, 0U);
+        module.Name(args, "mesh_emulation_task_args");
+    }
 
     std::vector<Id> interfaces;
     const Id vertex_index{module.AddGlobalVariable(
@@ -487,6 +518,9 @@ std::vector<u32> EmitMeshEmulationVertex(const Profile& profile, const MeshInfo&
     }
     if (profile.supported_spirv >= 0x00010400) {
         interfaces.push_back(buffer);
+        if (Sirit::ValidId(args)) {
+            interfaces.push_back(args);
+        }
     }
 
     const Id main{module.OpFunction(void_type, spv::FunctionControlMask::MaskNone,
@@ -505,7 +539,13 @@ std::vector<u32> EmitMeshEmulationVertex(const Profile& profile, const MeshInfo&
     const Id corner{module.OpUMod(u32_type, draw_vertex, constant(3))};
     const Id workgroup{module.OpUDiv(u32_type, slot, constant(max_primitives))};
     const Id primitive{module.OpUMod(u32_type, slot, constant(max_primitives))};
-    const Id block{module.OpIMul(u32_type, workgroup, constant(MeshEmulationBlockWords(mesh)))};
+    Id block{module.OpIMul(u32_type, workgroup, constant(MeshEmulationBlockWords(mesh)))};
+    if (Sirit::ValidId(args)) {
+        block = module.OpIAdd(
+            u32_type, block,
+            module.OpLoad(u32_type, module.OpAccessChain(buffer_u32, args, constant(0),
+                                                         constant(MESH_EMULATION_ARGS_BASE))));
+    }
     const Id index_word{module.OpIAdd(
         u32_type, module.OpIAdd(u32_type, block, constant(mesh.max_vertices * vertex_lines)),
         module.OpIAdd(u32_type, module.OpIMul(u32_type, primitive, constant(3)), corner))};
@@ -582,12 +622,14 @@ std::vector<u32> EmitMeshEmulationDistribution(const Profile& profile) {
     };
     const Id payload{define_buffer(0, "payload")};
     const Id offsets{define_buffer(1, "offsets")};
-    const Id map{define_buffer(2, "map")};
-    const Id args{define_buffer(3, "args")};
+    const Id args{define_buffer(2, "args")};
+    const Id counter{define_buffer(3, "arena_counter")};
 
-    const Id constants_type{module.TypeStruct(u32_type, u32_type, u32_type, u32_type)};
+    constexpr u32 num_constants{sizeof(MeshEmulationDistributionConstants) / sizeof(u32)};
+    const std::array<Id, num_constants> members{u32_type, u32_type, u32_type, u32_type, u32_type};
+    const Id constants_type{module.TypeStruct(std::span<const Id>(members))};
     module.Decorate(constants_type, spv::Decoration::Block);
-    for (u32 member = 0; member < 4; ++member) {
+    for (u32 member = 0; member < num_constants; ++member) {
         module.MemberDecorate(constants_type, member, spv::Decoration::Offset, member * 4);
     }
     const Id constants{module.AddGlobalVariable(
@@ -608,70 +650,68 @@ std::vector<u32> EmitMeshEmulationDistribution(const Profile& profile) {
     const Id function_u32{module.TypePointer(spv::StorageClass::Function, u32_type)};
     const Id total_var{module.AddLocalVariable(function_u32, spv::StorageClass::Function)};
     const Id task_var{module.AddLocalVariable(function_u32, spv::StorageClass::Function)};
-    const Id group_var{module.AddLocalVariable(function_u32, spv::StorageClass::Function)};
-    const Id requested_var{module.AddLocalVariable(function_u32, spv::StorageClass::Function)};
     const auto push = [&](u32 member) {
         return module.OpLoad(u32_type, module.OpAccessChain(constant_u32, constants,
                                                             constant(member)));
     };
     const Id tasks{push(0)};
     const Id payload_words{push(1)};
-    const Id capacity{push(2)};
-    const Id vertices_per_group{push(3)};
+    const Id capacity_words{push(2)};
+    const Id block_words{push(3)};
+    const Id vertices_per_group{push(4)};
     module.OpStore(total_var, constant(0));
     module.OpStore(task_var, constant(0));
-    module.OpStore(requested_var, constant(0));
 
-    // for (task = 0; task < tasks; ++task) { ... }, as a structured loop.
-    const auto loop = [&](Id counter, Id end, auto&& body) {
-        const Id header{module.OpLabel()};
-        const Id condition_label{module.OpLabel()};
-        const Id body_label{module.OpLabel()};
-        const Id continue_label{module.OpLabel()};
-        const Id merge{module.OpLabel()};
-        module.OpBranch(header);
-        module.AddLabel(header);
-        module.OpLoopMerge(merge, continue_label, spv::LoopControlMask::MaskNone);
-        module.OpBranch(condition_label);
-        module.AddLabel(condition_label);
-        const Id value{module.OpLoad(u32_type, counter)};
-        module.OpBranchConditional(module.OpULessThan(bool_type, value, end), body_label, merge);
-        module.AddLabel(body_label);
-        body(value);
-        module.OpBranch(continue_label);
-        module.AddLabel(continue_label);
-        module.OpStore(counter, module.OpIAdd(u32_type, module.OpLoad(u32_type, counter),
-                                              constant(1)));
-        module.OpBranch(header);
-        module.AddLabel(merge);
-    };
-    loop(task_var, tasks, [&](Id task) {
+    // for (task = 0; task < tasks; ++task) { offsets[task] = total; total += count; }
+    const Id header{module.OpLabel()};
+    const Id condition_label{module.OpLabel()};
+    const Id body_label{module.OpLabel()};
+    const Id continue_label{module.OpLabel()};
+    const Id merge{module.OpLabel()};
+    module.OpBranch(header);
+    module.AddLabel(header);
+    module.OpLoopMerge(merge, continue_label, spv::LoopControlMask::MaskNone);
+    module.OpBranch(condition_label);
+    module.AddLabel(condition_label);
+    const Id task{module.OpLoad(u32_type, task_var)};
+    module.OpBranchConditional(module.OpULessThan(bool_type, task, tasks), body_label, merge);
+    module.AddLabel(body_label);
+    {
         const Id total{module.OpLoad(u32_type, total_var)};
         const Id requested{module.OpLoad(
             u32_type, word(payload, module.OpIAdd(u32_type,
                                                   module.OpIMul(u32_type, task, payload_words),
                                                   constant(1))))};
-        const Id count{module.OpUMin(u32_type, requested, module.OpISub(u32_type, capacity, total))};
-        module.OpStore(requested_var,
-                       module.OpIAdd(u32_type, module.OpLoad(u32_type, requested_var), requested));
         module.OpStore(word(offsets, task), total);
-        module.OpStore(group_var, constant(0));
-        loop(group_var, count, [&](Id group) {
-            module.OpStore(word(map, module.OpIAdd(u32_type, total, group)), task);
-        });
-        module.OpStore(total_var, module.OpIAdd(u32_type, total, count));
-    });
+        module.OpStore(total_var, module.OpIAdd(u32_type, total, requested));
+    }
+    module.OpBranch(continue_label);
+    module.AddLabel(continue_label);
+    module.OpStore(task_var, module.OpIAdd(u32_type, module.OpLoad(u32_type, task_var), constant(1)));
+    module.OpBranch(header);
+    module.AddLabel(merge);
+
+    // The draw's blocks are allocated from the arena every draw of the submission shares. The
+    // passes of consecutive draws are ordered by barriers, so a plain read and write allocate.
+    // The counter keeps growing past the end, so the host sees how much the submission needed.
     const Id total{module.OpLoad(u32_type, total_var)};
-    module.OpStore(word(args, constant(0)), total);
+    const Id base{module.OpLoad(u32_type, word(counter, constant(0)))};
+    module.OpStore(word(counter, constant(0)),
+                   module.OpIAdd(u32_type, base, module.OpIMul(u32_type, total, block_words)));
+    const Id room{module.OpSelect(u32_type, module.OpULessThan(bool_type, base, capacity_words),
+                                  module.OpISub(u32_type, capacity_words, base), constant(0))};
+    const Id dispatched{module.OpUMin(u32_type, total, module.OpUDiv(u32_type, room, block_words))};
+    module.OpStore(word(args, constant(0)), dispatched);
     module.OpStore(word(args, constant(1)), constant(1));
     module.OpStore(word(args, constant(2)), constant(1));
-    // Diagnostics: the mesh workgroups the tasks asked for, before the capacity clamp.
-    module.OpStore(word(args, constant(3)), module.OpLoad(u32_type, requested_var));
+    module.OpStore(word(args, constant(MESH_EMULATION_ARGS_REQUESTED)), total);
     const u32 draw{MESH_EMULATION_DRAW_ARGS_OFFSET / 4};
-    module.OpStore(word(args, constant(draw)), module.OpIMul(u32_type, total, vertices_per_group));
+    module.OpStore(word(args, constant(draw)), module.OpIMul(u32_type, dispatched, vertices_per_group));
     module.OpStore(word(args, constant(draw + 1)), constant(1));
     module.OpStore(word(args, constant(draw + 2)), constant(0));
     module.OpStore(word(args, constant(draw + 3)), constant(0));
+    module.OpStore(word(args, constant(MESH_EMULATION_ARGS_BASE)), base);
+    module.OpStore(word(args, constant(MESH_EMULATION_ARGS_TASKS)), tasks);
     module.OpReturn();
     module.OpFunctionEnd();
     module.AddEntryPoint(spv::ExecutionModel::GLCompute, main, "main", interfaces);

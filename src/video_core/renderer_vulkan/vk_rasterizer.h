@@ -311,6 +311,20 @@ private:
         bool pending{};
     } mesh_probe;
     void ReadMeshEmulationProbe();
+    /// Mesh emulation with a task program: the output arena every task draw of a submission
+    /// allocates its mesh workgroups from, and its host-visible counter of allocated words.
+    struct MeshArena {
+        vk::Buffer buffer;
+        vk::Buffer counter;
+        u64 size{};
+        u64 tick{};
+        bool counted{}; ///< the counter of its last submission was read
+    };
+    std::vector<MeshArena> mesh_arenas;
+    size_t mesh_arena_current{~size_t{}};
+    u64 mesh_arena_size{64ULL << 20};
+    /// The current submission's arena, after its counter is reset.
+    const MeshArena& AcquireMeshArena();
 
     struct IndirectTrace {
         vk::Buffer readback;
