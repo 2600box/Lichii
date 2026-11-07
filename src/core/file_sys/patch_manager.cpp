@@ -1213,7 +1213,8 @@ std::vector<Patch> PatchManager::GetPatches(VirtualFile update_raw) const {
             return std::find(disabled.begin(), disabled.end(), name) != disabled.end();
         };
         // Name an enabled built-in that contains this one, so unchecking only this one is not
-        // mistaken for turning the change off.
+        // mistaken for turning the change off. Whether it applies is only known in PatchNSO (a
+        // user mod can make it skip), hence "when it applies".
         const auto replacing = std::ranges::find_if(BUILTIN_PATCHES, [&](const BuiltinPatch& other) {
             return other.title_id == title_id && other.replaces == patch.name &&
                    !is_disabled(other.name);
@@ -1221,7 +1222,8 @@ std::vector<Patch> PatchManager::GetPatches(VirtualFile update_raw) const {
         out.push_back({.enabled = !is_disabled(patch.name),
                        .name = std::string{patch.name},
                        .version = replacing != BUILTIN_PATCHES.end()
-                                      ? fmt::format("IPS, replaced by {}", replacing->name)
+                                      ? fmt::format("IPS, replaced by {} when it applies",
+                                                    replacing->name)
                                       : std::string{"IPS"},
                        .type = PatchType::Mod,
                        .program_id = title_id,

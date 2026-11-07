@@ -265,10 +265,11 @@ TEST_CASE("Built-in FPS Unlock defaults on and replaces Dynamic FPS", "[patch_ma
         "4C0500F98201239EA301239E4218231E4208211E";
     const auto nso = MakeDynamicMain();
 
-    // Default: FPS Unlock applies, Dynamic FPS is listed as replaced by it.
+    // Default: FPS Unlock applies, Dynamic FPS is listed as replaced by it when it applies.
     REQUIRE(listed(FpsUnlock).enabled);
     REQUIRE(listed(DynamicFps).enabled);
-    REQUIRE(listed(DynamicFps).version == fmt::format("IPS, replaced by {}", FpsUnlock));
+    REQUIRE(listed(DynamicFps).version ==
+            fmt::format("IPS, replaced by {} when it applies", FpsUnlock));
     auto patched = manager.PatchNSO(nso, "main");
     REQUIRE(WordAt(patched, DynamicCallOffset) == DynamicCallInstruction);
     REQUIRE(routine(patched, UnlockRoutineSize) ==
