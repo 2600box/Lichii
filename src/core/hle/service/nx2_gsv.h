@@ -2951,10 +2951,14 @@ private:
         TipcReplyWords(ctx, {});
     }
 
-    static s64 HostTimeUs() {
-        return std::chrono::duration_cast<std::chrono::microseconds>(
-                   std::chrono::steady_clock::now().time_since_epoch())
-            .count();
+    s64 HostTimeUs() const {
+        return system.CoreTiming().GetGlobalTimeUs().count();
+    }
+
+    // Whether emulation was paused and resumed after host time `time_us`: the movie's audio
+    // stopped meanwhile, so the clock must restart from the next acquire.
+    bool ResumedSince(s64 time_us) const {
+        return system.CoreTiming().GetPauseEndTime().count() / 1000 > time_us;
     }
 
     // Starts or corrects the movie clock from a frame the client just acquired (m_mutex held).
@@ -2962,8 +2966,9 @@ private:
     void AnchorClock(u64 pts) {
         const s64 now = HostTimeUs();
         const s64 offset = now - static_cast<s64>(pts);
-        if (!m_clock_offset || now - m_last_acquire > PauseGap || pts < m_last_acquired_pts ||
-            offset < *m_clock_offset || offset - *m_clock_offset > MaxCatchUp) {
+        if (!m_clock_offset || now - m_last_acquire > PauseGap || ResumedSince(m_last_acquire) ||
+            pts < m_last_acquired_pts || offset < *m_clock_offset ||
+            offset - *m_clock_offset > MaxCatchUp) {
             m_clock_offset = offset;
         }
         m_last_acquire = now;
@@ -2978,7 +2983,7 @@ private:
         const s64 now = HostTimeUs();
         const s64 due = now - *m_clock_offset;
         // Nothing acquired for a while: paused; the next acquire restarts the clock.
-        if (due < 0 || now - m_last_acquire > PauseGap) {
+        if (due < 0 || now - m_last_acquire > PauseGap || ResumedSince(m_last_acquire)) {
             return std::nullopt;
         }
         return static_cast<u64>(due);
