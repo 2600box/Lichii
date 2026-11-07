@@ -626,7 +626,8 @@ std::vector<u32> EmitMeshEmulationDistribution(const Profile& profile) {
     const Id counter{define_buffer(3, "arena_counter")};
 
     constexpr u32 num_constants{sizeof(MeshEmulationDistributionConstants) / sizeof(u32)};
-    const std::array<Id, num_constants> members{u32_type, u32_type, u32_type, u32_type, u32_type};
+    std::array<Id, num_constants> members;
+    members.fill(u32_type);
     const Id constants_type{module.TypeStruct(std::span<const Id>(members))};
     module.Decorate(constants_type, spv::Decoration::Block);
     for (u32 member = 0; member < num_constants; ++member) {
@@ -659,6 +660,7 @@ std::vector<u32> EmitMeshEmulationDistribution(const Profile& profile) {
     const Id capacity_words{push(2)};
     const Id block_words{push(3)};
     const Id vertices_per_group{push(4)};
+    const Id max_groups{push(5)};
     module.OpStore(total_var, constant(0));
     module.OpStore(task_var, constant(0));
 
@@ -700,7 +702,9 @@ std::vector<u32> EmitMeshEmulationDistribution(const Profile& profile) {
                    module.OpIAdd(u32_type, base, module.OpIMul(u32_type, total, block_words)));
     const Id room{module.OpSelect(u32_type, module.OpULessThan(bool_type, base, capacity_words),
                                   module.OpISub(u32_type, capacity_words, base), constant(0))};
-    const Id dispatched{module.OpUMin(u32_type, total, module.OpUDiv(u32_type, room, block_words))};
+    const Id dispatched{module.OpUMin(
+        u32_type, module.OpUMin(u32_type, total, module.OpUDiv(u32_type, room, block_words)),
+        max_groups)};
     module.OpStore(word(args, constant(0)), dispatched);
     module.OpStore(word(args, constant(1)), constant(1));
     module.OpStore(word(args, constant(2)), constant(1));

@@ -1603,24 +1603,44 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             return nullptr;
         }
         // The output buffer's binding follows every program's (unified bindings, one per
-        // descriptor element, as the SPIR-V backend numbers them).
+        // descriptor element, as the SPIR-V backend numbers them). The task and mesh programs
+        // share the compute stage, so their descriptors and the emulation's own buffers count
+        // against one set of per-stage limits.
         u32 output_binding{};
+        u32 compute_storage_buffers{has_task ? 4U : 1U};
+        u32 compute_sampled_images{};
+        u32 compute_resources{compute_storage_buffers};
         for (size_t index = 1; index < Maxwell::MaxShaderProgram; ++index) {
             if (key.unique_hashes[index] == 0) {
                 continue;
             }
             const Shader::Info& info{programs[index].info};
-            const auto add = [&](const auto& descriptors) {
-                for (const auto& descriptor : descriptors) {
-                    output_binding += descriptor.count;
+            const bool emulated{index == mesh_index || (has_task && index == 1)};
+            const auto add = [&](const auto& descriptors, u32* category) {
+                const u32 count{Shader::NumDescriptors(descriptors)};
+                output_binding += count;
+                if (emulated) {
+                    compute_resources += count;
+                    if (category) {
+                        *category += count;
+                    }
                 }
             };
-            add(info.constant_buffer_descriptors);
-            add(info.storage_buffers_descriptors);
-            add(info.texture_buffer_descriptors);
-            add(info.image_buffer_descriptors);
-            add(info.texture_descriptors);
-            add(info.image_descriptors);
+            add(info.constant_buffer_descriptors, nullptr);
+            add(info.storage_buffers_descriptors, &compute_storage_buffers);
+            add(info.texture_buffer_descriptors, &compute_sampled_images);
+            add(info.image_buffer_descriptors, nullptr);
+            add(info.texture_descriptors, &compute_sampled_images);
+            add(info.image_descriptors, nullptr);
+        }
+        if (compute_storage_buffers > device.GetMaxPerStageDescriptorStorageBuffers() ||
+            compute_sampled_images > device.GetMaxPerStageDescriptorSampledImages() ||
+            compute_resources > device.GetMaxPerStageResources()) {
+            LOG_WARNING(Render_Vulkan,
+                        "Mesh emulation skipped: {} storage buffers, {} sampled images and {} "
+                        "resources exceed the compute stage limits",
+                        compute_storage_buffers, compute_sampled_images, compute_resources);
+            return nullptr;
         }
         mesh_emulation.emplace();
         mesh_emulation->output_binding = output_binding;

@@ -182,6 +182,13 @@ public:
     [[nodiscard]] Id BitOffset8(const IR::Value& offset);
     [[nodiscard]] Id BitOffset16(const IR::Value& offset);
 
+    /// Whether this stage has subgroup operations. Mesh emulation runs task and mesh programs
+    /// as compute shaders, so they have what compute shaders have.
+    [[nodiscard]] bool SupportsSubgroups() const {
+        return profile.SupportsSubgroupStage(runtime_info.mesh_as_compute ? Stage::Compute
+                                                                          : stage);
+    }
+
     Id Const(u32 value) {
         return Constant(U32[1], value);
     }

@@ -70,6 +70,7 @@ struct MeshEmulationDistributionConstants {
     u32 capacity_words;     ///< words of the output arena
     u32 block_words;        ///< output words per mesh workgroup
     u32 vertices_per_group; ///< draw vertices per mesh workgroup
+    u32 max_groups;         ///< the device's maxComputeWorkGroupCount[0]
 };
 /// Words of the distribution's argument buffer: vkCmdDispatchIndirect at 0, the mesh workgroups
 /// the tasks asked for at 3, vkCmdDrawIndirect at MESH_EMULATION_DRAW_ARGS_OFFSET, then the

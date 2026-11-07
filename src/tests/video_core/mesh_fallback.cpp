@@ -128,7 +128,9 @@ Profile MakeProfile() {
 }
 
 // A one-triangle mesh program (or the task program launching it), as the frontend lowers them.
-std::vector<u32> EmitProgram(Stage stage, bool as_compute, bool with_task) {
+// With lane_id the mesh program writes its lane as the vertex's first attribute word.
+std::vector<u32> EmitProgram(Stage stage, bool as_compute, bool with_task,
+                             Profile profile = MakeProfile(), bool lane_id = false) {
     ObjectPool<IR::Inst> pool;
     IR::Block block{pool};
     IR::Program program;
@@ -146,7 +148,8 @@ std::vector<u32> EmitProgram(Stage stage, bool as_compute, bool with_task) {
     IR::IREmitter ir{block};
     ir.Prologue();
     if (stage == Stage::Mesh) {
-        const IR::U32 index{ir.IsbeRead(ir.Imm32(0))};
+        const IR::U32 index{lane_id ? ir.LaneId() : ir.IsbeRead(ir.Imm32(0))};
+        program.info.uses_subgroup_invocation_id = lane_id;
         ir.IsbeWriteAttribute(ir.Imm32(0), index);
         ir.IsbeWriteMapU8(ir.Imm32(4), ir.Imm32(0));
         ir.IsbeWriteMapU32(ir.Imm32(3), ir.Imm32(1));
@@ -165,7 +168,7 @@ std::vector<u32> EmitProgram(Stage stage, bool as_compute, bool with_task) {
         runtime_info.mesh_task_payload_stride = program.mesh.payload_words;
     }
     Backend::Bindings bindings;
-    return SPIRV::EmitSPIRV(MakeProfile(), runtime_info, program, bindings);
+    return SPIRV::EmitSPIRV(profile, runtime_info, program, bindings);
 }
 
 void RequireNoMeshShading(const std::vector<u32>& code) {
@@ -203,6 +206,17 @@ TEST_CASE("Mesh fallback emits mesh programs as compute shaders writing storage 
     RequireNoMeshShading(after_task);
     REQUIRE(Bindings(after_task) ==
             std::vector<u32>{OUTPUT_BINDING, PAYLOAD_BINDING, OFFSETS_BINDING, ARGS_BINDING});
+}
+
+TEST_CASE("Mesh fallback programs use compute subgroup support",
+          "[video_core][spirv][mesh_fallback]") {
+    // A device without VK_EXT_mesh_shader reports subgroup support for compute, not mesh.
+    Profile profile{MakeProfile()};
+    profile.supported_subgroup_stages = 1U << static_cast<u32>(Stage::Compute);
+    const std::vector<u32> code{EmitProgram(Stage::Mesh, true, false, profile, true)};
+    Dump(code, "fallback-mesh-lane-id");
+    RequireNoMeshShading(code);
+    REQUIRE(HasCapability(code, spv::Capability::GroupNonUniform));
 }
 
 TEST_CASE("Mesh fallback emits task programs as compute shaders writing their payload",

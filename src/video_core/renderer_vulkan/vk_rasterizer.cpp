@@ -614,9 +614,10 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     mesh_emulation_vertices_per_group = 0;
     if (emulated_mesh) {
         // The same group count the native path hands vkCmdDrawMeshTasksEXT (MakeDrawParams:
-        // the index count for indexed draws).
+        // the index count for indexed draws), within the device's dispatch limit.
         const auto& draw_state{maxwell3d->draw_manager.draw_state};
-        const u32 groups{MakeDrawParams(draw_state, 1, is_indexed).num_vertices};
+        const u32 groups{(std::min)(MakeDrawParams(draw_state, 1, is_indexed).num_vertices,
+                                    device.GetMaxComputeWorkGroupCount()[0])};
         // Mesh emulation statistics: draws with and without groups, and the frames with any
         // groups (the game culls on the GPU and sets the counts itself).
         {
