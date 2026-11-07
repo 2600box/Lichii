@@ -7,6 +7,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -180,7 +181,7 @@ public:
 
 private:
     bool convert_to_domain{};
-    bool is_domain{};
+    std::atomic<bool> is_domain{};
     bool is_initialized_for_sm{};
     SessionRequestHandlerPtr session_handler;
     // Sessions cloned from one domain share this manager and may be served on different threads.
