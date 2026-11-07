@@ -8,6 +8,8 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
+#include <filesystem>
 #include <list>
 #include <memory>
 #include <utility>
@@ -176,9 +178,20 @@ struct GPU::Impl {
     }
 
     void RendererFrameEndNotify() {
+        // EXPERIMENT (test package only): <EDEN_NX2_DEBUG_DIR>/gpu-clock-normal latches Normal
+        // (exact nanoseconds, the pre-#664 behaviour) whatever the setting says.
+        const char* dir = std::getenv("EDEN_NX2_DEBUG_DIR");
+        std::error_code ec;
+        const bool force_normal =
+            dir != nullptr && std::filesystem::exists(std::filesystem::path{dir} / "gpu-clock-normal", ec);
+        if (force_normal != experiment_normal) {
+            experiment_normal = force_normal;
+            LOG_INFO(HW_GPU, "EXPERIMENT GPU clock forced Normal: {}", force_normal);
+        }
         ampere_anchor.store(
             AmpereAnchor::At(static_cast<u64>(system.CoreTiming().GetGlobalTimeNs().count()),
-                             Settings::values.gpu_clock.GetValue()),
+                             force_normal ? Settings::GpuClock::Normal
+                                          : Settings::values.gpu_clock.GetValue()),
             std::memory_order_relaxed);
         system.GetPerfStats().EndGameFrame();
     }
@@ -378,6 +391,7 @@ struct GPU::Impl {
     std::list<std::function<void()>> sync_requests;
     std::atomic<u64> current_sync_fence{};
     std::atomic<AmpereAnchor> ampere_anchor{};
+    bool experiment_normal{};
     u64 last_sync_fence{};
 
     VideoCommon::PendingMaps pending_maps;

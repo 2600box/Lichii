@@ -7,6 +7,7 @@
 #include <array>
 #include <thread>
 #include <chrono>
+#include <filesystem>
 #include <condition_variable>
 #include <cstring>
 #include <set>
@@ -1908,11 +1909,25 @@ private:
     /// call, so a wait there reads as a slow CPU frame: Mario Kart World and Wonder NS2E then
     /// chose their 30 fps mode and stayed there. EDEN_NX2_PRESENT_QUEUE=0 restores blocking pacing.
     static bool PresentQueue() {
-        static const bool enabled = [] {
-            const char* value = std::getenv("EDEN_NX2_PRESENT_QUEUE");
-            return value == nullptr || value[0] != '0';
-        }();
-        return enabled;
+        // EXPERIMENT (test package only): <EDEN_NX2_DEBUG_DIR>/present-queue.off switches back to
+        // blocking pacing while the game runs; checked every 250 ms.
+        static std::atomic<bool> enabled{true};
+        static std::atomic<s64> next_check{};
+        const s64 now = std::chrono::steady_clock::now().time_since_epoch().count();
+        if (now >= next_check.load(std::memory_order_relaxed)) {
+            next_check.store(now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                       std::chrono::milliseconds{250})
+                                       .count(),
+                             std::memory_order_relaxed);
+            const char* dir = std::getenv("EDEN_NX2_DEBUG_DIR");
+            std::error_code ec;
+            const bool on = dir == nullptr ||
+                            !std::filesystem::exists(std::filesystem::path{dir} / "present-queue.off", ec);
+            if (enabled.exchange(on) != on) {
+                LOG_INFO(Service, "EXPERIMENT present queue {}", on ? "on" : "off");
+            }
+        }
+        return enabled.load(std::memory_order_relaxed);
     }
 
     Nvidia::NvCore::SyncpointManager& NvdrvSyncpoints() {
