@@ -349,6 +349,25 @@ nx::Result<std::shared_ptr<nx::Session>> OpenNxSession(VirtualFile file,
     }
 }
 
+// The header and Catalog only: no Manifest mount and no prefetch thread, enough to list a game.
+struct NxCatalog {
+    std::shared_ptr<nx::RandomAccessSource> source;
+    nx::Archive archive;
+};
+
+std::optional<NxCatalog> OpenNxCatalog(VirtualFile file) {
+    if (file == nullptr) {
+        return std::nullopt;
+    }
+    NxCatalog catalog{std::make_shared<VfsSource>(std::move(file)), {}};
+    auto opened = nx::Archive::open(*catalog.source);
+    if (!opened) {
+        return std::nullopt;
+    }
+    catalog.archive = std::move(*opened.value);
+    return catalog;
+}
+
 // Read-only view of one snapshot. Every file and directory keeps the session alive.
 VirtualDir NxSnapshotDirectory(std::shared_ptr<nx::Session> session, u32 snapshot) {
     auto root = session->archive().root_directory(snapshot);
@@ -707,11 +726,11 @@ bool AppLoader_NX::IsBootable(const FileSys::VirtualFile& nx_file) {
     if (IdentifyType(nx_file) != FileType::NX) {
         return false;
     }
-    auto opened = FileSys::OpenNxSession(nx_file, HostPath(nx_file));
-    if (!opened) {
+    const auto catalog = FileSys::OpenNxCatalog(nx_file);
+    if (!catalog) {
         return false;
     }
-    const auto& a = (*opened.value)->archive();
+    const auto& a = catalog->archive;
     return std::any_of(a.snapshots().begin(), a.snapshots().end(), [&](const nx::Snapshot& s) {
         return s.type != AddOn && s.program_index < a.programs().size() &&
                a.programs()[s.program_index].kind == 0 &&
@@ -724,11 +743,11 @@ u8 AppLoader_NX::ReadPlatform(const FileSys::VirtualFile& nx_file, u64 program_i
     if (IdentifyType(nx_file) != FileType::NX) {
         return 0;
     }
-    auto opened = FileSys::OpenNxSession(nx_file, HostPath(nx_file));
-    if (!opened) {
+    const auto catalog = FileSys::OpenNxCatalog(nx_file);
+    if (!catalog) {
         return 0;
     }
-    const auto& a = (*opened.value)->archive();
+    const auto& a = catalog->archive;
     for (const auto& program : a.programs()) {
         const auto& owner = a.applications()[program.application_index];
         if (program_id == 0 || program.id == program_id || owner.id == program_id) {
