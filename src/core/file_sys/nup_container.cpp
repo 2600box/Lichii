@@ -161,6 +161,9 @@ constexpr std::size_t DecodeInputChunk = 128 * 1024;
 constexpr u64 NearDecode = 1024 * 1024;
 /// What a zstd decoder holds while a member is partly decoded (measured: about 221 KiB).
 constexpr std::size_t DecoderCharge = 256 * 1024;
+/// Partly decoded spilled members that keep their decoder, and with it a window of up to
+/// 128 MiB; another one restarts from its first frame when read past its prefix again.
+constexpr std::size_t MaxSpillDecoders = 2;
 
 } // namespace
 
@@ -185,6 +188,8 @@ struct NupMember {
 
     std::unique_ptr<ZSTD_DCtx, decltype(&ZSTD_freeDCtx)> dctx{nullptr, &ZSTD_freeDCtx};
     u64 consumed{};
+    u64 produced{};
+    std::size_t last_result{};
     bool started{};
 
     // A member up to half the cache cap, decoded in place.
@@ -210,6 +215,8 @@ struct NupDecompressCache {
     std::list<Entry> lru;
     std::unordered_map<std::size_t, std::list<Entry>::iterator> index;
     std::unordered_map<std::size_t, std::shared_ptr<NupMember>> spills;
+    // Spilled members holding a decoder, newest first.
+    std::list<NupMember*> spill_decoders;
     std::size_t bytes{};
     std::size_t cap{};
     std::filesystem::path spill_dir;
@@ -241,6 +248,30 @@ struct NupDecompressCache {
         lru.push_front({file_index, charge, std::make_shared<NupMember>()});
         index.emplace(file_index, lru.begin());
         return lru.front().member;
+    }
+
+    /// Registers the new decoder of a spilled member the caller decodes, and frees the decoders of
+    /// idle spilled members beyond MaxSpillDecoders.
+    void AddSpillDecoder(NupMember& member) {
+        std::scoped_lock lock{mutex};
+        spill_decoders.push_front(&member);
+        auto it = spill_decoders.end();
+        while (spill_decoders.size() > MaxSpillDecoders &&
+               it != std::next(spill_decoders.begin())) {
+            --it;
+            NupMember& other = **it;
+            std::unique_lock other_lock{other.mutex, std::try_to_lock};
+            if (!other_lock || other.decoding) {
+                continue;
+            }
+            other.dctx.reset();
+            it = spill_decoders.erase(it);
+        }
+    }
+
+    void RemoveSpillDecoder(NupMember& member) {
+        std::scoped_lock lock{mutex};
+        spill_decoders.remove(&member);
     }
 
     /// Stops charging a member's decoder once it is freed.
@@ -335,9 +366,9 @@ private:
     /// holds the decoder. False if fewer than `end` bytes can be decoded.
     bool DecodeTo(NupMember& member, u64 end, u64 target) const {
         std::unique_lock lock{member.mutex};
-        while (member.decoded.load(std::memory_order_relaxed) < target) {
+        while (member.decoded.load(std::memory_order_acquire) < target) {
             if (member.failed) {
-                return member.decoded.load(std::memory_order_relaxed) >= end;
+                return member.decoded.load(std::memory_order_acquire) >= end;
             }
             if (member.decoding) {
                 member.progress.wait(lock);
@@ -354,53 +385,63 @@ private:
         return true;
     }
 
-    /// Decodes the next input chunk; the caller owns the member's decoder. False on failure.
+    /// Decodes the next input chunk; the caller owns the member's decoder. The last byte is
+    /// published only once the extent has ended exactly at the file size. False on failure.
     bool DecodeStep(NupMember& member) const {
         u64 decoded = member.decoded.load(std::memory_order_relaxed);
         const auto finish = [&] {
             member.dctx.reset();
-            if (!spilled) {
+            if (spilled) {
+                cache->RemoveSpillDecoder(member);
+            } else {
                 cache->ReleaseDecoder(cache_index, member);
             }
         };
         const auto fail = [&](const char* reason) {
-            LOG_ERROR(Loader, "NUP zstd decompression of {} failed at byte {}: {}", name, decoded,
-                      reason);
+            LOG_ERROR(Loader, "NUP zstd decompression of {} failed at byte {}: {}", name,
+                      member.produced, reason);
             finish();
             return false;
         };
-        if (!member.started) {
-            member.started = true;
-            if (extent_size > backing->GetSize() ||
-                extent_offset > backing->GetSize() - extent_size) {
-                return fail("extent out of range");
+        if (!member.dctx) {
+            if (!member.started) {
+                member.started = true;
+                if (extent_size > backing->GetSize() ||
+                    extent_offset > backing->GetSize() - extent_size) {
+                    return fail("extent out of range");
+                }
+                if (spilled) {
+                    std::random_device random;
+                    std::error_code ec;
+                    std::filesystem::create_directories(cache->spill_dir, ec);
+                    member.path = cache->spill_dir / fmt::format("{:08x}{:08x}-{}.tmp", random(),
+                                                                 random(), cache_index);
+                    member.file.Open(member.path, Common::FS::FileAccessMode::Write);
+                    member.file.Close();
+                    member.file.Open(member.path, Common::FS::FileAccessMode::ReadWrite);
+                    if (!member.file.IsOpen()) {
+                        return fail("cannot create the temporary file");
+                    }
+                } else {
+                    member.data = std::make_unique_for_overwrite<u8[]>(
+                        static_cast<std::size_t>(uncompressed_size));
+                }
             }
+            // A spilled member whose decoder was freed starts over; output already in its
+            // temporary file is decoded again but not rewritten.
             member.dctx.reset(ZSTD_createDCtx());
             if (!member.dctx) {
                 return fail("cannot create a decoder");
             }
+            member.consumed = 0;
+            member.produced = 0;
             if (spilled) {
-                std::random_device random;
-                std::error_code ec;
-                std::filesystem::create_directories(cache->spill_dir, ec);
-                member.path = cache->spill_dir /
-                              fmt::format("{:08x}{:08x}-{}.tmp", random(), random(), cache_index);
-                member.file.Open(member.path, Common::FS::FileAccessMode::Write);
-                member.file.Close();
-                member.file.Open(member.path, Common::FS::FileAccessMode::ReadWrite);
-                if (!member.file.IsOpen()) {
-                    return fail("cannot create the temporary file");
-                }
+                cache->AddSpillDecoder(member);
             } else {
-                member.data = std::make_unique_for_overwrite<u8[]>(
-                    static_cast<std::size_t>(uncompressed_size));
                 // Decoding straight into the member skips zstd's window buffer and its copy.
                 ZSTD_DCtx_setParameter(member.dctx.get(), ZSTD_d_stableOutBuffer, 1);
                 ZSTD_DCtx_setParameter(member.dctx.get(), ZSTD_d_windowLogMax, ZSTD_WINDOWLOG_MAX);
             }
-        }
-        if (member.consumed == extent_size) {
-            return fail("truncated data");
         }
 
         thread_local std::vector<u8> input(DecodeInputChunk);
@@ -414,42 +455,54 @@ private:
         member.consumed += chunk;
         ZSTD_inBuffer in{input.data(), chunk, 0};
         bool flush = false;
-        while (decoded < uncompressed_size && (in.pos < in.size || flush)) {
+        while (in.pos < in.size || flush) {
             ZSTD_outBuffer out =
                 spilled
                     ? ZSTD_outBuffer{output.data(), output.size(), 0}
                     : ZSTD_outBuffer{member.data.get(), static_cast<std::size_t>(uncompressed_size),
-                                     static_cast<std::size_t>(decoded)};
+                                     static_cast<std::size_t>(member.produced)};
             const std::size_t in_before = in.pos;
             const std::size_t out_before = out.pos;
-            const std::size_t result = ZSTD_decompressStream(member.dctx.get(), &out, &in);
-            if (ZSTD_isError(result)) {
-                return fail(ZSTD_getErrorName(result));
+            member.last_result = ZSTD_decompressStream(member.dctx.get(), &out, &in);
+            if (ZSTD_isError(member.last_result)) {
+                return fail(ZSTD_getErrorName(member.last_result));
             }
             const u64 produced = out.pos - out_before;
-            if (produced > uncompressed_size - decoded) {
+            if (produced > uncompressed_size - member.produced) {
                 return fail("more data than the file size");
             }
-            if (spilled && produced != 0) {
+            const u64 from = std::max(member.produced, decoded);
+            if (spilled && member.produced + produced > from) {
+                const auto count = static_cast<std::size_t>(member.produced + produced - from);
                 std::scoped_lock file_lock{member.file_mutex};
-                if (!member.file.Seek(static_cast<s64>(decoded)) ||
-                    member.file.WriteSpan(std::span<const u8>{output.data(), out.pos}) != out.pos) {
+                if (!member.file.Seek(static_cast<s64>(from)) ||
+                    member.file.WriteSpan(std::span<const u8>{
+                        output.data() + (from - member.produced), count}) != count) {
                     return fail("cannot write the temporary file");
                 }
             }
             if (produced == 0 && in.pos == in_before) {
                 if (in.pos < in.size) {
-                    return fail("no progress");
+                    return fail("more data than the file size");
                 }
                 break;
             }
-            decoded += produced;
-            member.decoded.store(decoded, std::memory_order_release);
-            flush = spilled && out.pos == out.size;
+            member.produced += produced;
+            if (const u64 visible = std::min(member.produced, uncompressed_size - 1);
+                visible > decoded) {
+                decoded = visible;
+                member.decoded.store(decoded, std::memory_order_release);
+            }
+            flush = spilled && out.pos == out.size && member.last_result != 0;
         }
-        if (decoded == uncompressed_size) {
-            finish();
+        if (member.consumed < extent_size) {
+            return true;
         }
+        if (member.produced != uncompressed_size || member.last_result != 0) {
+            return fail("the data does not end at the file size");
+        }
+        member.decoded.store(uncompressed_size, std::memory_order_release);
+        finish();
         return true;
     }
 

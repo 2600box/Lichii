@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <random>
 #include <string>
 #include <thread>
@@ -138,8 +139,10 @@ bool ReadMatches(const FileSys::VirtualFile& file, const std::vector<u8>& conten
 
 std::size_t DirectoryBytes(const fs::path& dir) {
     std::size_t total = 0;
+    // Windows directory entries can report a stale size for a file that is still open.
     for (const auto& entry : fs::directory_iterator(dir)) {
-        total += entry.file_size();
+        std::ifstream stream{entry.path(), std::ios::binary | std::ios::ate};
+        total += static_cast<std::size_t>(stream.tellg());
     }
     return total;
 }
@@ -258,7 +261,7 @@ TEST_CASE("NUP zstd reads fail cleanly on corrupt or truncated extents", "[nup][
     const auto good = ZstdMember(content);
     TempDir t;
     for (const std::size_t cap : {std::size_t{64} << 20, std::size_t{64} << 10}) {
-        SECTION("truncated") {
+        DYNAMIC_SECTION("truncated, cap " << cap) {
             Member truncated = good;
             truncated.extent.resize(truncated.extent.size() / 2);
             NupContainer nup{Backing(BuildNup({truncated})), cap, t.path};
@@ -274,7 +277,7 @@ TEST_CASE("NUP zstd reads fail cleanly on corrupt or truncated extents", "[nup][
             REQUIRE(nup.VerifyIntegrity({}) ==
                     Loader::ResultStatus::ErrorIntegrityVerificationFailed);
         }
-        SECTION("bad frame header") {
+        DYNAMIC_SECTION("bad frame header, cap " << cap) {
             Member corrupt = good;
             std::fill_n(corrupt.extent.begin(), 8, u8{0xA5});
             NupContainer nup{Backing(BuildNup({corrupt})), cap, t.path};
@@ -282,19 +285,54 @@ TEST_CASE("NUP zstd reads fail cleanly on corrupt or truncated extents", "[nup][
             std::vector<u8> buffer(4096);
             REQUIRE(nup.OpenFile(0)->Read(buffer.data(), buffer.size(), 0) == 0);
         }
-        SECTION("recorded size smaller than the frame") {
+        DYNAMIC_SECTION("recorded size smaller than the frame, cap " << cap) {
             Member oversized = good;
             oversized.size = content.size() - 1000;
             NupContainer nup{Backing(BuildNup({oversized})), cap, t.path};
             REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
             REQUIRE(nup.OpenFile(0)->ReadAllBytes().empty());
         }
-        SECTION("recorded size larger than the frame") {
+        DYNAMIC_SECTION("recorded size ending on a decoder output block, cap " << cap) {
+            // zstd hands spilled output over in 128 KiB blocks, so the recorded size is reached
+            // exactly at a block end while the frame still holds more.
+            Member oversized = good;
+            oversized.size = content.size() - 128 * 1024;
+            NupContainer nup{Backing(BuildNup({oversized})), cap, t.path};
+            REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+            const auto file = nup.OpenFile(0);
+            std::vector<u8> buffer(4096);
+            REQUIRE(file->Read(buffer.data(), buffer.size(), oversized.size - 1) == 0);
+            REQUIRE(file->ReadAllBytes().empty());
+        }
+        DYNAMIC_SECTION("recorded size larger than the frame, cap " << cap) {
             Member undersized = good;
             undersized.size = content.size() + 1000;
             NupContainer nup{Backing(BuildNup({undersized})), cap, t.path};
             REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
             REQUIRE(nup.OpenFile(0)->ReadAllBytes().empty());
         }
+    }
+}
+
+TEST_CASE("NUP zstd spilled members resume after their decoder is freed", "[nup][nup-read]") {
+    std::vector<std::vector<u8>> contents;
+    std::vector<Member> members;
+    for (int i = 0; i < 5; ++i) {
+        contents.push_back(Content(std::size_t{2} << 20, 200 + i));
+        members.push_back(ZstdMember(contents.back()));
+    }
+    TempDir t;
+    NupContainer nup{Backing(BuildNup(members)), 1 << 20, t.path};
+    REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+    // Starting every member leaves only the newest decoders alive; the older members decode
+    // again from their first frame when read further.
+    for (int round = 0; round < 3; ++round) {
+        for (std::size_t i = 0; i < contents.size(); ++i) {
+            const std::size_t offset = static_cast<std::size_t>(round) * 512 * 1024;
+            REQUIRE(ReadMatches(nup.OpenFile(i), contents[i], offset, 4096));
+        }
+    }
+    for (std::size_t i = 0; i < contents.size(); ++i) {
+        REQUIRE(nup.OpenFile(i)->ReadAllBytes() == contents[i]);
     }
 }
