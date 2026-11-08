@@ -16,6 +16,7 @@
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/memory.h"
+#include "video_core/nx2_acquire_test.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/dma_pusher.h"
 #include "video_core/command_fetch_order.h"
@@ -253,7 +254,8 @@ bool DmaPusher::Step() {
                 ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
         } else if (bool pending = false;
                    ReadGpuWrittenCommands(dma_state.dma_get, static_cast<u32>(header.size),
-                                          &pending) ||
+                                          VideoCommon::Nx2AcquireTest::g_t752_off ? nullptr
+                                                                                  : &pending) ||
                    pending) {
             if (pending) {
                 // Parsed again once the GPU copied the list; other channels run meanwhile.

@@ -29,6 +29,7 @@
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/nx2_acquire_test.h"
 #include "video_core/rasterizer_interface.h"
 
 namespace VideoCommon {
@@ -88,7 +89,8 @@ public:
         // fence runs its operation at once, before the host GPU has run the work the report
         // follows, and Ocarina of Time then reads a wrong report (white flashes on leaves and walls
         // at low GPU accuracy).
-        const bool delay_fence = VideoCore::g_signaling_query_report_fence ||
+        const bool delay_fence = (VideoCore::g_signaling_query_report_fence &&
+                                  !VideoCommon::Nx2AcquireTest::g_t337_off) ||
                                  (Settings::IsGPUFenceBehaviorDefault()
                                       ? Settings::IsGPULevelHigh()
                                       : Settings::IsGPUFenceBehaviorBalanced() ||
