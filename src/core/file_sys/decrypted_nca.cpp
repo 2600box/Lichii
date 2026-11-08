@@ -8,6 +8,7 @@
 #include <openssl/evp.h>
 
 #include "common/alignment.h"
+#include "common/logging.h"
 #include "core/crypto/aes_util.h"
 #include "core/crypto/key_manager.h"
 #include "core/file_sys/card_image.h"
@@ -521,6 +522,12 @@ VirtualFile OpenDecryptedPackage(VirtualFile package, std::string& error) {
             return nullptr;
         }
         files = secure->GetFiles();
+    }
+    for (const auto& file : files) {
+        if (file->GetExtension() == "tik" &&
+            !Core::Crypto::KeyManager::Instance().AddTicket(Core::Crypto::Ticket::Read(file))) {
+            LOG_WARNING(Common_Filesystem, "Could not load ticket {}", file->GetName());
+        }
     }
     for (auto& file : files) {
         const auto name = file->GetName();
