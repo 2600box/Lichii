@@ -585,6 +585,7 @@ void BufferCache<P>::BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr
     const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
     if (!device_addr) {
         channel_state->uniform_buffers[stage][index] = NULL_BINDING;
+        channel_state->unresolved_uniform_buffers[stage] |= 1U << index;
         return;
     }
     const Binding binding{
@@ -593,6 +594,7 @@ void BufferCache<P>::BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr
         .buffer_id = BufferId{},
     };
     channel_state->uniform_buffers[stage][index] = binding;
+    channel_state->unresolved_uniform_buffers[stage] |= 1U << index;
 }
 
 template <class P>
@@ -603,6 +605,7 @@ void BufferCache<P>::DisableGraphicsUniformBuffer(size_t stage, u32 index) {
         return;
     }
     current = NULL_BINDING;
+    channel_state->unresolved_uniform_buffers[stage] &= ~(1U << index);
 }
 
 template <class P>
@@ -2029,7 +2032,27 @@ void BufferCache<P>::UpdateUniformBuffers(size_t stage) {
     if (channel_state->enabled_uniform_buffer_masks[stage] == 0) [[likely]] {
         return;
     }
-    ForEachEnabledBit(channel_state->enabled_uniform_buffer_masks[stage], [&](u32 index) {
+    const u32 enabled = channel_state->enabled_uniform_buffer_masks[stage];
+    u32 to_resolve = enabled;
+    if (Nx2Egla66::ubo_mask) {
+        // EGLA-66 ubo-mask (9b06c4fd38): only a slot bound since its last resolve, or whose
+        // buffer was deleted, can lack its buffer; the others need no visit.
+        u32& unresolved = channel_state->unresolved_uniform_buffers[stage];
+        to_resolve &= unresolved;
+        unresolved &= ~to_resolve;
+        if (Nx2Egla66::ubo_mask_verify) {
+            ForEachEnabledBit(enabled & ~to_resolve, [&](u32 index) {
+                if (!channel_state->uniform_buffers[stage][index].buffer_id) {
+                    Nx2Egla66::Count(Nx2Egla66::g_ubo_mask_mismatches);
+                    to_resolve |= 1U << index;
+                }
+            });
+        }
+        Nx2Egla66::Count(Nx2Egla66::g_ubo_mask_skipped,
+                         static_cast<u64>(std::popcount(enabled & ~to_resolve)));
+        Nx2Egla66::Count(Nx2Egla66::g_ubo_mask_visited, static_cast<u64>(std::popcount(to_resolve)));
+    }
+    ForEachEnabledBit(to_resolve, [&](u32 index) {
         Binding& binding = channel_state->uniform_buffers[stage][index];
         if (binding.buffer_id) {
             // Already updated
@@ -2976,6 +2999,7 @@ void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
         }
     }
     std::ranges::for_each(channel_state->uniform_buffers, replace);
+    channel_state->unresolved_uniform_buffers.fill(~u32{0});
     std::ranges::for_each(channel_state->storage_buffers, replace);
     replace(channel_state->transform_feedback_buffers);
     replace(channel_state->compute_uniform_buffers);

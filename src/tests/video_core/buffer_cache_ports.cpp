@@ -6,6 +6,7 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <random>
 #include <thread>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
@@ -107,6 +108,19 @@ struct Runtime {
             ++uploads;
             upload_bytes += copy.size;
         }
+    }
+    void CopyBuffer(Buffer& dst, Buffer& src, std::span<const VideoCommon::BufferCopy> copies,
+                    bool) {
+        for (const auto& copy : copies) {
+            REQUIRE(copy.src_offset + copy.size <= src.bytes.size());
+            REQUIRE(copy.dst_offset + copy.size <= dst.bytes.size());
+            std::memcpy(dst.bytes.data() + copy.dst_offset, src.bytes.data() + copy.src_offset,
+                        copy.size);
+        }
+    }
+    void ClearBuffer(Buffer& buffer, u32 offset, size_t size, u32 value) {
+        REQUIRE(offset + size <= buffer.bytes.size());
+        std::memset(buffer.bytes.data() + offset, static_cast<int>(value), size);
     }
     void Finish() {
         if (before_completion) {
@@ -228,6 +242,25 @@ struct BufferCacheTestAccess {
         cache.gpu_memory = &channel.gpu_memory;
         channel.uniform_buffers[0][0] = {.device_addr = address, .size = size, .buffer_id = id};
         cache.BindHostGraphicsUniformBuffer(0, 0, 0, true);
+    }
+    static void UseChannel(Cache& cache, BufferCacheChannelInfo& channel) {
+        cache.channel_state = &channel;
+        cache.maxwell3d = &channel.maxwell3d;
+        cache.gpu_memory = &channel.gpu_memory;
+    }
+    static void UpdateUniforms(Cache& cache, size_t stage) {
+        // As UpdateGraphicsBuffers: a resolve that deletes a buffer resolves again.
+        do {
+            cache.channel_state->has_deleted_buffers = false;
+            cache.UpdateUniformBuffers(stage);
+        } while (cache.channel_state->has_deleted_buffers);
+    }
+    static BufferId Find(Cache& cache, DAddr address, u32 size) {
+        return cache.FindBuffer(address, size, false);
+    }
+    static void Delete(Cache& cache, BufferId id) {
+        cache.Unregister(id);
+        cache.DeleteBuffer(id);
     }
     static void NextFrame(Cache& cache) {
         cache.native_indirect_uniforms_this_frame.clear();
@@ -626,4 +659,92 @@ TEST_CASE("Downloads keep CPU writes collected and not yet applied", "[buffer_po
     REQUIRE(f.bytes[0x20ff7] == 0x34);
     REQUIRE(std::all_of(f.bytes + 0x20ff8, f.bytes + 0x21008, [](u8 b) { return b == 0xee; }));
     REQUIRE(f.bytes[0x21008] == 0x34);
+}
+
+TEST_CASE("Uniform buffer slots resolve to the buffer that holds them with the EGLA-66 UBO gates",
+          "[buffer_ports]") {
+    namespace Egla66 = VideoCommon::Nx2Egla66;
+    const bool previous_mask = Egla66::ubo_mask;
+    const bool previous_mask_verify = Egla66::ubo_mask_verify;
+    SCOPE_EXIT {
+        Egla66::ubo_mask = previous_mask;
+        Egla66::ubo_mask_verify = previous_mask_verify;
+    };
+    const auto mode = GENERATE(0, 1, 2);
+    CAPTURE(mode);
+    Egla66::ubo_mask = mode != 0;
+    Egla66::ubo_mask_verify = mode == 2;
+    const u64 mismatches = Egla66::g_ubo_mask_mismatches.load();
+    const u64 skipped = Egla66::g_ubo_mask_skipped.load();
+    Fixture f;
+    Tegra::Control::ChannelState state{0};
+    state.memory_manager = &*f.memory;
+    state.payload.emplace(f.system, *f.memory, state);
+    VideoCommon::BufferCacheChannelInfo channel{state};
+    VideoCommon::UniformBufferSizes sizes{};
+    for (auto& stage : sizes) {
+        stage.fill(0x400);
+    }
+    // Device 0x10000-0x40000 through GPU 0x100000 and 0x200000: three 64 KiB caching pages.
+    f.memory->Map(0x200000, 0x20000, 0x20000, Tegra::PTEKind::PITCH, true);
+    Access::UseChannel(*f.cache, channel);
+    std::array<u32, VideoCommon::NUM_STAGES> enabled{};
+    std::mt19937 rng{41};
+    for (u32 step = 0; step < 4000; ++step) {
+        CAPTURE(step);
+        const size_t stage = rng() % 2;
+        const u32 index = rng() % 8;
+        switch (rng() % 8) {
+        case 0:
+        case 1:
+        case 2: {
+            // A few ranges at the start and end of each caching page (some cross into the
+            // next one), or an unmapped one.
+            const DAddr device = 0x10000 * (1 + rng() % 3) + (rng() % 2) * 0xfc00 + (rng() % 8) * 0x40;
+            const GPUVAddr address = rng() % 8 == 0  ? GPUVAddr{0x900000}
+                                     : device < 0x20000 ? 0x100000 + (device - 0x10000)
+                                                       : 0x200000 + (device - 0x20000);
+            f.cache->BindGraphicsUniformBuffer(stage, index, address, rng() % 2 == 0 ? 0x100 : 0x400);
+            break;
+        }
+        case 3:
+            f.cache->DisableGraphicsUniformBuffer(stage, index);
+            break;
+        case 4:
+            enabled[stage] = rng() & 0xff;
+            f.cache->SetUniformBuffersState(enabled, &sizes);
+            break;
+        case 5: {
+            // A deleted buffer, or a larger one over existing ones (they are joined into it and
+            // deleted): the slots holding them must resolve again.
+            const VideoCommon::BufferId id = channel.uniform_buffers[stage][index].buffer_id;
+            if (rng() % 2 == 0 && id && id != VideoCommon::NULL_BUFFER_ID) {
+                Access::Delete(*f.cache, id);
+            } else if (rng() % 4 == 0) {
+                static_cast<void>(Access::Find(*f.cache, 0x1f000 + (rng() % 2) * 0x10000, 0x2000));
+            }
+            break;
+        }
+        default: {
+            Access::UpdateUniforms(*f.cache, stage);
+            for (u32 slot = 0; slot < 8; ++slot) {
+                if (((enabled[stage] >> slot) & 1) == 0) {
+                    continue;
+                }
+                CAPTURE(slot);
+                const VideoCommon::Binding& binding = channel.uniform_buffers[stage][slot];
+                REQUIRE(binding.buffer_id);
+                if (binding.device_addr != 0) {
+                    REQUIRE(Access::Find(*f.cache, binding.device_addr, binding.size) ==
+                            binding.buffer_id);
+                }
+            }
+            break;
+        }
+        }
+    }
+    REQUIRE(Egla66::g_ubo_mask_mismatches.load() == mismatches);
+    if (Egla66::ubo_mask) {
+        REQUIRE(Egla66::g_ubo_mask_skipped.load() > skipped);
+    }
 }

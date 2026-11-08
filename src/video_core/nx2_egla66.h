@@ -37,6 +37,15 @@ inline bool state_run{};
 inline std::atomic<u64> g_state_runs{0};
 inline std::atomic<u64> g_state_run_writes{0};
 
+/// The buffer cache visits only uniform buffer slots bound since their last resolve
+/// (9b06c4fd38's unresolved_uniform_buffers). _VERIFY checks the slots it skips.
+inline bool ubo_mask{};
+inline bool ubo_mask_verify{};
+
+inline std::atomic<u64> g_ubo_mask_skipped{0};
+inline std::atomic<u64> g_ubo_mask_visited{0};
+inline std::atomic<u64> g_ubo_mask_mismatches{0};
+
 inline void ReadSwitches() {
     const auto read = [](const char* name) {
         const char* const value = std::getenv(name);
@@ -45,8 +54,10 @@ inline void ReadSwitches() {
     ring_run = read("EDEN_NX2_EGLA66_RING_RUN");
     publish = read("EDEN_NX2_EGLA66_PUBLISH");
     state_run = read("EDEN_NX2_EGLA66_STATE_RUN");
-    LOG_INFO(HW_GPU, "EGLA66 gates: ring-run {}, publish {}, state-run {}",
-             ring_run, publish, state_run);
+    ubo_mask = read("EDEN_NX2_EGLA66_UBO_MASK");
+    ubo_mask_verify = ubo_mask && read("EDEN_NX2_EGLA66_UBO_MASK_VERIFY");
+    LOG_INFO(HW_GPU, "EGLA66 gates: ring-run {}, publish {}, state-run {}, ubo-mask {}",
+             ring_run, publish, state_run, ubo_mask);
 }
 
 /// For counters one thread writes: a plain load and store, not a locked add.
@@ -56,7 +67,7 @@ inline void Count(std::atomic<u64>& counter, u64 amount = 1) {
 
 /// The split's back thread, once per loop: logs what the enabled candidates did in the last 10 s.
 inline void Report() {
-    if (!ring_run && !publish && !state_run) {
+    if (!ring_run && !publish && !state_run && !ubo_mask) {
         return;
     }
     static u32 calls{};
@@ -91,6 +102,18 @@ inline void Report() {
         const u64 new_writes = take(g_state_run_writes, writes);
         LOG_INFO(HW_GPU, "EGLA66 state-run: {} runs carrying {} state writes in 10 s", new_runs,
                  new_writes);
+    }
+    if (ubo_mask) {
+        static u64 skipped{};
+        static u64 visited{};
+        static u64 mismatches{};
+        const u64 new_skipped = take(g_ubo_mask_skipped, skipped);
+        const u64 new_visited = take(g_ubo_mask_visited, visited);
+        const u64 new_mismatches = take(g_ubo_mask_mismatches, mismatches);
+        LOG_INFO(HW_GPU,
+                 "EGLA66 ubo-mask: {} enabled uniform slots skipped, {} visited in 10 s{}",
+                 new_skipped, new_visited,
+                 ubo_mask_verify ? fmt::format(", {} mismatches (verify)", new_mismatches) : "");
     }
     if (publish) {
         static u64 idle{};

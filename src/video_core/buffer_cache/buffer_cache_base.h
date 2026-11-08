@@ -45,6 +45,7 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_download_trace.h"
+#include "video_core/nx2_egla66.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/types.h"
 
@@ -179,6 +180,10 @@ public:
     bool has_deleted_buffers = false;
 
     std::array<u32, NUM_STAGES> dirty_uniform_buffers{};
+    /// EGLA-66 ubo-mask: slots bound since their last resolve or whose buffer was deleted.
+    std::array<u32, NUM_STAGES> unresolved_uniform_buffers{
+        ~u32{0}, ~u32{0}, ~u32{0}, ~u32{0}, ~u32{0},
+    };
     std::array<u32, NUM_STAGES> fast_bound_uniform_buffers{};
     std::array<std::array<u32, NUM_GRAPHICS_UNIFORM_BUFFERS>, NUM_STAGES>
         uniform_buffer_binding_sizes{};
