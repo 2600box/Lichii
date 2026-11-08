@@ -502,6 +502,11 @@ if (LICHII_NXFORMAT_RUNTIME)
     add_custom_command(TARGET yuzu POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${LICHII_NXFORMAT_RUNTIME}" "$<TARGET_FILE_DIR:yuzu>")
+    if (UNIX AND NOT APPLE)
+        # The release tar.gz ships the library next to the executable, where the build path
+        # recorded for the imported library does not exist.
+        set_property(TARGET yuzu APPEND PROPERTY BUILD_RPATH "\$ORIGIN")
+    endif()
 endif()
 
 create_target_directory_groups(yuzu)
