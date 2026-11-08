@@ -485,12 +485,12 @@ GraphicsPipeline* RasterizerVulkan::TakeReusableDraw(bool is_indexed, bool is_in
         }
         const auto& cbufs = maxwell3d->state.shader_stages[stage].const_buffers;
         for (u32 mask = handles[stage]; mask != 0; mask &= mask - 1) {
-            const auto& cbuf = cbufs[std::countr_zero(mask)];
-            for (u32 write = 0; write < delta.num_writes; ++write) {
-                if (delta.write_begin[write] < cbuf.address + cbuf.size &&
-                    cbuf.address < delta.write_end[write]) {
-                    return full(FullDraw::HandleData);
-                }
+            const u32 slot = std::countr_zero(mask);
+            const auto& cbuf = cbufs[slot];
+            FastDraw::DeviceSpans& spans = handle_spans[stage][slot];
+            spans.Update(*gpu_memory, cbuf.address, cbuf.size);
+            if (delta.Reaches(cbuf.address, cbuf.size, spans)) {
+                return full(FullDraw::HandleData);
             }
         }
     }

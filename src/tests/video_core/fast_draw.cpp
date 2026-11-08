@@ -253,6 +253,74 @@ TEST_CASE("Fast draw breaks on state, texture headers and delta overflow",
     }));
 }
 
+TEST_CASE("Fast draw breaks on texture header data written through another mapping",
+          "[fast_draw]") {
+    DeltaFixture f;
+    f.memory.BindRasterizer(&f.rasterizer);
+    constexpr GPUVAddr headers = 0x40000;
+    constexpr GPUVAddr alias = 0x90000;
+    f.memory.Map(headers, 0x100000, 0x1000, Tegra::PTEKind::PITCH, false);
+    f.memory.Map(alias, 0x100000, 0x1000, Tegra::PTEKind::PITCH, false);
+    f.Write(MAXWELL3D_REG_INDEX(tex_header.address_high), 0);
+    f.Write(MAXWELL3D_REG_INDEX(tex_header.address_low), static_cast<u32>(headers));
+    f.Write(MAXWELL3D_REG_INDEX(tex_header.limit), 7);
+    const auto breaks = [&](u32 offset) {
+        FastDraw::g_delta = {};
+        const u64 serial = FastDraw::Serial();
+        f.SetConstantBuffer(alias, 0x1000, offset);
+        f.Write(MAXWELL3D_REG_INDEX(const_buffer.buffer), 1);
+        return FastDraw::Serial() != serial;
+    };
+    CHECK(breaks(0xe0));        // the last texture header
+    CHECK_FALSE(breaks(0x100)); // just past the headers
+}
+
+TEST_CASE("Fast draw finds texture handle data written through another mapping",
+          "[fast_draw]") {
+    DeltaFixture f;
+    f.memory.BindRasterizer(&f.rasterizer);
+    constexpr GPUVAddr handles = 0x100000; // a buffer of texture handles, 0x100 bytes
+    constexpr GPUVAddr alias = 0x300000;   // its device memory, mapped again
+    constexpr GPUVAddr other = 0x500000;   // other device memory
+    constexpr GPUVAddr unmapped = 0x700000;
+    constexpr auto Kind = Tegra::PTEKind::PITCH;
+    f.memory.Map(handles, 0x200000, 0x1000, Kind, false);
+    f.memory.Map(alias, 0x200000, 0x1000, Kind, false);
+    f.memory.Map(other, 0x400000, 0x1000, Kind, false);
+    FastDraw::DeviceSpans spans;
+    const auto reaches = [&](GPUVAddr handle_buffer, GPUVAddr buffer, u32 offset,
+                             std::vector<u32> words) {
+        FastDraw::g_delta = {};
+        f.SetConstantBuffer(buffer, 0x2000, offset);
+        f.maxwell3d.CallMultiMethod(f.system, MAXWELL3D_REG_INDEX(const_buffer.buffer),
+                                    words.data(), static_cast<u32>(words.size()),
+                                    static_cast<u32>(words.size()));
+        spans.Update(f.memory, handle_buffer, 0x100);
+        return FastDraw::g_delta.Reaches(handle_buffer, 0x100, spans);
+    };
+    CHECK(reaches(handles, handles, 0x10, {1}));
+    CHECK(reaches(handles, alias, 0x10, {1})); // missed when compared by GPU address only
+    CHECK(reaches(handles, alias, 0xfc, {1, 2}));
+    CHECK_FALSE(reaches(handles, alias, 0x100, {1})); // just past the handles
+    CHECK_FALSE(reaches(handles, other, 0x10, {1}));
+    // Nothing mapped there: compared by GPU address, as before.
+    CHECK(reaches(unmapped, unmapped, 0x10, {1}));
+    CHECK_FALSE(reaches(unmapped, other, 0x10, {1}));
+
+    // A write across two pages that map device memory apart lands on both.
+    f.memory.Map(alias, 0x201000, 0x1000, Kind, false);
+    f.memory.Map(alias + 0x1000, 0x200000, 0x1000, Kind, false);
+    CHECK(reaches(handles, alias, 0xffc, {1, 2}));
+    CHECK(FastDraw::g_delta.num_device_writes == 2);
+    CHECK_FALSE(reaches(handles, alias, 0xff8, {1, 2}));
+
+    // Mapping changes translate the handle buffer again.
+    CHECK_FALSE(reaches(handles, other, 0x10, {1}));
+    f.memory.Map(handles, 0x400000, 0x1000, Kind, false);
+    CHECK(reaches(handles, other, 0x10, {1}));
+    CHECK_FALSE(reaches(handles, alias + 0x1000, 0x10, {1}));
+}
+
 TEST_CASE("Fast draw records and breaks nothing while switched off", "[fast_draw]") {
     DeltaFixture f;
     FastDrawFixture::SetSwitch(false);

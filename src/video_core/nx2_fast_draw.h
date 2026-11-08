@@ -6,8 +6,14 @@
 #include <array>
 #include <atomic>
 #include <cstdlib>
+#include <utility>
+#include <vector>
 
 #include "common/common_types.h"
+
+namespace Tegra {
+class MemoryManager;
+}
 
 /// A draw that follows a draw of the same pipeline with only light state changes in between takes
 /// the delta path. It keeps the previous draw's pipeline, image views, samplers and texture buffer
@@ -16,10 +22,11 @@
 /// full resolve.
 /// Light changes are draw parameters, index buffer and vertex stream registers, constant buffer
 /// binds and inline constant buffer data (collected in g_delta: the rasterizer resolves in full
-/// when they reach the pipeline's texture handles). Anything else that could change what a
-/// resolve produces bumps a serial: a 3D register that changes, any 3D method with side effects
-/// (uploads, reports, clears, barriers, ...), constant buffer data reaching the texture or sampler
-/// headers, any other engine, deferred calls on the split's back (except the ones marked
+/// when they reach the pipeline's texture handles at their GPU addresses or through another
+/// mapping of their device memory). Anything else that could change what a resolve produces bumps
+/// a serial: a 3D register that changes, any 3D method with side effects (uploads, reports,
+/// clears, barriers, ...), constant buffer data reaching the texture or sampler headers (the same
+/// way), any other engine, deferred calls on the split's back (except the ones marked
 /// GpuSplit::FastDrawNeutral), GPU::TickWork requests, texture cache writes, unmaps and
 /// deletions, shader removals, fence releases, HLE macros and frames. The rasterizer takes the
 /// delta path only while the serial, the GPU memory map, the command buffer, the render pass and
@@ -90,22 +97,79 @@ inline u64 Serial() {
     return g_serial.load(std::memory_order_relaxed);
 }
 
+/// The device memory a GPU range maps to. A write through another GPU address that maps the
+/// same device memory changes the range too.
+class DeviceSpans {
+public:
+    /// Translates [address, address + size) again unless that range of memory was translated last
+    /// and memory's mappings haven't changed since.
+    void Update(const Tegra::MemoryManager& memory, GPUVAddr address, u64 size);
+
+    /// Whether [begin, end) of device memory overlaps the range's.
+    [[nodiscard]] bool Intersects(DAddr begin, DAddr end) const;
+
+private:
+    const Tegra::MemoryManager* memory{};
+    GPUVAddr address{};
+    u64 size{};
+    u64 map_serial{};
+    std::vector<std::pair<DAddr, DAddr>> spans; ///< Sorted, disjoint [begin, end) pairs
+};
+
 /// Light changes since the last draw that can reach texture handles. Written and read on the
 /// thread that runs the 3D engine and the rasterizer (the split's back).
 struct Delta {
     static constexpr size_t MaxWrites = 16;
 
     std::array<u32, 5> binds{}; ///< Constant buffer slots bound per stage
+    /// Constant buffer data written, by GPU address (unmapped addresses included)...
     std::array<GPUVAddr, MaxWrites> write_begin{};
     std::array<GPUVAddr, MaxWrites> write_end{};
     u32 num_writes{};
+    /// ...and by the device address it landed on.
+    std::array<DAddr, MaxWrites> device_begin{};
+    std::array<DAddr, MaxWrites> device_end{};
+    u32 num_device_writes{};
 
     [[nodiscard]] bool Empty() const {
         return num_writes == 0 && (binds[0] | binds[1] | binds[2] | binds[3] | binds[4]) == 0;
     }
+
+    /// Whether data written reaches [address, address + size), whose device memory is spans: at
+    /// one of its GPU addresses, or through any GPU address that maps its device memory.
+    [[nodiscard]] bool Reaches(GPUVAddr address, u64 size, const DeviceSpans& spans) const {
+        for (u32 write = 0; write < num_writes; ++write) {
+            if (write_begin[write] < address + size && address < write_end[write]) {
+                return true;
+            }
+        }
+        for (u32 write = 0; write < num_device_writes; ++write) {
+            if (spans.Intersects(device_begin[write], device_end[write])) {
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 inline Delta g_delta;
+
+/// Appends [begin, end) to a delta's range list, or extends its last range when that ends at
+/// begin. False when the list is full.
+inline bool AppendRange(std::array<u64, Delta::MaxWrites>& begins,
+                        std::array<u64, Delta::MaxWrites>& ends, u32& count, u64 begin, u64 end) {
+    if (count != 0 && ends[count - 1] == begin) {
+        ends[count - 1] = end;
+        return true;
+    }
+    if (count == Delta::MaxWrites) {
+        return false;
+    }
+    begins[count] = begin;
+    ends[count] = end;
+    ++count;
+    return true;
+}
 
 inline void NoteBind(size_t stage, u32 slot) {
     if (Enabled()) {
@@ -113,23 +177,26 @@ inline void NoteBind(size_t stage, u32 slot) {
     }
 }
 
-/// Inline constant buffer data written to [begin, end).
+/// Inline constant buffer data written to GPU addresses [begin, end).
 inline void NoteConstantData(GPUVAddr begin, GPUVAddr end) {
     if (!Enabled()) {
         return;
     }
     Delta& delta = g_delta;
-    if (delta.num_writes != 0 && delta.write_end[delta.num_writes - 1] == begin) {
-        delta.write_end[delta.num_writes - 1] = end;
-        return;
-    }
-    if (delta.num_writes == Delta::MaxWrites) {
+    if (!AppendRange(delta.write_begin, delta.write_end, delta.num_writes, begin, end)) {
         Break(Reason::DeltaOverflow);
+    }
+}
+
+/// The device addresses [begin, end) that inline constant buffer data landed on.
+inline void NoteDeviceData(DAddr begin, DAddr end) {
+    if (!Enabled()) {
         return;
     }
-    delta.write_begin[delta.num_writes] = begin;
-    delta.write_end[delta.num_writes] = end;
-    ++delta.num_writes;
+    Delta& delta = g_delta;
+    if (!AppendRange(delta.device_begin, delta.device_end, delta.num_device_writes, begin, end)) {
+        Break(Reason::DeltaOverflow);
+    }
 }
 
 } // namespace VideoCommon::Nx2FastDraw
