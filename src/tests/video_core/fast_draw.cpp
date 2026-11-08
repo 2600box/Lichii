@@ -75,11 +75,17 @@ private:
 
 struct FastDrawFixture {
     FastDrawFixture() : memory{system, device_memory, 32, 1ULL << 31}, maxwell3d{memory} {
-        FastDraw::g_enabled = true;
+        SetSwitch(true);
+        FastDraw::g_delta = {};
         maxwell3d.BindRasterizer(&rasterizer);
     }
     ~FastDrawFixture() {
-        FastDraw::g_enabled = previous;
+        FastDraw::SetEnabledForTest(previous);
+        FastDraw::g_delta = {};
+    }
+
+    static void SetSwitch(bool on) {
+        FastDraw::SetEnabledForTest(on);
     }
 
     u32 Reg(u32 method) const {
@@ -104,7 +110,7 @@ struct FastDrawFixture {
         return draws[draws.size() - 1] == draws[draws.size() - 2];
     }
 
-    const bool previous = FastDraw::g_enabled;
+    const bool previous = FastDraw::Enabled();
     ScopedSystemTestContext context;
     Core::System system;
     Core::DeviceMemory physical;
@@ -148,8 +154,6 @@ TEST_CASE("Fast draw breaks reuse on anything that changes what a draw binds", "
         f.Write(ViewportScaleX,
                 f.Reg(ViewportScaleX) + 1);
     }));
-    CHECK(breaks([&] { f.Write(MAXWELL3D_REG_INDEX(const_buffer.buffer), 0x12345678); }));
-    CHECK(breaks([&] { f.Write(MAXWELL3D_REG_INDEX(bind_groups[0].raw_config), 0x11); }));
     CHECK(breaks([&] { f.Write(MAXWELL3D_REG_INDEX(clear_surface), 0x3c); }));
     CHECK(breaks([&] { f.Write(MAXWELL3D_REG_INDEX(tiled_cache_barrier), 0); }));
     CHECK(breaks([&] { FastDraw::Break(FastDraw::Reason::Fence); }));
@@ -157,7 +161,7 @@ TEST_CASE("Fast draw breaks reuse on anything that changes what a draw binds", "
 
 TEST_CASE("Fast draw serial never moves while disabled", "[fast_draw]") {
     FastDrawFixture f;
-    FastDraw::g_enabled = false;
+    FastDrawFixture::SetSwitch(false);
     f.DrawArrays(0, 3);
     f.Write(MAXWELL3D_REG_INDEX(blend.enable[0]), f.Reg(MAXWELL3D_REG_INDEX(blend.enable[0])) ^ 1);
     f.Write(MAXWELL3D_REG_INDEX(const_buffer.buffer), 1);
@@ -168,28 +172,17 @@ TEST_CASE("Fast draw serial never moves while disabled", "[fast_draw]") {
 namespace {
 
 struct DeltaFixture : FastDrawFixture {
-    DeltaFixture() {
-        FastDraw::g_delta_enabled = true;
-        FastDraw::g_delta = {};
-    }
-    ~DeltaFixture() {
-        FastDraw::g_delta_enabled = previous_delta;
-        FastDraw::g_delta = {};
-    }
-
     void SetConstantBuffer(GPUVAddr address, u32 size, u32 offset) {
         Write(MAXWELL3D_REG_INDEX(const_buffer.size), size);
         Write(MAXWELL3D_REG_INDEX(const_buffer.address_high), static_cast<u32>(address >> 32));
         Write(MAXWELL3D_REG_INDEX(const_buffer.address_low), static_cast<u32>(address));
         Write(MAXWELL3D_REG_INDEX(const_buffer.offset), offset);
     }
-
-    const bool previous_delta = FastDraw::g_delta_enabled;
 };
 
 } // namespace
 
-TEST_CASE("Fast draw delta mode records index buffer, bind and constant data changes",
+TEST_CASE("Fast draw records bind and constant data changes, keeps index buffer changes light",
           "[fast_draw]") {
     DeltaFixture f;
     f.DrawArrays(0, 3);
@@ -198,7 +191,9 @@ TEST_CASE("Fast draw delta mode records index buffer, bind and constant data cha
 
     f.Write(MAXWELL3D_REG_INDEX(index_buffer.start_addr_low),
             f.Reg(MAXWELL3D_REG_INDEX(index_buffer.start_addr_low)) + 0x100);
-    CHECK(FastDraw::g_delta.index_buffer);
+    f.Write(MAXWELL3D_REG_INDEX(index_buffer.format), f.Reg(MAXWELL3D_REG_INDEX(index_buffer.format)) ^ 1);
+    CHECK(FastDraw::Serial() == serial);
+    CHECK(FastDraw::g_delta.Empty());
 
     f.SetConstantBuffer(0x10000, 0x100, 0);
     f.Write(MAXWELL3D_REG_INDEX(bind_groups[4].raw_config), 0x31); // slot 3, valid
@@ -220,7 +215,7 @@ TEST_CASE("Fast draw delta mode records index buffer, bind and constant data cha
     CHECK_FALSE(FastDraw::g_delta.Empty());
 }
 
-TEST_CASE("Fast draw delta mode still breaks on state, texture headers and overflow",
+TEST_CASE("Fast draw breaks on state, texture headers and delta overflow",
           "[fast_draw]") {
     DeltaFixture f;
     f.Write(MAXWELL3D_REG_INDEX(tex_header.address_high), 0);
@@ -258,17 +253,16 @@ TEST_CASE("Fast draw delta mode still breaks on state, texture headers and overf
     }));
 }
 
-TEST_CASE("Fast draw mode 1 breaks on what delta mode records", "[fast_draw]") {
-    FastDrawFixture f;
-    REQUIRE_FALSE(FastDraw::g_delta_enabled);
-    f.DrawArrays(0, 3);
-    f.Write(MAXWELL3D_REG_INDEX(index_buffer.start_addr_low),
-            f.Reg(MAXWELL3D_REG_INDEX(index_buffer.start_addr_low)) + 0x100);
-    f.DrawArrays(0, 3);
-    CHECK_FALSE(f.Reusable());
+TEST_CASE("Fast draw records and breaks nothing while switched off", "[fast_draw]") {
+    DeltaFixture f;
+    FastDrawFixture::SetSwitch(false);
+    const u64 serial = FastDraw::Serial();
+    f.Write(MAXWELL3D_REG_INDEX(blend.enable[0]), f.Reg(MAXWELL3D_REG_INDEX(blend.enable[0])) ^ 1);
+    f.SetConstantBuffer(0x10000, 0x100, 0);
     f.Write(MAXWELL3D_REG_INDEX(bind_groups[0].raw_config), 0x11);
-    f.DrawArrays(0, 3);
-    CHECK_FALSE(f.Reusable());
+    f.Write(MAXWELL3D_REG_INDEX(const_buffer.buffer), 1);
+    FastDraw::Break(FastDraw::Reason::Fence);
+    CHECK(FastDraw::Serial() == serial);
     CHECK(FastDraw::g_delta.Empty());
 }
 
@@ -283,7 +277,7 @@ TEST_CASE("Fast draw keeps base vertex and instance as draw parameters", "[fast_
     CHECK(f.Reusable());
 }
 
-TEST_CASE("Fast draw delta mode records vertex stream addresses and sizes", "[fast_draw]") {
+TEST_CASE("Fast draw keeps vertex stream addresses and sizes light", "[fast_draw]") {
     DeltaFixture f;
     const auto stream = [](u32 index, u32 word) {
         return static_cast<u32>(MAXWELL3D_REG_INDEX(vertex_streams) + index * 4 + word);
@@ -292,7 +286,7 @@ TEST_CASE("Fast draw delta mode records vertex stream addresses and sizes", "[fa
         FastDraw::g_delta = {};
         const u64 serial = FastDraw::Serial();
         f.Write(method, f.Reg(method) + 0x40);
-        return FastDraw::Serial() == serial && FastDraw::g_delta.vertex_buffers;
+        return FastDraw::Serial() == serial;
     };
     CHECK(light(stream(0, 1)));
     CHECK(light(stream(3, 2)));

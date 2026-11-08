@@ -471,16 +471,7 @@ public:
 
     [[nodiscard]] std::pair<Buffer*, u32> GetDrawIndirectBuffer();
 
-    /// EDEN_NX2_FAST_DRAW: updates and binds only the index buffer for a reused indexed draw.
-    /// False when that created or deleted buffers, so the draw needs a full resolve.
-    [[nodiscard]] bool RebindIndexBuffer();
-    /// Updates and binds the vertex buffers whose registers changed; false when that created or
-    /// deleted buffers.
-    [[nodiscard]] bool RebindVertexBuffers();
-    /// Resolves the graphics uniform, storage and texture buffers bound since the last draw;
-    /// false when that created or deleted buffers.
-    [[nodiscard]] bool UpdateGraphicsStageBuffers();
-    /// EDEN_NX2_FAST_DRAW_VERIFY: a hash of the bindings a reused or delta draw keeps.
+    /// Fast draw verify (nx2_fast_draw.h): a hash of the bindings a delta draw keeps.
     [[nodiscard]] u64 KeptGraphicsBindingsHash(bool vertex, bool storage, bool texture) const;
 
     template <typename Func>
