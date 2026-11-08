@@ -36,7 +36,11 @@ bool HoldsInputs(const ProgramRecord& record, const ProgramKeyInputs& inputs) {
 bool Enabled() {
     static const bool enabled = [] {
         const char* const value = std::getenv("EDEN_NX2_SHADER_CACHE");
-        return value != nullptr && std::string_view{value} == "v2";
+        const bool v2 = value == nullptr || std::string_view{value} != "old";
+        LOG_INFO(Render_Vulkan,
+                 "Shader cache: {} (test build: EDEN_NX2_SHADER_CACHE=old selects the old cache)",
+                 v2 ? "v2" : "old");
+        return v2;
     }();
     return enabled;
 }
