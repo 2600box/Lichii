@@ -215,9 +215,15 @@ json FrameTimes(ToolState& state, const json& params) {
         !std::isfinite(refresh_hz) || refresh_hz <= 0.0) {
         throw std::runtime_error{"seconds must be > 0 and <= 60; refresh_hz must be > 0"};
     }
-    const u64 before = g_nx2_present_count.load(std::memory_order_relaxed);
-    const auto begin = std::chrono::steady_clock::now();
-    while (std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count() <
+    // TEST ONLY (EGLA-80): "past": true reads the last seconds from the ring instead of waiting
+    const bool past = params.value("past", false);
+    const u64 before = past ? 0 : g_nx2_present_count.load(std::memory_order_relaxed);
+    const auto begin = past ? std::chrono::steady_clock::now() -
+                                  std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                      std::chrono::duration<double>(seconds))
+                            : std::chrono::steady_clock::now();
+    while (!past &&
+           std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count() <
                seconds &&
            !state.stopping.load(std::memory_order_relaxed)) {
         std::this_thread::sleep_for(20ms);
