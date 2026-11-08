@@ -24,7 +24,7 @@ regression programs. `spirv-val` is required when `BUILD_TESTING` is enabled.
 
 ## Inputs
 
-Compile one extracted v46, v47, v48 or v49 serialized environment record:
+Compile one extracted v46 to v54 serialized environment record:
 
 ```sh
 shader-sweep --environment shader.env --cache-version 47 --output shader.spv
@@ -41,6 +41,24 @@ To rerun native lowering with captured specialization data:
 shader-sweep capture.bin --environment shader.env --cache-version 47 \
   --pipeline-key shader.key --output shader.spv
 ```
+
+To compile a whole pipeline record as the runtime does:
+
+```sh
+shader-sweep --pipeline pipeline.record --cache-version 54 --output-dir modules [--path legacy]
+```
+
+The record is the cache's bytes for one pipeline: the environment count, the environments
+and the pipeline key. Its stages are translated in program-slot order and emitted with the
+runtime's linkage: each stage sees the previous stage's outputs, descriptor bindings continue
+across stages, vertex A merges into vertex B, and task/mesh programs use their recorded mesh
+context. `--path` selects the compilation path; only `legacy` exists today. One
+`<slot>-<stage>.spv` module per emitted stage is written to the output directory, and only
+when the whole pipeline compiles. The JSON result adds `path`, `kind` (`graphics` or
+`compute`), `pipeline_hash` (the runtime's cache key hash) and `stages`: per environment its
+`slot`, `stage`, `unique_hash`, `key`, `spirv` file name and `spirv_words`. Vertex A has no
+module. A failure names the program slot in `failed_slot`. `shader_sweep.py replay` drives
+this mode; see [shader-sweep.md](../nx2/shader-sweep.md).
 
 Raw dumps default to instruction-only format. Use `--format native-header` only for
 captures with a 128-byte native graphics header followed by 16-byte instructions.

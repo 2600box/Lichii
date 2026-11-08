@@ -76,6 +76,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         add_test(NAME shader-sweep-captured
             COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/test_captured.py"
                     $<TARGET_FILE:shader-sweep> --spirv-val "${SPIRV_VAL_EXECUTABLE}")
+        add_test(NAME shader-sweep-replay
+            COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/test_replay.py"
+                    $<TARGET_FILE:shader-sweep>)
         add_test(NAME shader-sweep-cache-parser
             COMMAND Python3::Interpreter -m unittest discover
                     -s "${REPOSITORY_ROOT}/tools/nx2" -p "test_shader_*.py")
