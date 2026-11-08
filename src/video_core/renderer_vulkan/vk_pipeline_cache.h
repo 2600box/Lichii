@@ -177,6 +177,20 @@ private:
 
     void QueueVulkanPipelineCacheFlush();
 
+    /// Queues one write of the driver pipeline cache file on the serialization thread, with no
+    /// throttle. For the end of a precache: its builds never reach the timed flush, which counts
+    /// only pipelines built during play.
+    void QueueVulkanPipelineCacheSave();
+
+    /// Shader precache before the game starts (precache_shaders): the compute programs of the
+    /// title's precache file (ShaderWarm::ComputeWarmPath, made from the game files) are converted
+    /// with missing reads guessed and built on every CPU thread, then thrown away. They only fill
+    /// the driver's shader cache, so a dispatch that later converts to the same SPIR-V finds the
+    /// driver build ready instead of waiting seconds for it. Reports progress through `callback`
+    /// and returns when it is done, skipped from the loading screen or the load is stopped.
+    void PrecacheComputeShaders(u64 title_id, std::stop_token stop_loading,
+                                const VideoCore::DiskResourceLoadCallback& callback);
+
     const Device& device;
     Scheduler& scheduler;
     DescriptorPool& descriptor_pool;

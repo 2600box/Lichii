@@ -298,6 +298,12 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Enables GPU vendor-specific pipeline cache.\nThis option can improve shader loading "
               "time significantly in cases where the Vulkan driver does not store pipeline cache "
               "files internally."));
+    INSERT(Settings, precache_shaders, tr("Precache shaders before game start:"),
+           tr("Builds the compute shaders found in the game files on the loading screen, on every "
+              "CPU thread, so they don't stutter the first time the game uses them. The first "
+              "launch reads the game files and takes a few minutes; later launches skip it until "
+              "the GPU driver changes. The loading screen has a Skip button.\nAsk asks at launch "
+              "while the game has no finished precache. Graphics shaders are not precached."));
     INSERT(Settings, native_async_draws, tr("Switch 2 draws with unbuilt pipelines:"),
            tr("Only applies when asynchronous shader building is on. Decides what a Switch 2 draw "
               "does when its graphics pipeline is still building.\n"
@@ -697,6 +703,12 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                           {
                               PAIR(ConsoleMode, Docked, tr("Docked")),
                               PAIR(ConsoleMode, Handheld, tr("Handheld")),
+                          }});
+    translations->insert({Settings::EnumMetadata<Settings::PrecacheShaders>::Index(),
+                          {
+                              PAIR(PrecacheShaders, Off, tr("Off")),
+                              PAIR(PrecacheShaders, Ask, tr("Ask")),
+                              PAIR(PrecacheShaders, Always, tr("Always")),
                           }});
     translations->insert({Settings::EnumMetadata<Settings::NativeAsyncDraws>::Index(),
                           {
