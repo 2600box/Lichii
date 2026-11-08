@@ -185,6 +185,7 @@ private:
     /// One build of the shader precache: builds a pipeline and destroys it, true when it built.
     struct PrecacheJob {
         u64 graphics_hash{}; ///< The cached graphics pipeline it builds, 0 for a compute program
+        s64 trace_bytes{};   ///< TEST ONLY (EGLA-80)
         Common::UniqueFunction<bool> build;
     };
 

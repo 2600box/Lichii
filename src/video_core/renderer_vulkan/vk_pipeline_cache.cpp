@@ -44,6 +44,7 @@
 #include "video_core/renderer_vulkan/mesh_fallback_limits.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
+#include "video_core/renderer_vulkan/pipeline_load_trace.h"
 #include "video_core/renderer_vulkan/pipeline_shader_emission.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
 #include "video_core/renderer_vulkan/vertex_repack.h"
@@ -433,6 +434,9 @@ size_t GetTotalPipelineWorkers() {
     }
     return std::min(max_core_threads, desired);
 #else
+    if (const size_t workers = LoadTrace::Workers()) {
+        return workers;
+    }
     return max_core_threads;
 #endif
 }
@@ -969,6 +973,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     if (title_id == 0) {
         return;
     }
+    LoadTrace::Begin();
+    LoadTrace::SetPhase(LoadTrace::Phase::Read);
     if (!pipeline_cache_filename.empty()) {
         background_pipelines.Stop();
         workers.WaitForRequests();
@@ -1083,8 +1089,20 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     }};
     const auto queue_compute{[&](const ComputePipelineCacheKey& key,
                                  std::vector<CachedComputeTranslation> candidates) {
-        workers.QueueWork([this, key, candidates_ = std::move(candidates), &state,
-                           &callback]() mutable {
+        s64 trace_bytes{};
+        for (const auto& candidate : candidates) {
+            trace_bytes += static_cast<s64>(candidate.env.MemorySize());
+        }
+        if (const size_t limit = LoadTrace::QueueLimit()) {
+            LoadTrace::WaitForRoom(limit, stop_loading);
+        }
+        LoadTrace::Queued(trace_bytes);
+        workers.QueueWork([this, key, candidates_ = std::move(candidates), &state, &callback,
+                           trace_bytes]() mutable {
+            LoadTrace::Started(trace_bytes);
+            SCOPE_EXIT {
+                LoadTrace::Finished(trace_bytes, trace_bytes);
+            };
             ShaderPools pools;
             ComputePipelineCacheEntry entry;
             size_t chosen{};
@@ -1178,7 +1196,9 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             if (precache && !precached_pipelines.contains(hash) &&
                 capture_bytes <= PrecacheCaptureLimit - precache_capture_bytes) {
                 precache_capture_bytes += capture_bytes;
-                precache_graphics.push_back({hash, [this, key, envs = std::move(envs)]() mutable {
+                LoadTrace::Queued(static_cast<s64>(capture_bytes));
+                precache_graphics.push_back({hash, static_cast<s64>(capture_bytes),
+                                             [this, key, envs = std::move(envs)]() mutable {
                     ShaderPools pools;
                     boost::container::static_vector<Shader::Environment*,
                                                     Maxwell::MaxShaderProgram>
@@ -1214,8 +1234,20 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         }
         ++queued_graphics;
 
-        workers.QueueWork([this, key, envs_ = std::move(envs), record, &state,
-                           &callback]() mutable {
+        s64 trace_bytes{};
+        for (const auto& env : envs) {
+            trace_bytes += static_cast<s64>(env.MemorySize());
+        }
+        if (const size_t limit = LoadTrace::QueueLimit()) {
+            LoadTrace::WaitForRoom(limit, stop_loading);
+        }
+        LoadTrace::Queued(trace_bytes);
+        workers.QueueWork([this, key, envs_ = std::move(envs), record, &state, &callback,
+                           trace_bytes]() mutable {
+            LoadTrace::Started(trace_bytes);
+            SCOPE_EXIT {
+                LoadTrace::Finished(trace_bytes, trace_bytes);
+            };
             ShaderPools pools;
             boost::container::static_vector<Shader::Environment*, Maxwell::MaxShaderProgram>
                 env_ptrs;
@@ -1249,6 +1281,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         queue_compute(key, std::move(candidates));
     }
     compute_envs.clear();
+    LoadTrace::SetPhase(LoadTrace::Phase::Build);
 
     LOG_INFO(Render_Vulkan, "Total Pipeline Count: {}", state.total);
     if (skipped_pipelines != 0) {
@@ -1320,6 +1353,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     } else {
         background_pipelines.Start(std::clamp<size_t>(num_pipeline_workers / 4, 1, 2));
     }
+    LoadTrace::SetPhase(LoadTrace::Phase::Game);
 }
 
 void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
@@ -1376,7 +1410,9 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
                 if (compute_cache.contains(key)) {
                     continue;
                 }
-                jobs.push_back({0, [this, key, env = std::move(env)]() mutable {
+                const s64 trace_bytes = static_cast<s64>(env.MemorySize());
+                LoadTrace::Queued(trace_bytes);
+                jobs.push_back({0, trace_bytes, [this, key, env = std::move(env)]() mutable {
                                     static const GuessMissing guess{};
                                     env.SetGuessMissing(&guess);
                                     ShaderPools pools;
@@ -1396,8 +1432,11 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
         return;
     }
 
+    LoadTrace::SetPhase(LoadTrace::Phase::Warm);
     const auto begin = std::chrono::steady_clock::now();
-    const size_t num_threads = std::clamp<size_t>(std::thread::hardware_concurrency(), 1, 64);
+    const size_t num_threads =
+        LoadTrace::Workers() ? LoadTrace::Workers()
+                             : std::clamp<size_t>(std::thread::hardware_concurrency(), 1, 64);
     std::vector<u8> built(jobs.size());
     std::atomic<size_t> next{};
     std::atomic<size_t> done{};
@@ -1417,6 +1456,7 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
                     if (index >= jobs.size()) {
                         break;
                     }
+                    LoadTrace::Started(jobs[index].trace_bytes);
                     try {
                         // Built and destroyed here: only the driver's cache keeps it.
                         built[index] = jobs[index].build();
@@ -1424,6 +1464,7 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
                         LOG_DEBUG(Render_Vulkan, "Shader precache: {}", e.what());
                     }
                     jobs[index].build = {};
+                    LoadTrace::Finished(jobs[index].trace_bytes, jobs[index].trace_bytes);
                     done.fetch_add(1);
                 }
             });
