@@ -418,6 +418,7 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
 
 void GpuSplit::BackLoop(std::stop_token stop_token) {
     const Common::DkbCpuTrace::Registration cpu_trace{Common::DkbCpuTrace::Role::GpuBack};
+    const StutterTrace::ThreadScope stutter_thread{StutterTrace::Thread::Back};
     Common::SetCurrentThreadName("GPUBack");
     on_back_thread = true;
     back_running.store(true, std::memory_order_release);
