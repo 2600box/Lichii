@@ -67,6 +67,11 @@ inline std::atomic<u64> g_memo_misses{0};
 inline std::atomic<u64> g_memo_mismatches{0};
 inline std::atomic<u64> g_dynamic_skips{0};
 inline std::atomic<u64> g_dynamic_updates{0};
+inline std::atomic<u64> g_reset_calls{0};
+inline std::atomic<u64> g_reset_records{0};
+inline std::atomic<u64> g_reset_ns{0};
+inline std::atomic<u64> g_reset_runs{0};
+inline std::atomic<u64> g_reset_unbatched{0};
 
 /// For counters one thread writes: a plain load and store, not a locked add.
 inline void Count(std::atomic<u64>& counter) {
@@ -132,6 +137,18 @@ inline void Refresh() {
                      "{} not checkable, {} differ from the drained read",
                      narrowed, g_dma_unverified.load(std::memory_order_relaxed),
                      g_dma_differ.load(std::memory_order_relaxed));
+        }
+        const u64 reset_calls = g_reset_calls.exchange(0, std::memory_order_relaxed);
+        const u64 reset_records = g_reset_records.exchange(0, std::memory_order_relaxed);
+        const u64 reset_ns = g_reset_ns.exchange(0, std::memory_order_relaxed);
+        const u64 reset_runs = g_reset_runs.exchange(0, std::memory_order_relaxed);
+        const u64 reset_unbatched = g_reset_unbatched.exchange(0, std::memory_order_relaxed);
+        if (reset_calls != 0) {
+            LOG_INFO(HW_GPU,
+                     "EXPERIMENT reset-batch: {} calls, {} records, {} us in the reset loop in 10 s; "
+                     "{} batched runs, {} batched calls written per record (overlap or no device "
+                     "address)",
+                     reset_calls, reset_records, reset_ns / 1000, reset_runs, reset_unbatched);
         }
     }
 }

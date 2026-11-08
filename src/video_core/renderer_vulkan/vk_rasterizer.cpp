@@ -708,10 +708,19 @@ bool RasterizerVulkan::TryNx2IndirectReset(bool is_indexed, u32 instance_count) 
             return reject("record crosses a mapping boundary");
         }
     }
+    namespace Experiment = VideoCommon::Nx2Experiment;
+    const auto loop_start = std::chrono::steady_clock::now();
     const std::span<const u8> bytes{reinterpret_cast<const u8*>(record.data()), sizeof(record)};
     for (const u64 pointer : pointers) {
         AccelerateInlineToMemory(pointer, bytes.size(), bytes);
     }
+    Experiment::g_reset_calls.fetch_add(1, std::memory_order_relaxed);
+    Experiment::g_reset_records.fetch_add(count, std::memory_order_relaxed);
+    Experiment::g_reset_ns.fetch_add(
+        static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::steady_clock::now() - loop_start)
+                             .count()),
+        std::memory_order_relaxed);
     static u32 reported{};
     if (reported++ < 5) {
         LOG_INFO(HW_GPU, "Experimental indirect reset: {} records", count);
