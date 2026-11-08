@@ -10,6 +10,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cstdlib>
 #include <memory>
 #include <numeric>
 #include <stdexcept>
@@ -113,6 +115,13 @@ void BufferCache<P>::TickFrame() {
     }
     runtime.TickFrame(slot_buffers);
     native_indirect_uniforms_this_frame.clear();
+    static const bool mem_trace = std::getenv("EDEN_NX2_MEM_TRACE") != nullptr;
+    if (static std::chrono::steady_clock::time_point last{}; mem_trace) {
+        if (const auto now = std::chrono::steady_clock::now(); now - last >= std::chrono::seconds{2}) {
+            last = now;
+            LOG_INFO(HW_GPU, "Memory trace: buffer cache {} MiB", buffer_bytes >> 20);
+        }
+    }
     if (const GeometryStats& stats = geometry_stats; frame_tick % 600 == 0 && stats.syncs != 0) {
         if (Nx2Profile::Enabled() || Nx2Perf::Verify()) {
             LOG_INFO(HW_GPU,

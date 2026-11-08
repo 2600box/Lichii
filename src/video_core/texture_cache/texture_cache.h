@@ -349,9 +349,14 @@ void TextureCache<P>::ApplyThresholdOverrides(bool log) {
     }
     expected_memory = (std::min)(expected_memory, critical_memory);
     if (log) {
-        LOG_INFO(HW_GPU, "Texture cache thresholds: expected {} MiB, critical {} MiB, minimum {} MiB",
-                 expected_memory >> 20, critical_memory >> 20, minimum_memory >> 20);
+        LogThresholds();
     }
+}
+
+template <class P>
+void TextureCache<P>::LogThresholds() const {
+    LOG_INFO(HW_GPU, "Texture cache thresholds: expected {} MiB, critical {} MiB, minimum {} MiB",
+             expected_memory >> 20, critical_memory >> 20, minimum_memory >> 20);
 }
 
 template <class P>
@@ -425,14 +430,16 @@ void TextureCache<P>::TickFrame() {
                     critical_memory =
                         budget - (std::min)(margin + pressure_margin + slack_margin, budget / 2);
                     expected_memory = critical_memory - (std::min)(margin, critical_memory / 2);
+                    ApplyThresholdOverrides(false);
                     // Log the first values and real changes (the budget moves by a few MiB all
-                    // the time).
+                    // the time). Compared after the cap: before it, every check differed from
+                    // the capped value by more than 256 MiB and logged twice a second.
                     const u64 change = critical_memory > old_critical
                                            ? critical_memory - old_critical
                                            : old_critical - critical_memory;
                     const bool log = budget_check_frames == 1 || change >= 256_MiB;
-                    ApplyThresholdOverrides(log);
                     if (log) {
+                        LogThresholds();
                         LOG_INFO(HW_GPU,
                                  "Memory margins: base {} MiB, out of memory {} MiB, block slack {} MiB",
                                  margin >> 20, pressure_margin >> 20, slack_margin >> 20);
@@ -458,6 +465,46 @@ void TextureCache<P>::TickFrame() {
             total_used_memory -= (std::min)(total_used_memory, bytes);
         }
         total_used_memory -= (std::min)(total_used_memory, gpu_sentenced_bytes);
+    }
+    // EDEN_NX2_MEM_TRACE=1: every 2 s, what the cache holds next to what the process and the
+    // driver report (memory climbs).
+    static const bool mem_trace = std::getenv("EDEN_NX2_MEM_TRACE") != nullptr;
+    if (const auto now = std::chrono::steady_clock::now();
+        mem_trace && now - mem_trace_time >= std::chrono::seconds{2}) {
+        mem_trace_time = now;
+        u64 image_bytes{};
+        u64 gpu_written_bytes{};
+        size_t images{};
+        size_t unbacked{};
+        for (const auto [image_id, image] : slot_images) {
+            ++images;
+            if (True(image->flags & ImageFlagBits::Unbacked)) {
+                ++unbacked;
+                continue;
+            }
+            const u64 bytes = GetScaledImageSizeBytes(*image);
+            image_bytes += bytes;
+            if (True(image->flags & ImageFlagBits::GpuModified)) {
+                gpu_written_bytes += bytes;
+            }
+        }
+        u64 decode_bytes{};
+        for (const auto& decode : async_decodes) {
+            decode_bytes += decode->decoded_data.capacity();
+        }
+        const u64 sentenced = std::accumulate(sentenced_image_bytes.begin(),
+                                              sentenced_image_bytes.end(), gpu_sentenced_bytes);
+        LOG_INFO(HW_GPU,
+                 "Memory trace: texture cache {} images {} MiB ({} MiB GPU-written, {} unbacked), "
+                 "device usage {} MiB (expected {} MiB, critical {} MiB), sentenced {} MiB, {} "
+                 "async decodes {} MiB, scratch {} MiB",
+                 images, image_bytes >> 20, gpu_written_bytes >> 20, unbacked,
+                 total_used_memory >> 20, expected_memory >> 20, critical_memory >> 20,
+                 sentenced >> 20, async_decodes.size(), decode_bytes >> 20,
+                 (swizzle_data_buffer.capacity() + unswizzle_data_buffer.capacity()) >> 20);
+        if constexpr (requires { runtime.LogMemoryTrace(); }) {
+            runtime.LogMemoryTrace();
+        }
     }
     // Every 600 frames: device memory in use against the collector's thresholds.
     // Skip expensive heap allocation, map construction, and sorting unless debug logging is explicitly enabled.
