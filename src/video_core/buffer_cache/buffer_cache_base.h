@@ -883,6 +883,9 @@ private:
         u64 rewritten{};  ///< Kept bytes guest memory got anew after their download landed
         u64 logged{};     ///< Error lines so far (at most 16)
         u64 logged_rewrites{}; ///< Lines about rewritten bytes so far (at most 16)
+        u64 reads_recorded{};  ///< Checks recorded with a read's download
+        u64 alone_recorded{};  ///< Checks recorded alone (other downloads bring the read's bytes)
+        u64 early_recorded{};  ///< Checks recorded with an early download
         u64 last_log{};
     };
     ReadCheckTotals read_check{};
@@ -900,8 +903,10 @@ private:
     [[nodiscard]] bool ReadChecks() const {
         return read_check.every != 0 || ReadCheckEvery() != 0;
     }
-    /// A download landed `written`: what guest memory holds now over a later check's `kept`.
-    void NoteLandedBytes(ReadCheck& check, const Common::RangeSet<DAddr>& written);
+    /// A download landed `written`, but for the guest CPU writes collected then (`cpu_written`):
+    /// what guest memory holds now over a later check's `kept`.
+    void NoteLandedBytes(ReadCheck& check, const Common::RangeSet<DAddr>& written,
+                         const Common::RangeSet<DAddr>& cpu_written);
 
     /// A DownloadMemoryForRead: its copies, and what is left of them to do once the host GPU has
     /// run them.

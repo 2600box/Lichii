@@ -204,6 +204,14 @@ void BufferCache<P>::UnmapGPUMemory(size_t as_id, GPUVAddr gpu_addr, size_t size
 template <class P>
 void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu_data) {
     Nx2NoteListHostWrite(device_addr, size);
+    // TEST (EDEN_NX2_READ_CHECK): a newer value where an early download landed, as ClearDownload
+    // forgets one over GPU-modified bytes: without early downloads the write had taken the bytes
+    // out of the GPU-modified ones, and the read's synchronous flush leaves them. Landed bytes
+    // are no longer GPU-modified, so the write reaches no ClearDownload: written back to the
+    // landed value after an upload of another, they read as GPU bytes the download missed.
+    if (!early_landed.empty()) [[unlikely]] {
+        ForgetEarlyLanded(device_addr, size);
+    }
     // The written range lies within its pages: when they hold no GPU-written data, both lookups
     // below find nothing, so one lookup answers them.
     if (keep_page_gpu_data) {
@@ -727,6 +735,8 @@ void BufferCache<P>::RecordReadDownload(std::span<const std::pair<DAddr, u64>> r
             for (const LandedCopy& landed : landed_copies) {
                 std::ranges::copy(landed.as_landed, check->landed_bytes.data() + landed.offset);
             }
+            ++(early ? read_check.early_recorded
+                     : (check_only ? read_check.alone_recorded : read_check.reads_recorded));
             download.check = std::move(check);
         }
         // A read waits for its copies; an early download's go with the next submission.
@@ -767,6 +777,14 @@ void BufferCache<P>::FinishReadDownloads(DAddr device_addr, u64 size) {
 
 template <class P>
 void BufferCache<P>::OutdateReadDownloads(DAddr device_addr, u64 size) {
+    // TEST (EDEN_NX2_READ_CHECK): the GPU's copy gets newer bytes where an early download landed,
+    // which no read compares. A query result copy (SyncValues) is no GPU write the cache records:
+    // a synchronous flush doesn't download it, and guest memory gets the result once the query
+    // cache writes it there. MarkWrittenBuffer's bytes are GPU-modified from now on, which
+    // TakeEarlyLanded leaves out, and every way out of that forgets them too.
+    if (!early_landed.empty()) [[unlikely]] {
+        ForgetEarlyLanded(device_addr, size);
+    }
     // The bytes stay GPU-modified when the downloads land, so a later read downloads them.
     if (!read_downloads.empty()) [[unlikely]] {
         for (ReadDownload& download : read_downloads) {
@@ -1017,7 +1035,8 @@ void BufferCache<P>::WriteReadDownloads(u64 tick) {
             // TEST: what later reads' checks find of an earlier download where they kept its bytes.
             for (size_t later = 1; later < read_downloads.size(); ++later) {
                 if (read_downloads[later].check) [[unlikely]] {
-                    NoteLandedBytes(*read_downloads[later].check, download.write_ranges);
+                    NoteLandedBytes(*read_downloads[later].check, download.write_ranges,
+                                    cpu_written);
                 }
             }
             if (download.check) [[unlikely]] {
@@ -1204,7 +1223,8 @@ void BufferCache<P>::CheckReadDownload(const ReadCheck& check,
 }
 
 template <class P>
-void BufferCache<P>::NoteLandedBytes(ReadCheck& check, const Common::RangeSet<DAddr>& written) {
+void BufferCache<P>::NoteLandedBytes(ReadCheck& check, const Common::RangeSet<DAddr>& written,
+                                     const Common::RangeSet<DAddr>& cpu_written) {
     if (check.kept.Empty()) {
         return;
     }
@@ -1215,6 +1235,12 @@ void BufferCache<P>::NoteLandedBytes(ReadCheck& check, const Common::RangeSet<DA
             check.kept.ForEachInRange(lower, upper - lower, [&](DAddr start, DAddr end) {
                 device_memory.ReadBlockUnsafe(start, landed + (start - copy_addr), end - start);
                 check.landed.Add(start, end - start);
+                // A guest write collected and not yet applied kept its bytes from the download:
+                // newer than both copies, as a synchronous flush leaves it. Applied before this
+                // check lands, it no longer counts as collected, and would read as landed.
+                cpu_written.ForEachInRange(start, end - start, [&](DAddr from, DAddr to) {
+                    check.changed.Add(from, to - from);
+                });
             });
         });
     }
