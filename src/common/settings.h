@@ -643,11 +643,17 @@ struct Values {
                                                          true,
                                                          true};
 
-    // Whether a pending shader warm-up runs on the loading screen, before the game starts (on all
-    // CPU threads), or in the background once it runs. Ask: the desktop app asks at launch; where
-    // nothing asks, as Never.
-    Setting<ShaderWarmAtBoot> shader_warm_at_boot{linkage, ShaderWarmAtBoot::Ask,
-                                                  "shader_warm_at_boot", Category::RendererAdvanced};
+    // Precache shaders before the game starts: the compute programs in the game files are built on
+    // the loading screen, so the driver's cache holds them before the game first dispatches them.
+    // Ask: the desktop app asks at launch while the game has no finished precache; where nothing
+    // asks, as Off.
+    SwitchableSetting<PrecacheShaders> precache_shaders{linkage,
+                                                        PrecacheShaders::Off,
+                                                        "precache_shaders",
+                                                        Category::RendererAdvanced,
+                                                        Specialization::Default,
+                                                        true,
+                                                        true};
 
     SwitchableSetting<bool> enable_compute_pipelines{linkage, false, "enable_compute_pipelines",
                                                      Category::RendererAdvanced};

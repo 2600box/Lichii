@@ -15,8 +15,6 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <memory>
-#include <stop_token>
-#include <functional>
 #include <mutex>
 #include <string>
 #include <type_traits>
@@ -180,30 +178,18 @@ private:
     void QueueVulkanPipelineCacheFlush();
 
     /// Queues one write of the driver pipeline cache file on the serialization thread, with no
-    /// throttle. For the end of a warm-up stage: its builds never reach the timed flush, which
-    /// counts only pipelines built during play.
+    /// throttle. For the end of a precache: its builds never reach the timed flush, which counts
+    /// only pipelines built during play.
     void QueueVulkanPipelineCacheSave();
 
-    /// The title's warm-compute.bin (ShaderWarm::ComputeWarmPath, EDEN_NX2_COMPUTE_WARM=<file>
-    /// overrides): compute programs prepared from the game files are converted (missing reads
-    /// guessed) and built in the background, then thrown away. Nothing uses them; they only fill
+    /// Shader precache before the game starts (precache_shaders): the compute programs of the
+    /// title's precache file (ShaderWarm::ComputeWarmPath, made from the game files) are converted
+    /// with missing reads guessed and built on every CPU thread, then thrown away. They only fill
     /// the driver's shader cache, so a dispatch that later converts to the same SPIR-V finds the
-    /// driver build ready instead of waiting seconds for it.
-    void StartComputeWarm(u64 title_id);
-    std::vector<std::jthread> compute_warm_threads;
-    std::atomic<bool> compute_warm_done{true};
-    /// This load runs the warm-up on the loading screen (shader_warm_at_boot): every CPU thread,
-    /// normal priority, and LoadDiskResources waits for them.
-    bool warm_before_start{false};
-
-    void WaitForWarmUps(std::stop_token stop_loading,
-                        const VideoCore::DiskResourceLoadCallback& callback);
-
-    /// Set as soon as emulation is asked to stop (the loading stop token): the warm-ups end
-    /// after their current build instead of compiling on until the cache is destroyed, which
-    /// kept shutdown waiting on driver compiles.
-    std::atomic<bool> warm_cancel{false};
-    std::unique_ptr<std::stop_callback<std::function<void()>>> warm_stop_callback;
+    /// driver build ready instead of waiting seconds for it. Reports progress through `callback`
+    /// and returns when it is done, skipped from the loading screen or the load is stopped.
+    void PrecacheComputeShaders(u64 title_id, std::stop_token stop_loading,
+                                const VideoCore::DiskResourceLoadCallback& callback);
 
     const Device& device;
     Scheduler& scheduler;

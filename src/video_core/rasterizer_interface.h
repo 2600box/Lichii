@@ -44,7 +44,7 @@ enum class LoadCallbackStage {
     Prepare,
     Build,
     Complete,
-    /// The shader warm-up running before the game starts (value / total of the current part).
+    /// The shader precache running before the game starts (programs built / total).
     /// Last, so the values of the others stay as frontends that know only those expect.
     Warm,
 };

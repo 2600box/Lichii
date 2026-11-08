@@ -215,9 +215,9 @@ private:
 std::optional<u32> ReadNativeGuardConstant(Tegra::Engines::KeplerCompute& compute,
                                          Tegra::MemoryManager& memory, u32 bank, u32 offset);
 
-/// Answers for reads a FileEnvironment has no record of (EDEN_NX2_COMPUTE_WARM: programs from the
-/// game files, never run, converted only to fill the driver's cache). Without it a missing read
-/// is an error.
+/// Answers for reads a FileEnvironment has no record of (shader precache: programs from the game
+/// files, never run, converted only to fill the driver's cache). Without it a missing read is an
+/// error.
 struct GuessMissing {
     u32 cbuf_bank0{0x10000000};  ///< Constant buffer 0 (driver constants, descriptor handles)
     u32 cbuf_other{0};           ///< Other constant buffers (game constants)
