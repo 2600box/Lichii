@@ -33,9 +33,15 @@ public:
         return held;
     }
 
+    /// True when it isn't held because another process held it at the last try.
+    [[nodiscard]] bool Busy() const noexcept {
+        return busy;
+    }
+
 private:
     std::intptr_t handle{-1}; ///< File descriptor, or a HANDLE on Windows
     bool held{};
+    bool busy{};
 };
 
 } // namespace Common::FS

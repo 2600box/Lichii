@@ -538,6 +538,22 @@ TEST_CASE("A load without the lock leaves a damaged record for one that holds it
     REQUIRE(std::filesystem::file_size(path) == complete);
 }
 
+TEST_CASE("An append is left out while another emulator keeps the cache's lock",
+          "[pipeline_cache_files][file_lock]") {
+    TempDir temp;
+    const auto path = temp.path / "busy.bin";
+    AppendPipeline(path, 0, Shader::Stage::Fragment);
+    const auto before = ReadAll(path);
+    {
+        const Common::FS::FileLock other{VideoCommon::PipelineCacheLockPath(path)};
+        REQUIRE(other.Held());
+        AppendPipeline(path, 1, Shader::Stage::Fragment);
+        REQUIRE(ReadAll(path) == before);
+    }
+    AppendPipeline(path, 2, Shader::Stage::Fragment);
+    REQUIRE(LoadKeys(path).keys == std::vector<u64>{0, 2});
+}
+
 TEST_CASE("A record whose key is cut short never reaches pipeline creation",
           "[pipeline_cache_files][damaged_records]") {
     TempDir temp;
@@ -831,7 +847,9 @@ TEST_CASE("A lock wait gives up after its time or when stopped, and only tries a
     std::optional<Common::FS::FileLock> other{std::in_place, path};
     REQUIRE(other->Held());
     elapsed();
-    REQUIRE_FALSE(Common::FS::FileLock{path, 50ms}.Held());
+    const Common::FS::FileLock waited{path, 50ms};
+    REQUIRE_FALSE(waited.Held());
+    REQUIRE(waited.Busy());
     REQUIRE(elapsed() >= 50ms);
     // Held through a whole wait: until it is free again, a wait only tries once.
     REQUIRE_FALSE(Common::FS::FileLock{path, 10s}.Held());

@@ -79,8 +79,8 @@ static_assert(VulkanPipelineCacheVersion == 54,
 }
 
 /// How long one waits for that lock while another emulator holds it: longer than a load, append
-/// or rewrite takes, but a crashed emulator holds it while it writes a crash dump. Then one goes on
-/// as where the file system has no locks.
+/// or rewrite takes, but a crashed emulator holds it while it writes a crash dump. Then a load goes
+/// on as where the file system has no locks, and an append is left out.
 inline constexpr std::chrono::seconds PipelineCacheLockWait{5};
 
 /// True when the file starts with this magic number followed by this cache version.

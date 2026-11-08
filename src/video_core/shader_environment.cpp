@@ -1420,9 +1420,13 @@ static std::filesystem::path FailedRewritePath(const std::filesystem::path& file
 void SerializePipeline(std::span<const char> key, std::span<const GenericEnvironment* const> envs,
                        const std::filesystem::path& filename, u32 cache_version,
                        u32 read_properties) {
-    // Another emulator loading the cache, appending to it or rewriting it goes first. Without the
-    // lock (see PipelineCacheLockWait), the record is appended all the same.
+    // Another emulator loading the cache, appending to it or rewriting it goes first. One that
+    // keeps it through the whole wait (see PipelineCacheLockWait) may change the file at any time:
+    // the pipeline is recorded when a later boot builds it again.
     const Common::FS::FileLock lock{PipelineCacheLockPath(filename), PipelineCacheLockWait};
+    if (lock.Busy()) {
+        return;
+    }
     std::ofstream file(filename, std::ios::binary | std::ios::ate | std::ios::app);
     const std::streamoff size{file.tellp()};
     if (!file.is_open() || size < 0) {

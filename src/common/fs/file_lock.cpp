@@ -97,7 +97,6 @@ FileLock::FileLock(const std::filesystem::path& path, std::chrono::milliseconds 
         return std::ranges::find(stuck_locks, path) != stuck_locks.end();
     }();
     const auto deadline = std::chrono::steady_clock::now() + wait;
-    bool busy{};
     held = TryLock(handle, busy);
     while (!held && busy && !stuck && wait.count() > 0) {
         if (std::chrono::steady_clock::now() >= deadline) {
