@@ -6,13 +6,17 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstring>
 #include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 #include <boost/container/static_vector.hpp>
 
 #include "common/assert.h"
 #include "common/common_types.h"
+#include "common/fs/file.h"
 #include "common/logging.h"
 #include "common/swap.h"
 #include "core/core.h"
@@ -101,8 +105,8 @@ struct IPlatformServiceManager::Impl {
     boost::container::static_vector<FontRegion, 8> builtin_font_regions;
     /// Offset in shared_font of each built-in font's data.
     boost::container::static_vector<u32, 8> builtin_font_sources;
-    /// The standard font with the controller button icons added, when the firmware's lacks them.
-    std::vector<u8> builtin_standard_font;
+    /// Fonts served instead of the system font of that type (EDEN_NX2_BUILTIN_FONT_<type>).
+    std::array<std::vector<u8>, SHARED_FONTS.size()> builtin_font_overrides;
     u32 builtin_font_memory_size{};
     /// Made by the first GetBuiltInFontSharedMemory (Switch 2 titles only).
     Kernel::KSharedMemory* builtin_font_memory{};
@@ -193,19 +197,38 @@ IPlatformServiceManager::IPlatformServiceManager(Core::System& system_, const ch
         const auto font_data = [&](const FontRegion& region) {
             return std::span<const u8>{impl->shared_font.data() + region.offset, region.size};
         };
-        impl->builtin_standard_font = MergeGlyphs(font_data(type_regions[standard_type]),
-                                                  font_data(type_regions[extension_type]),
-                                                  BUTTON_GLYPHS);
+        impl->builtin_font_overrides[standard_type] =
+            MergeGlyphs(font_data(type_regions[standard_type]),
+                        font_data(type_regions[extension_type]), BUTTON_GLYPHS);
+    }
+
+    // Diagnostic: EDEN_NX2_BUILTIN_FONT_<type>=<file> gives Switch 2 titles that font file as the
+    // built-in font of that type.
+    for (size_t type = 0; type < type_regions.size(); ++type) {
+        const std::string name = "EDEN_NX2_BUILTIN_FONT_" + std::to_string(type);
+        const char* const path = std::getenv(name.c_str());
+        if (path == nullptr || *path == '\0') {
+            continue;
+        }
+        const Common::FS::IOFile file{std::string_view{path}, Common::FS::FileAccessMode::Read,
+                                      Common::FS::FileType::BinaryFile};
+        std::vector<u8> data(file.IsOpen() ? file.GetSize() : 0);
+        if (data.empty() || file.Read(data) != data.size()) {
+            LOG_ERROR(Service_NS, "{}: cannot read {}", name, path);
+            continue;
+        }
+        LOG_WARNING(Service_NS, "{}: serving {} ({:#x} bytes) as built-in font type {}", name, path,
+                    data.size(), type);
+        impl->builtin_font_overrides[type] = std::move(data);
     }
 
     // The data after each BFTTF header is the plain font: GetBuiltInFontSharedMemory copies it.
     u32 builtin_offset = 0;
-    for (size_t type_index = 0; type_index < type_regions.size(); ++type_index) {
-        const auto& region = type_regions[type_index];
-        const u32 size = type_index == standard_type && !impl->builtin_standard_font.empty()
-                             ? static_cast<u32>(impl->builtin_standard_font.size())
-                             : region.size;
-        impl->builtin_font_sources.push_back(region.offset);
+    for (size_t type = 0; type < type_regions.size(); ++type) {
+        const auto& override_font = impl->builtin_font_overrides[type];
+        const u32 size =
+            override_font.empty() ? type_regions[type].size : static_cast<u32>(override_font.size());
+        impl->builtin_font_sources.push_back(type_regions[type].offset);
         impl->builtin_font_regions.push_back({builtin_offset, size});
         builtin_offset = Common::AlignUp(builtin_offset + size, 0x1000);
     }
@@ -235,11 +258,10 @@ void IPlatformServiceManager::GetBuiltInFontSharedMemory(HLERequestContext& ctx)
         u8* const data = memory->GetPointer();
         std::memset(data, 0, impl->builtin_font_memory_size);
         for (size_t i = 0; i < impl->builtin_font_regions.size(); ++i) {
-            const u8* source = impl->shared_font.data() + impl->builtin_font_sources[i];
-            if (i == static_cast<size_t>(SharedFontType::JapanUSEuropeStandard) &&
-                !impl->builtin_standard_font.empty()) {
-                source = impl->builtin_standard_font.data();
-            }
+            const auto& override_font = impl->builtin_font_overrides[i];
+            const u8* const source = override_font.empty()
+                                         ? impl->shared_font.data() + impl->builtin_font_sources[i]
+                                         : override_font.data();
             std::memcpy(data + impl->builtin_font_regions[i].offset, source,
                         impl->builtin_font_regions[i].size);
         }
@@ -251,11 +273,12 @@ void IPlatformServiceManager::GetBuiltInFontSharedMemory(HLERequestContext& ctx)
     rb.PushCopyObjects(ctx, *impl->builtin_font_memory);
 }
 
-// nn::pl::GetBuiltInFontData(BuiltInFontDataOunce*, BuiltInFontTypeOunce, bool): returns a 16-byte
-// bool that says whether the font exists and a 16-byte descriptor (u8 flags, u8 flag bit, u16,
-// u32 offset into the font shared memory, u32 size, u32). The client expects plain TrueType/OpenType
-// data there. The types are the SharedFontType values: the SDK's GetSharedFontAddress and
-// GetSharedFontSize pass their type through unchanged.
+// nn::pl::GetBuiltInFontData(BuiltInFontDataOunce*, BuiltInFontTypeOunce, bool): returns a bool
+// that says whether the font exists and, 4 bytes in, a 12-byte descriptor (a u32 whose low byte is
+// the flags and bit 8 a flag bit, the u32 offset into the font shared memory, the u32 size). The SDK
+// reads exactly these 16 bytes, so a longer reply shifts the offset and size. The client expects
+// plain TrueType/OpenType data there. The types are the SharedFontType values: the SDK's
+// GetSharedFontAddress and GetSharedFontSize pass their type through unchanged.
 void IPlatformServiceManager::GetBuiltInFontData(HLERequestContext& ctx) {
     // The SDK packs the type in the first byte and the bool in the second; the two bytes after them
     // are padding, left as whatever was on the caller's stack.
