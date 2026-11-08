@@ -23,4 +23,8 @@ VirtualFile OpenDecryptedPackage(VirtualFile package, std::string& error);
 /// A read-only PFS0 (NSP layout) holding `files` in order, without copying their bytes.
 VirtualFile BuildPartitionFile(std::string name, const std::vector<VirtualFile>& files);
 
+/// A decrypted add-on content NCA for `title_id` whose one section is `romfs`, without a hash
+/// layer, for add-ons kept as an extracted tree. Nothing is copied.
+VirtualFile BuildAddOnContentNca(u64 title_id, VirtualFile romfs);
+
 } // namespace FileSys

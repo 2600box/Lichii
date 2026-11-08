@@ -315,6 +315,11 @@ Result NcaFileSystemDriver::CreateStorageByRawStorage(VirtualFile* out,
 
     // Process hash/integrity layer.
     switch (header_reader->GetHashType()) {
+    case NcaFsHeader::HashType::None:
+        // Only a decrypted NCA built from an extracted tree has a section without hashes.
+        R_UNLESS(m_reader->GetMagic() == NcaHeader::MagicDecrypted,
+                 ResultInvalidNcaFsHeaderHashType);
+        break;
     case NcaFsHeader::HashType::HierarchicalSha256Hash:
         R_TRY(CreateSha256Storage(&storage, std::move(storage),
                                   header_reader->GetHashData().hierarchical_sha256_data));

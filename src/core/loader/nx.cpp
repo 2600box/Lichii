@@ -797,8 +797,28 @@ u8 AppLoader_NX::ReadPlatform(const FileSys::VirtualFile& nx_file, u64 program_i
 }
 
 void AppLoader_NX::RegisterContent(FileSys::ManualContentProvider& provider) const {
+    if (impl->status != ResultStatus::Success) {
+        return;
+    }
     for (const auto& extra : impl->native_extras) {
         provider.AddEntriesFromContainer(extra, false, impl->program_id);
+    }
+    // Add-ons converted from NUP packages and extracted dumps have no NCA: their RomFS is
+    // served as one.
+    const auto& owner = impl->Archive().applications()[impl->app];
+    for (u32 si = owner.first_snapshot; si < owner.first_snapshot + owner.snapshot_count; ++si) {
+        const auto title_id = impl->Archive().snapshots()[si].addon_title_id();
+        if (!title_id) {
+            continue;
+        }
+        const auto root = FileSys::NxSnapshotDirectory(impl->session, si);
+        const auto romfs = root != nullptr ? root->GetSubdirectory("romfs") : nullptr;
+        if (romfs == nullptr) {
+            LOG_WARNING(Loader, "NX add-on {:016X} has no romfs folder", *title_id);
+            continue;
+        }
+        provider.AddEntry(FileSys::TitleType::AOC, FileSys::ContentRecordType::Data, *title_id,
+                          FileSys::BuildAddOnContentNca(*title_id, FileSys::CreateRomFS(romfs)));
     }
 }
 
@@ -809,25 +829,13 @@ AppLoader::LoadResult AppLoader_NX::Load(Kernel::KProcess& process, Core::System
     if (impl->status != ResultStatus::Success) {
         return {impl->status, {}};
     }
-    const auto& owner = impl->Archive().applications()[impl->app];
-    u32 extracted_addons = 0;
-    for (u32 si = owner.first_snapshot; si < owner.first_snapshot + owner.snapshot_count; ++si) {
-        const auto& s = impl->Archive().snapshots()[si];
-        extracted_addons += s.type == AddOn && s.addon_title_id().has_value();
-    }
-    if (extracted_addons > 0) {
-        LOG_WARNING(Loader,
-                    "NX archive has {} extracted add-on content snapshot(s); AoC mounting is not "
-                    "supported yet",
-                    extracted_addons);
+    // The frontend owns this provider; the game list fills it the same way.
+    if (const auto* slot = system.GetContentProviderUnion().GetSlotProvider(
+            FileSys::ContentProviderUnionSlot::FrontendManual)) {
+        RegisterContent(*const_cast<FileSys::ManualContentProvider*>(
+            static_cast<const FileSys::ManualContentProvider*>(slot)));
     }
     if (!impl->tree) {
-        // The frontend owns this provider; the game list fills it the same way.
-        if (const auto* slot = system.GetContentProviderUnion().GetSlotProvider(
-                FileSys::ContentProviderUnionSlot::FrontendManual)) {
-            RegisterContent(*const_cast<FileSys::ManualContentProvider*>(
-                static_cast<const FileSys::ManualContentProvider*>(slot)));
-        }
         const auto result = impl->native->Load(process, system);
         is_loaded = result.first == ResultStatus::Success;
         return result;

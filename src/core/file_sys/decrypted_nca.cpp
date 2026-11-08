@@ -372,6 +372,40 @@ VirtualFile BuildPartitionFile(std::string name, const std::vector<VirtualFile>&
     return ConcatenatedVfsFile::MakeConcatenatedFile(std::move(name), std::move(parts));
 }
 
+VirtualFile BuildAddOnContentNca(u64 title_id, VirtualFile romfs) {
+    const u64 romfs_size = romfs->GetSize();
+    const u64 section_size = Common::AlignUp(romfs_size, NcaHeader::SectorSize);
+
+    NcaFsHeader fs{};
+    fs.version = 2;
+    fs.fs_type = NcaFsHeader::FsType::RomFs;
+    fs.hash_type = NcaFsHeader::HashType::None;
+    fs.encryption_type = NcaFsHeader::EncryptionType::None;
+
+    NcaHeader nca{};
+    nca.magic = NcaHeader::MagicDecrypted;
+    nca.content_type = NcaHeader::ContentType::PublicData;
+    nca.content_size = HeaderSize + section_size;
+    nca.program_id = title_id;
+    nca.sdk_addon_version = 0x000B0000;
+    nca.fs_info[0] = {NcaHeader::ByteToSector(HeaderSize),
+                      NcaHeader::ByteToSector(HeaderSize + section_size), 0, 0};
+    if (!Sha256(&fs, sizeof(fs), nca.fs_header_hash[0])) {
+        return nullptr;
+    }
+
+    std::vector<u8> header(HeaderSize);
+    std::memcpy(header.data(), &nca, sizeof(nca));
+    std::memcpy(header.data() + NcaHeader::Size, &fs, sizeof(fs));
+    std::vector<VirtualFile> parts{std::make_shared<VectorVfsFile>(std::move(header), "header"),
+                                   std::move(romfs)};
+    if (section_size > romfs_size) {
+        parts.push_back(std::make_shared<StaticVfsFile>(u8{0}, section_size - romfs_size));
+    }
+    return ConcatenatedVfsFile::MakeConcatenatedFile(fmt::format("{:016x}.nca", title_id),
+                                                     std::move(parts));
+}
+
 VirtualFile OpenDecryptedNca(VirtualFile nca, std::string& error) {
     if (nca == nullptr || nca->GetSize() < HeaderSize) {
         error = "not an NCA";

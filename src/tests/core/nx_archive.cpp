@@ -11,12 +11,19 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "common/scope_exit.h"
 #include "common/settings.h"
 #include "core/core.h"
+#include "core/core_timing.h"
+#include "core/file_sys/content_archive.h"
 #include "core/file_sys/control_metadata.h"
+#include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/file_sys/vfs/vfs_vector.h"
+#include "core/hle/kernel/k_process.h"
+#include "core/hle/kernel/k_thread.h"
+#include "core/hle/kernel/kernel.h"
 #include "core/loader/loader.h"
 #include "core/loader/nx.h"
 #include "tests/core/system_test_context.h"
@@ -254,4 +261,45 @@ TEST_CASE("NX: a standalone update shows its version and can be disabled", "[cor
     const auto without = display_version();
     Settings::values.disabled_addons.erase(ApplicationId);
     CHECK(without != "v131072");
+}
+
+TEST_CASE("NX: an extracted add-on is listed as add-on content after Load", "[core][nx]") {
+    ScopedSystemTestContext environment;
+    Core::System system;
+    system.Initialize();
+    auto& kernel = system.Kernel();
+    Kernel::KThread bootstrap{kernel};
+    REQUIRE(Kernel::KThread::InitializeDummyThread(system, &bootstrap, nullptr).IsSuccess());
+    kernel.SetCurrentEmuThread(&bootstrap);
+    kernel.Initialize();
+    SCOPE_EXIT {
+        system.CoreTiming().ClearPendingEvents();
+        kernel.Shutdown();
+        kernel.SetCurrentEmuThread(nullptr);
+        kernel.UnregisterKernelObject(&bootstrap);
+    };
+    FileSys::ManualContentProvider provider;
+    system.RegisterContentProvider(FileSys::ContentProviderUnionSlot::FrontendManual, &provider);
+    Kernel::KProcess process{kernel};
+    Kernel::KAutoObject::Create(&process);
+    SCOPE_EXIT {
+        kernel.UnregisterKernelObject(&process);
+    };
+    Loader::AppLoader_NX loader{system, OpenFixture("lichii_synthetic.nx")};
+    REQUIRE(loader.Load(process, system).first == Loader::ResultStatus::Success);
+
+    // As the AoC service lists add-ons and the FS service opens their data.
+    constexpr u64 AddOnId = ApplicationId + 0x1001;
+    const auto& content = system.GetContentProvider();
+    const auto entries =
+        content.ListEntriesFilter(FileSys::TitleType::AOC, FileSys::ContentRecordType::Data);
+    REQUIRE(entries.size() == 1);
+    CHECK(entries[0].title_id == AddOnId);
+    const auto nca = content.GetEntry(AddOnId, FileSys::ContentRecordType::Data);
+    REQUIRE(nca != nullptr);
+    REQUIRE(nca->GetStatus() == Loader::ResultStatus::Success);
+    CHECK(nca->GetTitleId() == AddOnId);
+    const auto romfs = FileSys::ExtractRomFS(nca->GetRomFS());
+    REQUIRE(romfs != nullptr);
+    CHECK(ReadText(romfs->GetFile("dlc.bin")) == "dlc");
 }
