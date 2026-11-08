@@ -506,9 +506,13 @@ if (LICHII_NXFORMAT_RUNTIME)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${LICHII_NXFORMAT_RUNTIME}" "$<TARGET_FILE_DIR:yuzu>")
     if (UNIX AND NOT APPLE)
-        # The release tar.gz ships the library next to the executable, where the build path
-        # recorded for the imported library does not exist.
+        # The release tar.gz ships the library next to the executable and an install puts it in
+        # a private library directory; neither has the build path recorded for the imported
+        # library.
+        include(GNUInstallDirs)
         set_property(TARGET yuzu APPEND PROPERTY BUILD_RPATH "\$ORIGIN")
+        set_property(TARGET yuzu APPEND PROPERTY INSTALL_RPATH "\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}/lichii")
+        install(FILES "${LICHII_NXFORMAT_RUNTIME}" DESTINATION "${CMAKE_INSTALL_LIBDIR}/lichii")
     endif()
 endif()
 
