@@ -39,6 +39,12 @@ constexpr bool IsRangeWithin(s64 offset, s64 size, s64 end) {
     return offset >= 0 && size >= 0 && offset <= end && size <= end - offset;
 }
 
+// Sparse and indirect layers give a section a virtual size taken from header fields. Tables that
+// are read into memory whole are also checked against the bytes the NCAs actually store.
+s64 GetBodySize(const std::shared_ptr<NcaReader>& reader) {
+    return reader != nullptr ? static_cast<s64>(reader->GetSharedBodyStorage()->GetSize()) : 0;
+}
+
 class SharedNcaBodyStorage : public IReadOnlyStorage {
     YUZU_NON_COPYABLE(SharedNcaBodyStorage);
     YUZU_NON_MOVEABLE(SharedNcaBodyStorage);
@@ -844,6 +850,8 @@ Result NcaFileSystemDriver::CreateAesCtrExStorageMetaStorage(
         Common::AlignUp(static_cast<s64>(patch_info.aes_ctr_ex_size), NcaHeader::XtsBlockSize);
     R_UNLESS(IsRangeWithin(meta_offset, meta_size, base_size), ResultNcaBaseStorageOutOfRangeB);
 
+    R_UNLESS(meta_size <= GetBodySize(m_reader), ResultNcaBaseStorageOutOfRangeB);
+
     // Create the encrypted storage.
     auto enc_storage =
         std::make_shared<OffsetVfsFile>(std::move(base_storage), meta_size, meta_offset);
@@ -980,6 +988,8 @@ Result NcaFileSystemDriver::CreateIndirectStorageMetaStorage(VirtualFile* out,
     // Check that we're within range.
     R_UNLESS(IsRangeWithin(patch_info.indirect_offset, patch_info.indirect_size, base_size),
              ResultNcaBaseStorageOutOfRangeE);
+
+    R_UNLESS(patch_info.indirect_size <= GetBodySize(m_reader), ResultNcaBaseStorageOutOfRangeE);
 
     // Create the meta storage.
     auto meta_storage = std::make_shared<OffsetVfsFile>(base_storage, patch_info.indirect_size,
@@ -1160,10 +1170,20 @@ Result NcaFileSystemDriver::CreateSha3Storage(
              ResultNcaBaseStorageOutOfRangeC);
     R_UNLESS(IsRangeWithin(data_region.offset, data_region.size, base_size),
              ResultNcaBaseStorageOutOfRangeC);
+    const s64 stored_size = GetBodySize(m_reader) + GetBodySize(m_original_reader);
+    R_UNLESS(hash_region.size <= stored_size, ResultNcaBaseStorageOutOfRangeC);
+
+    // The hash layer fits in one block, and the buffer below also caches two blocks, so a block
+    // larger than every stored byte can only come from a corrupt header.
+    R_UNLESS(Common::IsAligned<s64>(hash_region.size, VerificationStorage::HashSize) &&
+                 hash_region.size <= hash_data.hash_block_size &&
+                 static_cast<u64>(hash_data.hash_block_size) <=
+                     std::bit_ceil(static_cast<u64>(stored_size)),
+             ResultInvalidHierarchicalSha256BlockSize);
 
     constexpr s32 CacheBlockCount = 2;
     const auto hash_buffer_size = static_cast<size_t>(hash_region.size);
-    const auto cache_buffer_size = CacheBlockCount * hash_data.hash_block_size;
+    const auto cache_buffer_size = CacheBlockCount * static_cast<size_t>(hash_data.hash_block_size);
     const auto total_buffer_size = hash_buffer_size + cache_buffer_size;
 
     auto buffer_hold_storage = std::make_shared<MemoryResourceBufferHoldStorage>(
@@ -1218,11 +1238,21 @@ Result NcaFileSystemDriver::CreateSha256Storage(
              ResultNcaBaseStorageOutOfRangeC);
     R_UNLESS(IsRangeWithin(data_region.offset, data_region.size, base_size),
              ResultNcaBaseStorageOutOfRangeC);
+    const s64 stored_size = GetBodySize(m_reader) + GetBodySize(m_original_reader);
+    R_UNLESS(hash_region.size <= stored_size, ResultNcaBaseStorageOutOfRangeC);
+
+    // The hash layer fits in one block, and the buffer below also caches two blocks, so a block
+    // larger than every stored byte can only come from a corrupt header.
+    R_UNLESS(Common::IsAligned<s64>(hash_region.size, VerificationStorage::HashSize) &&
+                 hash_region.size <= hash_data.hash_block_size &&
+                 static_cast<u64>(hash_data.hash_block_size) <=
+                     std::bit_ceil(static_cast<u64>(stored_size)),
+             ResultInvalidHierarchicalSha256BlockSize);
 
     // Determine buffer sizes.
     constexpr s32 CacheBlockCount = 2;
     const auto hash_buffer_size = static_cast<size_t>(hash_region.size);
-    const auto cache_buffer_size = CacheBlockCount * hash_data.hash_block_size;
+    const auto cache_buffer_size = CacheBlockCount * static_cast<size_t>(hash_data.hash_block_size);
     const auto total_buffer_size = hash_buffer_size + cache_buffer_size;
 
     // Make a buffer holder storage.

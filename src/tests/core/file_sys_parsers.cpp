@@ -5,6 +5,7 @@
 // before they checked their header fields. Each must now fail cleanly, and valid input of the
 // same shape must still parse.
 
+#include <algorithm>
 #include <cstring>
 #include <iterator>
 #include <memory>
@@ -15,8 +16,10 @@
 
 #include "core/file_sys/card_image.h"
 #include "core/file_sys/errors.h"
+#include "core/file_sys/fssystem/fssystem_bucket_tree.h"
 #include "core/file_sys/fssystem/fssystem_compression_configuration.h"
 #include "core/file_sys/fssystem/fssystem_crypto_configuration.h"
+#include "core/file_sys/fssystem/fssystem_indirect_storage.h"
 #include "core/file_sys/fssystem/fssystem_integrity_verification_storage.h"
 #include "core/file_sys/fssystem/fssystem_nca_file_system_driver.h"
 #include "core/file_sys/fssystem/fssystem_nca_header.h"
@@ -238,10 +241,11 @@ TEST_CASE("RomFS rejects a tree deeper than a Horizon path allows", "[core][file
 }
 
 // A plaintext NCA, which nx2 opens without a header key, with one RomFS section spanning
-// [0xC00, 0x4C00) whose FS header the test fills in.
+// [0xC00, 0x4C00) whose FS header and contents the test fills in.
 struct PlaintextNca {
     NcaHeader header{};
     NcaFsHeader fs{};
+    std::vector<u8> section;
 
     PlaintextNca() {
         header.magic = NcaHeader::Magic3;
@@ -255,9 +259,10 @@ struct PlaintextNca {
     }
 
     Result Open() const {
-        std::vector<u8> bytes(0x4C00);
+        std::vector<u8> bytes(std::max<size_t>(0x4C00, 0xC00 + section.size()));
         std::memcpy(bytes.data(), &header, sizeof(header));
         std::memcpy(bytes.data() + sizeof(header), &fs, sizeof(fs));
+        std::copy(section.begin(), section.end(), bytes.begin() + 0xC00);
 
         auto reader = std::make_shared<NcaReader>();
         R_TRY(reader->Initialize(MakeFile(std::move(bytes)), GetCryptoConfiguration(),
@@ -303,6 +308,13 @@ TEST_CASE("NCA rejects a file shorter than its header", "[core][file_sys]") {
 TEST_CASE("NCA rejects a SHA-256 block smaller than a hash", "[core][file_sys]") {
     auto nca = MakeSha256Nca();
     nca.fs.hash_data.hierarchical_sha256_data.hash_block_size = 8;
+    REQUIRE(nca.Open() == ResultInvalidHierarchicalSha256BlockSize);
+}
+
+TEST_CASE("NCA rejects a SHA-256 block larger than the file before allocating its cache",
+          "[core][file_sys]") {
+    auto nca = MakeSha256Nca();
+    nca.fs.hash_data.hierarchical_sha256_data.hash_block_size = 0x40000000;
     REQUIRE(nca.Open() == ResultInvalidHierarchicalSha256BlockSize);
 }
 
@@ -354,6 +366,53 @@ TEST_CASE("NCA rejects a negative indirect table size", "[core][file_sys]") {
     nca.fs.patch_info.indirect_offset = 0x200;
     nca.fs.patch_info.indirect_size = -0x100;
     REQUIRE(nca.Open() == ResultNcaBaseStorageOutOfRangeE);
+}
+
+TEST_CASE("NCA rejects an indirect table larger than the file behind a sparse layer",
+          "[core][file_sys]") {
+    auto nca = MakeSha256Nca();
+    nca.header.fs_info[0].end_sector = 0xFFFFFF06;
+    nca.fs.sparse_info.generation = 1;
+    BucketTree::Header sparse_header;
+    sparse_header.Format(0);
+    std::memcpy(nca.fs.sparse_info.bucket.header.data(), &sparse_header, sizeof(sparse_header));
+    nca.fs.patch_info.indirect_offset = 0;
+    nca.fs.patch_info.indirect_size = s64{1} << 36;
+    REQUIRE(nca.Open() == ResultNcaBaseStorageOutOfRangeE);
+}
+
+// A 0x10000-byte section: 0x8000 bytes of patch data, then an indirect table mapping the virtual
+// range [0, end) onto them.
+PlaintextNca MakeIndirectNca(s64 end) {
+    auto nca = MakeSha256Nca();
+    nca.header.fs_info[0].end_sector = 6 + 0x10000 / 0x200;
+    nca.section.resize(0x10000);
+    const BucketTree::NodeHeader node{0, 1, end};
+    Put(nca.section, 0x8000, node);
+    Put(nca.section, 0x8000 + sizeof(node), s64{0});
+    Put(nca.section, 0xC000, node);
+    IndirectStorage::Entry entry{};
+    entry.storage_index = 1;
+    Put(nca.section, 0xC000 + sizeof(node), entry);
+    BucketTree::Header header;
+    header.Format(1);
+    nca.fs.patch_info.indirect_offset = 0x8000;
+    nca.fs.patch_info.indirect_size = 0x8000;
+    std::memcpy(nca.fs.patch_info.indirect_header.data(), &header, sizeof(header));
+    return nca;
+}
+
+TEST_CASE("NCA with a valid indirect table opens", "[core][file_sys]") {
+    REQUIRE(MakeIndirectNca(0x8000).Open() == ResultSuccess);
+}
+
+TEST_CASE("NCA rejects a hash region larger than the file behind an indirect layer",
+          "[core][file_sys]") {
+    auto nca = MakeIndirectNca(s64{1} << 40);
+    auto& sha = nca.fs.hash_data.hierarchical_sha256_data;
+    sha.hash_layer_region[0].size = s64{1} << 36;
+    sha.hash_layer_region[1].offset = s64{1} << 37;
+    REQUIRE(nca.Open() == ResultNcaBaseStorageOutOfRangeC);
 }
 
 // A card image whose root HFS0 holds empty partitions with the given names.
