@@ -1457,6 +1457,7 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
     }
     const Binding& binding = channel_state->uniform_buffers[stage][index];
     const DAddr device_addr = binding.device_addr;
+    Nx2Profile::CountUniformBind(stage, index, device_addr);
     const u32 size = (std::min)(binding.size, (*channel_state->uniform_buffer_sizes)[stage][index]);
     Buffer& buffer = slot_buffers[binding.buffer_id];
     TouchBuffer(buffer, binding.buffer_id);
@@ -1538,8 +1539,11 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         return;
     }
     // Classic cached path
+    Nx2Profile::Add(Nx2Profile::Counter::UniformClassicScans, 1);
     if (SynchronizeBuffer(buffer, device_addr, size)) {
         ++channel_state->uniform_cache_hits[0];
+    } else {
+        Nx2Profile::Add(Nx2Profile::Counter::UniformClassicUploads, 1);
     }
     // Skip binding if it's not needed and if the bound buffer is not the fast version
     // This exists to avoid instances where the fast buffer is bound and a GPU write happens
@@ -1665,13 +1669,17 @@ void BufferCache<P>::BindHostGraphicsStorageBuffers(size_t stage) {
     ForEachEnabledBit(channel_state->enabled_storage_buffers[stage], [&](u32 index) {
         const Binding& binding = channel_state->storage_buffers[stage][index];
         const bool is_written = ((channel_state->written_storage_buffers[stage] >> index) & 1) != 0;
+        Nx2Profile::Add(Nx2Profile::Counter::StorageBinds, 1);
         if (BindMultiRangeStorage(binding, is_written, graphics_segments)) {
             return;
         }
         Buffer& buffer = slot_buffers[binding.buffer_id];
         TouchBuffer(buffer, binding.buffer_id);
         const u32 size = binding.size;
-        SynchronizeBuffer(buffer, binding.device_addr, size);
+        Nx2Profile::Add(Nx2Profile::Counter::StorageScans, 1);
+        if (!SynchronizeBuffer(buffer, binding.device_addr, size)) {
+            Nx2Profile::Add(Nx2Profile::Counter::StorageUploads, 1);
+        }
 
         const u32 offset = buffer.Offset(binding.device_addr);
         buffer.MarkUsage(offset, size);

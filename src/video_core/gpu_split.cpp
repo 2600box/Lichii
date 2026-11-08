@@ -192,6 +192,9 @@ void GpuSplit::Publish() {
     if (published_local == write_position) {
         return;
     }
+    if (Nx2Profile::Enabled()) {
+        Nx2Profile::CountRingLead(write_position - consumed.load(std::memory_order_relaxed));
+    }
     published_local = write_position;
     publish_every = std::min<size_t>(publish_every * 2, PublishEvery);
     published.store(write_position, std::memory_order_seq_cst);

@@ -113,7 +113,7 @@ inline u64 Ticks() {
 struct ThreadData {
     std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ns{};
     std::array<u64, static_cast<size_t>(Zone::Count)> count{};
-    std::array<u64, 8> counters{}; ///< See Counter
+    std::array<u64, 18> counters{}; ///< See Counter
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_ns{};
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_count{};
     u64 child_ns{};    ///< Time of the zones nested in the current one
@@ -257,7 +257,22 @@ enum class Counter : u32 {
     SameValueWrites, ///< Of MethodWrites: the register already held the value
     AcquireChecks,  ///< Semaphore acquires evaluated
     AcquireWaits,   ///< Of AcquireChecks: not met yet (the channel waits)
+    UniformBinds,   ///< Graphics uniform buffers bound (BindHostGraphicsUniformBuffer; root table
+                    ///< banks left out)
+    UniformNewAddress,     ///< Of UniformBinds: the slot's last bind was at another address
+    UniformClassicScans,   ///< Of UniformBinds: classic path, the range scanned for uploads
+    UniformClassicUploads, ///< Of UniformClassicScans: the scan uploaded something
+    StorageBinds,      ///< Graphics storage buffers bound (BindHostGraphicsStorageBuffers)
+    StorageScans,      ///< Of StorageBinds: the range scanned for uploads (SynchronizeBuffer)
+    StorageUploads,    ///< Of StorageScans: the scan uploaded something
+    RingLeadSum,       ///< Split front: write_position - consumed at each Publish, summed
+    RingLeadPublishes, ///< Split front: the publishes RingLeadSum adds up
+    RingLeadMax,       ///< Split front: the largest lead at a Publish
+    Count,
 };
+
+static_assert(static_cast<size_t>(Counter::Count) ==
+              sizeof(ThreadData::counters) / sizeof(u64));
 
 /// Method calls on this thread by method (3D registers on the back, macros on the front), and
 /// same-value writes among them; MME DMA reads by the macro that made them. The most frequent
@@ -327,6 +342,35 @@ inline void Add(Counter counter, u64 amount) {
     if (Enabled()) {
         t_data.counters[static_cast<size_t>(counter)] += amount;
     }
+}
+
+/// The address each graphics uniform buffer slot (stage, index) was last bound at.
+inline thread_local std::array<std::array<u64, 18>, 5> t_uniform_addresses{};
+
+/// A graphics uniform buffer bound at device_addr for (stage, index): counted, and counted as at
+/// a new address when the slot's last bind was elsewhere.
+inline void CountUniformBind(size_t stage, u32 index, u64 device_addr) {
+    if (!Enabled() || stage >= t_uniform_addresses.size() ||
+        index >= t_uniform_addresses[stage].size()) {
+        return;
+    }
+    auto& counters = t_data.counters;
+    ++counters[static_cast<size_t>(Counter::UniformBinds)];
+    u64& last = t_uniform_addresses[stage][index];
+    counters[static_cast<size_t>(Counter::UniformNewAddress)] += last != device_addr ? 1 : 0;
+    last = device_addr;
+}
+
+/// The split's front published with the back lead words behind it.
+inline void CountRingLead(u64 lead) {
+    if (!Enabled()) {
+        return;
+    }
+    auto& counters = t_data.counters;
+    counters[static_cast<size_t>(Counter::RingLeadSum)] += lead;
+    ++counters[static_cast<size_t>(Counter::RingLeadPublishes)];
+    u64& largest = counters[static_cast<size_t>(Counter::RingLeadMax)];
+    largest = (std::max)(largest, lead);
 }
 
 /// The front waited for the back since `start` (Ticks) for `site`.
@@ -409,6 +453,32 @@ inline void Report(const char* thread_name = "GPU thread") {
                             static_cast<double>(window) / 1e6);
     }
     LOG_INFO(HW_GPU, "{} per second:{}", thread_name, line);
+    const auto counter = [&](Counter which) { return data.counters[static_cast<size_t>(which)]; };
+    const auto per_second = [&](u64 amount) { return static_cast<double>(amount) * 1e9 / window; };
+    if (counter(Counter::UniformBinds) != 0 || counter(Counter::StorageBinds) != 0) {
+        const u64 uniform_binds = counter(Counter::UniformBinds);
+        const u64 new_address = counter(Counter::UniformNewAddress);
+        LOG_INFO(HW_GPU,
+                 "{} buffer binds per second: uniform {:.0f} ({:.0f} at a new address, {:.0f} at "
+                 "the same address; {:.0f} classic scans, {:.0f} uploaded) | storage {:.0f} "
+                 "({:.0f} scans, {:.0f} uploaded)",
+                 thread_name, per_second(uniform_binds), per_second(new_address),
+                 per_second(uniform_binds - new_address),
+                 per_second(counter(Counter::UniformClassicScans)),
+                 per_second(counter(Counter::UniformClassicUploads)),
+                 per_second(counter(Counter::StorageBinds)),
+                 per_second(counter(Counter::StorageScans)),
+                 per_second(counter(Counter::StorageUploads)));
+    }
+    if (const u64 publishes = counter(Counter::RingLeadPublishes); publishes != 0) {
+        LOG_INFO(HW_GPU,
+                 "{} ring lead at publish (write_position - consumed): average {:.0f} words, "
+                 "max {} words over {} publishes in {:.1f} s",
+                 thread_name,
+                 static_cast<double>(counter(Counter::RingLeadSum)) /
+                     static_cast<double>(publishes),
+                 counter(Counter::RingLeadMax), publishes, static_cast<double>(window) / 1e9);
+    }
     if (const std::string methods = TopMethods(t_method_count, &t_method_same, window); !methods.empty()) {
         LOG_INFO(HW_GPU, "{} methods per second:{}", thread_name, methods);
     }
