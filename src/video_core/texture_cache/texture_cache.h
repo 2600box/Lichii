@@ -26,6 +26,7 @@
 #include "common/slot_vector.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/dirty_flags.h"
+#include "video_core/nx2_experiment.h"
 #include "video_core/nx2_fast_draw.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/guest_memory.h"
@@ -4014,7 +4015,8 @@ void TextureCache<P>::SynchronizeAliases(ImageId image_id) {
     Image& image = slot_images[image_id];
     // Nothing aliased was modified after this image: skip walking its (possibly long) alias list
     // for every draw that samples it (~7% of the GPU back thread in DK Bananza's open areas).
-    if (image.newest_alias_tick <= image.modification_tick) {
+    if (image.newest_alias_tick <= image.modification_tick &&
+        Nx2Experiment::On(Nx2Experiment::AliasSkip)) {
         return;
     }
     bool any_rescaled = True(image.flags & ImageFlagBits::Rescaled);
