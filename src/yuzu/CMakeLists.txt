@@ -505,7 +505,11 @@ if (LICHII_NXFORMAT_RUNTIME)
     add_custom_command(TARGET yuzu POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${LICHII_NXFORMAT_RUNTIME}" "$<TARGET_FILE_DIR:yuzu>")
-    if (UNIX AND NOT APPLE)
+    if (APPLE)
+        # The copy is beside the executable in Contents/MacOS; the build path recorded for the
+        # imported library doesn't exist on a user's Mac.
+        set_property(TARGET yuzu APPEND PROPERTY BUILD_RPATH "@executable_path")
+    elseif (UNIX)
         # The release tar.gz ships the library next to the executable and an install puts it in
         # a private library directory; neither has the build path recorded for the imported
         # library.
