@@ -1747,8 +1747,9 @@ void EmitContext::DefineInputs(const IR::Program& program) {
     }
     const bool noperspective_as_smooth{
         stage == Stage::Fragment && runtime_info.scaled_noperspective_inputs &&
-        std::ranges::any_of(info.interpolation,
-                            [](Interpolation mode) { return mode == Interpolation::NoPerspective; })};
+        std::ranges::any_of(info.interpolation, [](Interpolation mode) {
+            return mode == Interpolation::NoPerspective;
+        })};
     if (loads.AnyComponent(IR::Attribute::PositionX) ||
         info.passthrough.AnyComponent(IR::Attribute::PositionX) || noperspective_as_smooth) {
         const bool is_fragment{stage == Stage::Fragment};
