@@ -431,6 +431,8 @@ private:
     void NoteResolvedDraw(GraphicsPipeline* pipeline, bool is_indexed, bool is_indirect);
     void ReportFastDraws();
     ReusableDraw reusable_draw;
+    /// EDEN_NX2_EGLA66_UBO_KEEP: the constant buffer binds and data since the previous draw.
+    VideoCommon::Nx2FastDraw::Delta taken_delta;
     FastDrawStats fast_draw_stats;
     /// Nx2FastDraw::Enabled and VerifyEnabled as the drawing thread last read them.
     bool fast_draw_on{};
