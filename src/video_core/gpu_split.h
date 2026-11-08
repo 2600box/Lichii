@@ -168,6 +168,14 @@ public:
 
     /// Makes what was sent visible to the back.
     void Publish();
+    /// EGLA-66 publish (#717 PUBLISH_WAITS): before the front yields or sleeps, so the back
+    /// doesn't idle on work the front already decoded.
+    void PublishBeforeWait() {
+        if (published_local != write_position) {
+            Nx2Egla66::Count(Nx2Egla66::g_wait_publishes);
+            Publish();
+        }
+    }
     /// Waits until the back executed everything sent so far.
     void Drain(DrainSite site = DrainSite::Other);
 
@@ -259,6 +267,11 @@ private:
         write_position += words;
         if (write_position - published_local >= publish_every) {
             Publish();
+        } else if (Nx2Egla66::publish && back_idle.load(std::memory_order_relaxed)) {
+            // EGLA-66 publish (#717 PUBLISH_IDLE): a back that ran out of work gets each entry
+            // at once instead of every publish_every words.
+            Nx2Egla66::Count(Nx2Egla66::g_idle_publishes);
+            Publish();
         }
     }
     void WaitForSpace(size_t words);
@@ -321,6 +334,8 @@ private:
     alignas(128) std::atomic<u64> wait_target{~u64{0}};
     alignas(128) std::atomic<bool> back_waiting{};
     std::atomic<u32> wake{};
+    /// EGLA-66 publish: the back found the ring empty (it spins, runs its hook, then sleeps).
+    alignas(128) std::atomic<bool> back_idle{};
     /// The front sleeps in Backoff (#161: instead of yielding).
     alignas(128) std::atomic<bool> front_waiting{};
     std::atomic<u32> front_wake{};

@@ -56,6 +56,30 @@ struct GpuSplitTestAccess {
         return GpuSplit::RingWords - 1;
     }
 
+    static u64 Published(const GpuSplit& split) {
+        return split.published.load();
+    }
+
+    static bool BackIdle(const GpuSplit& split) {
+        return split.back_idle.load();
+    }
+
+    static void SetBackIdle(GpuSplit& split, bool idle) {
+        split.back_idle.store(idle);
+    }
+
+    static void SetBackWaiting(GpuSplit& split, bool waiting) {
+        split.back_waiting.store(waiting);
+    }
+
+    static bool BackWaiting(const GpuSplit& split) {
+        return split.back_waiting.load();
+    }
+
+    static u32 Wakes(const GpuSplit& split) {
+        return split.wake.load();
+    }
+
     static u64 Execute(GpuSplit& split, u64 position, u64 available) {
         const size_t index = position & GpuSplit::RingMask;
         const size_t size = split.Execute(
@@ -868,6 +892,97 @@ TEST_CASE("Split consumption does not complete deferred downstream callbacks",
         deferred.clear();
     });
     REQUIRE(output == std::array<u32, 3>{1, 2, 3});
+}
+
+TEST_CASE("Split publishes each entry to an idle back with the publish gate",
+          "[video_core][gpu_split_dependencies]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    namespace Egla66 = VideoCommon::Nx2Egla66;
+    const bool previous = Egla66::publish;
+    SCOPE_EXIT { Egla66::publish = previous; };
+    Fixture f;
+    VideoCommon::GpuSplit split;
+    Access::Initialize(split, f.system);
+    const auto send = [&] { split.Defer([] {}); };
+
+    // Off: an idle back changes nothing, publishes wake the back each time.
+    Egla66::publish = false;
+    Access::SetBackIdle(split, true);
+    send();
+    REQUIRE(Access::Published(split) == 0);
+    Access::SetBackWaiting(split, true);
+    const u32 wakes = Access::Wakes(split);
+    split.Publish();
+    send();
+    split.Publish();
+    REQUIRE(Access::Wakes(split) == wakes + 2);
+    REQUIRE(Access::BackWaiting(split));
+
+    // On: each entry goes out while the back is idle, and only the first publish wakes it.
+    Egla66::publish = true;
+    const u64 idle_before = Egla66::g_idle_publishes.load();
+    for (u32 i = 0; i < 4; ++i) {
+        send();
+        REQUIRE(Access::Published(split) == Access::End(split));
+    }
+    REQUIRE(Egla66::g_idle_publishes.load() - idle_before == 4);
+    REQUIRE(Access::Wakes(split) == wakes + 3);
+    REQUIRE_FALSE(Access::BackWaiting(split));
+
+    // A busy back gets entries at the usual cadence; the front's waits publish what is left.
+    Access::SetBackIdle(split, false);
+    send();
+    REQUIRE(Access::Published(split) < Access::End(split));
+    const u64 waits_before = Egla66::g_wait_publishes.load();
+    split.PublishBeforeWait();
+    split.PublishBeforeWait();
+    REQUIRE(Access::Published(split) == Access::End(split));
+    REQUIRE(Egla66::g_wait_publishes.load() - waits_before == 1);
+}
+
+TEST_CASE("Split back runs everything published to it idle with the publish gate",
+          "[video_core][gpu_split_dependencies]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    namespace Egla66 = VideoCommon::Nx2Egla66;
+    const bool previous = Egla66::publish;
+    SCOPE_EXIT { Egla66::publish = previous; };
+    Egla66::publish = true;
+    Fixture f;
+    f.system.Initialize();
+    VideoCommon::GpuSplit split;
+    // Start publishes only at the ring's size: what the back gets comes from idle publishes,
+    // the final Publish (as at the end of a command list) and Drain.
+    Access::Start(split, f.system);
+    SCOPE_EXIT { split.Stop(); };
+    const auto wait_until = [](const auto& done) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+        while (!done() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::yield();
+        }
+        return done();
+    };
+    REQUIRE(wait_until([&] { return Access::BackIdle(split); }));
+    const u64 idle_before = Egla66::g_idle_publishes.load();
+    std::atomic<u32> ran{};
+    std::mt19937 rng{5};
+    u32 sent = 0;
+    for (u32 round = 0; round < 200; ++round) {
+        const u32 burst = 1 + rng() % 64;
+        for (u32 i = 0; i < burst; ++i) {
+            split.Defer([&ran] { ran.fetch_add(1, std::memory_order_relaxed); });
+        }
+        sent += burst;
+        if (rng() % 4 == 0) {
+            split.Publish();
+            REQUIRE(wait_until([&] { return ran.load() == sent; }));
+        } else if (rng() % 8 == 0) {
+            split.Drain();
+            REQUIRE(ran.load() == sent);
+        }
+    }
+    split.Publish();
+    REQUIRE(wait_until([&] { return ran.load() == sent; }));
+    REQUIRE(Egla66::g_idle_publishes.load() > idle_before);
 }
 
 TEST_CASE("Split restart resets writer positions without replaying old releases",

@@ -153,6 +153,7 @@ void GpuSplit::Stop() {
     published.store(0, std::memory_order_relaxed);
     consumed.store(0, std::memory_order_relaxed);
     back_waiting.store(false, std::memory_order_relaxed);
+    back_idle.store(false, std::memory_order_relaxed);
     front_waiting.store(false, std::memory_order_relaxed);
 }
 
@@ -198,7 +199,10 @@ void GpuSplit::Publish() {
     published_local = write_position;
     publish_every = std::min<size_t>(publish_every * 2, PublishEvery);
     published.store(write_position, std::memory_order_seq_cst);
-    if (back_waiting.load(std::memory_order_seq_cst)) {
+    // EGLA-66 publish: taken back here, so the publishes until the back runs again (one per
+    // entry while it is idle) don't wake it once more each.
+    if (back_waiting.load(std::memory_order_seq_cst) &&
+        (!Nx2Egla66::publish || back_waiting.exchange(false, std::memory_order_seq_cst))) {
         wake.fetch_add(1, std::memory_order_seq_cst);
         wake.notify_one();
     }
@@ -492,6 +496,9 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
         u64 available = published.load(std::memory_order_acquire);
         if (available == read_position) {
             Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
+            if (Nx2Egla66::publish) {
+                back_idle.store(true, std::memory_order_relaxed);
+            }
             // The front usually sends more within microseconds: spin briefly before sleeping.
             for (u32 spins = 0; spins < 8192 && available == read_position &&
                                 !hook_requested.load(std::memory_order_relaxed);
@@ -518,6 +525,9 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 back_waiting.store(false, std::memory_order_relaxed);
                 continue;
             }
+        }
+        if (Nx2Egla66::publish && back_idle.load(std::memory_order_relaxed)) {
+            back_idle.store(false, std::memory_order_relaxed);
         }
         u64 last_store = read_position;
         while (read_position != available) {
