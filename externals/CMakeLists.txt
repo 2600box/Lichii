@@ -310,6 +310,11 @@ if (NOT TARGET RenderDoc::API)
     add_library(RenderDoc::API ALIAS renderdoc)
 endif()
 
+# NXFormat reader, header-only and vendored; see nxformat/README.md
+add_library(nxformat INTERFACE)
+target_include_directories(nxformat SYSTEM INTERFACE ./nxformat)
+add_library(nxformat::reader ALIAS nxformat)
+
 if (ANDROID AND ARCHITECTURE_arm64)
     AddJsonPackage(libadrenotools)
 endif()

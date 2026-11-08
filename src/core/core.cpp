@@ -31,6 +31,7 @@
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/fs_filesystem.h"
 #include "core/file_sys/nup_container.h"
+#include "core/file_sys/nx_container.h"
 #include "core/file_sys/patch_manager.h"
 #include "core/file_sys/program_metadata.h"
 #include "core/file_sys/registered_cache.h"
@@ -39,6 +40,7 @@
 #include "core/file_sys/submission_package.h"
 #include "core/file_sys/vfs/vfs_concat.h"
 #include "core/file_sys/vfs/vfs_real.h"
+#include "core/file_sys/vfs/vfs_vector.h"
 #include "core/gpu_dirty_memory_manager.h"
 #include "core/hle/kernel/k_memory_manager.h"
 #include "core/hle/kernel/k_process.h"
@@ -143,6 +145,18 @@ bool IsSwitch2Program(const FileSys::VirtualFile& file, u64 program_id, std::siz
         const auto exefs = program ? nup.GetExeFSDir(*program) : nullptr;
         const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
         return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
+               metadata.IsSwitch2();
+    }
+    if (FileSys::NxContainer::IsNxFile(file)) {
+        // The NPDM is Catalog media, so this needs no Manifest mount.
+        const FileSys::NxContainer nx{file};
+        const auto boot = nx.GetStatus() == Loader::ResultStatus::Success
+                              ? nx.FindBootSnapshot(program_id)
+                              : std::nullopt;
+        auto npdm = boot ? nx.ReadMedia(nx.GetSnapshots()[*boot].npdm_media) : std::nullopt;
+        return npdm.has_value() &&
+               metadata.Load(std::make_shared<FileSys::VectorVfsFile>(std::move(*npdm))) ==
+                   Loader::ResultStatus::Success &&
                metadata.IsSwitch2();
     }
     const auto type = file != nullptr ? Loader::IdentifyFile(file) : Loader::FileType::Unknown;

@@ -2194,13 +2194,16 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
                                     QString::fromStdString(patch.version), patch.enabled});
             }
         }
-        if (report_loader.GetFileType() == Loader::FileType::NUP) {
+        if (const auto type = report_loader.GetFileType();
+            type == Loader::FileType::NUP || type == Loader::FileType::NX) {
             std::string version;
             if (report_loader.ReadDisplayVersion(version) == Loader::ResultStatus::Success &&
                 !version.empty()) {
                 session.game_version = QString::fromStdString(version);
-                updates.push_back(
-                    {QStringLiteral("Loaded NUP package"), session.game_version, true});
+                updates.push_back({type == Loader::FileType::NUP
+                                       ? QStringLiteral("Loaded NUP package")
+                                       : QStringLiteral("Loaded NX archive"),
+                                   session.game_version, true});
             }
         }
         session.mods = CompatibilityReporting::SummarizeEnabledAddons(mods);

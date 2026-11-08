@@ -19,6 +19,7 @@
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/common_funcs.h"
 #include "core/file_sys/content_archive.h"
+#include "core/file_sys/nx_container.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/submission_package.h"
 #include "core/hle/kernel/k_process.h"
@@ -30,6 +31,7 @@
 #include "core/loader/nso.h"
 #include "core/loader/nsp.h"
 #include "core/loader/nup.h"
+#include "core/loader/nx.h"
 #include "core/loader/xci.h"
 
 namespace Loader {
@@ -133,6 +135,8 @@ FileType IdentifyFile(FileSys::VirtualFile file) {
         return *xci_type;
     } else if (const auto nup_type = IdentifyFileLoader<AppLoader_NUP>(file)) {
         return *nup_type;
+    } else if (const auto nx_type = IdentifyFileLoader<AppLoader_NX>(file)) {
+        return *nx_type;
     } else if (const auto nro_type = IdentifyFileLoader<AppLoader_NRO>(file)) {
         return *nro_type;
     } else if (const auto nca_type = IdentifyFileLoader<AppLoader_NCA>(file)) {
@@ -184,6 +188,12 @@ bool IsBootableGameContainer(FileSys::VirtualFile file, FileType type, u64 progr
         return false;
     }
 
+    if (type == FileType::NX) {
+        // Catalog only: the game list must not pay for a Manifest mount.
+        const FileSys::NxContainer nx{file};
+        return nx.GetStatus() == ResultStatus::Success && nx.FindBootSnapshot(program_id);
+    }
+
     if (!IsContainerType(type)) {
         return false;
     }
@@ -213,6 +223,8 @@ FileType GuessFromFilename(const std::string& name) {
         return FileType::NSP;
     else if (extension == "nup")
         return FileType::NUP;
+    else if (extension == "nx")
+        return FileType::NX;
     else if (extension == "nsz")
         return FileType::NSZ;
     else if (extension == "kip")
@@ -240,6 +252,8 @@ std::string GetFileTypeString(FileType type) {
         return "NSZ";
     case FileType::NUP:
         return "NUP";
+    case FileType::NX:
+        return "NX";
     case FileType::KIP:
         return "KIP";
     case FileType::DeconstructedRomDirectory:
@@ -252,7 +266,7 @@ std::string GetFileTypeString(FileType type) {
     return "unknown";
 }
 
-constexpr std::array<const char*, 70> RESULT_MESSAGES{
+constexpr std::array<const char*, 72> RESULT_MESSAGES{
     "The operation completed successfully.",
     "The loader requested to load is already loaded.",
     "The operation is not implemented.",
@@ -323,6 +337,8 @@ constexpr std::array<const char*, 70> RESULT_MESSAGES{
     "Integrity verification failed.",
     "The NUP container is malformed or its TOC hash does not match.",
     "The NUP container does not contain a loadable base package.",
+    "The NX archive is malformed or exceeds the reader's limits.",
+    "The NX archive has no bootable program snapshot with an exefs/ tree.",
 };
 
 std::string GetResultStatusString(ResultStatus status) {
@@ -410,6 +426,10 @@ static std::unique_ptr<AppLoader> GetFileLoader(Core::System& system, FileSys::V
     // NUP (NX Package) container format.
     case FileType::NUP:
         return std::make_unique<AppLoader_NUP>(std::move(file));
+
+    // NXFormat archive.
+    case FileType::NX:
+        return std::make_unique<AppLoader_NX>(std::move(file), program_id);
 
     // NX deconstructed ROM directory.
     case FileType::DeconstructedRomDirectory:

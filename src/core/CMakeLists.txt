@@ -138,6 +138,9 @@ add_library(core STATIC
     file_sys/registered_cache.h
     file_sys/nup_container.cpp
     file_sys/nup_container.h
+    file_sys/nx_container.cpp
+    file_sys/nx_container.h
+    file_sys/nx_zstd.h
     file_sys/nup_writer.cpp
     file_sys/nup_writer.h
     file_sys/romfs.cpp
@@ -1179,6 +1182,8 @@ add_library(core STATIC
     loader/nsp.h
     loader/nup.cpp
     loader/nup.h
+    loader/nx.cpp
+    loader/nx.h
     loader/xci.cpp
     loader/xci.h
     memory.cpp
@@ -1251,6 +1256,7 @@ target_link_libraries(core PRIVATE
     OpenSSL::SSL
     fmt::fmt
     nlohmann_json::nlohmann_json
+    nxformat::reader
     RenderDoc::API
     ZLIB::ZLIB)
 
