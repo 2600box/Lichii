@@ -517,12 +517,14 @@ void NxTools::AddToNx(const std::string& archive_path) {
     auto job = std::make_shared<Job>();
     job->title = tr("Adding to NX");
     if (choice.clickedButton() == folder_button) {
-        const QString folder = QFileDialog::getExistingDirectory(
+        const QString chosen = QFileDialog::getExistingDirectory(
             parent_widget, tr("Select the Update Folder"),
             ToQString(ToPath(archive_path).parent_path()));
-        if (folder.isEmpty()) {
+        if (chosen.isEmpty()) {
             return;
         }
+        const QString folder =
+            ToQString(FrontendCommon::NxArchive::UpdateFolder(ToPath(ToUtf8(chosen))));
         job->args = {
             "add-tree",   archive_path, ToUtf8(folder), "--platform", PlatformArgument(switch2),
             "--frontend", "--no-trail"};

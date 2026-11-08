@@ -56,3 +56,18 @@ TEST_CASE("NX tools: an untouched file-name title is not written", "[frontend][n
     CHECK_FALSE(IsTitleEdit("", "My Game"));
     CHECK(IsTitleEdit("My Game (EU)", "My Game"));
 }
+
+TEST_CASE("NX tools: the update folder below a picked parent is found", "[frontend][nx]") {
+    TempDir dir{"lichii-nx-update-folder"};
+    const auto update = dir.path / "updates" / "65536";
+    std::filesystem::create_directories(update / "exefs");
+    std::ofstream{dir.path / "updates" / "readme.txt"} << "x";
+    CHECK(UpdateFolder(update) == update);
+    CHECK(UpdateFolder(dir.path / "updates") == update);
+    CHECK(UpdateFolder(dir.path) == update);
+
+    // Two candidates: the choice is kept as is.
+    std::filesystem::create_directories(dir.path / "updates" / "131072" / "exefs");
+    CHECK(UpdateFolder(dir.path / "updates") == dir.path / "updates");
+    CHECK(UpdateFolder(dir.path / "missing") == dir.path / "missing");
+}

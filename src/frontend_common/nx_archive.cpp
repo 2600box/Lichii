@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <optional>
 #include <string_view>
 
 #include "frontend_common/nx_archive.h"
@@ -35,6 +36,30 @@ std::vector<std::filesystem::path> RegularFiles(const std::filesystem::path& dir
 
 bool IsTitleEdit(std::string_view edited, std::string_view shown) {
     return !edited.empty() && edited != shown;
+}
+
+std::filesystem::path UpdateFolder(const std::filesystem::path& chosen) {
+    std::error_code ec;
+    auto folder = chosen;
+    for (int depth = 0; depth < 3 && !std::filesystem::is_directory(folder / "exefs", ec);
+         ++depth) {
+        std::optional<std::filesystem::path> only;
+        for (std::filesystem::directory_iterator it(folder, ec), end; !ec && it != end;
+             it.increment(ec)) {
+            if (std::error_code type_ec; !it->is_directory(type_ec)) {
+                continue;
+            }
+            if (only) {
+                return chosen;
+            }
+            only = it->path();
+        }
+        if (ec || !only) {
+            return chosen;
+        }
+        folder = *only;
+    }
+    return std::filesystem::is_directory(folder / "exefs", ec) ? folder : chosen;
 }
 
 } // namespace FrontendCommon::NxArchive

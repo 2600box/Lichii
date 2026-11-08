@@ -20,4 +20,9 @@ std::vector<std::filesystem::path> RegularFiles(const std::filesystem::path& dir
 /// started from: the archive's title, or its file name when it has none.
 bool IsTitleEdit(std::string_view edited, std::string_view shown);
 
+/// The update folder meant: `chosen` when it holds exefs/, else the folder below it that does
+/// when each level holds a single folder (a parent picked by mistake, as "updates" around
+/// "65536"), at most three levels down. Never throws.
+std::filesystem::path UpdateFolder(const std::filesystem::path& chosen);
+
 } // namespace FrontendCommon::NxArchive
