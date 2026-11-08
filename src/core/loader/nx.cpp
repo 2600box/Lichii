@@ -691,12 +691,28 @@ struct AppLoader_NX::Impl {
             status = ResultStatus::ErrorNSPMissingProgramNCA;
             return;
         }
+        // A program with its own snapshots is selected here; a native snapshot holding every
+        // program leaves the index to the NSP.
+        if (program_index != 0) {
+            const u64 target = a.programs()[pi].id + program_index;
+            for (u32 p = owner.first_program;
+                 p != Absent && p < owner.first_program + owner.program_count; ++p) {
+                if (a.programs()[p].id == target && Latest(p) != Absent) {
+                    pi = p;
+                    program_index = 0;
+                }
+            }
+        }
         selected = Latest(pi);
         if (selected == Absent) {
             status = ResultStatus::ErrorNSPMissingProgramNCA;
             return;
         }
         if (IsTree(selected)) {
+            if (program_index != 0) {
+                status = ResultStatus::ErrorNSPMissingProgramNCA;
+                return;
+            }
             OpenTree(pi);
         } else {
             OpenNative(pi, program_index);

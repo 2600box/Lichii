@@ -223,3 +223,17 @@ TEST_CASE("NX: upstream conformance fixtures", "[core][nx]") {
     Loader::AppLoader_NX corrupted{system, OpenFixture("corrupted_block_payload.nx")};
     CHECK(corrupted.VerifyIntegrity({}) == Loader::ResultStatus::ErrorIntegrityVerificationFailed);
 }
+
+TEST_CASE("NX: the program index selects a secondary program", "[core][nx]") {
+    ScopedSystemTestContext environment;
+    Core::System system;
+    constexpr u64 Main = 0x0100000000000001;
+    for (const auto& [index, expected] :
+         {std::pair<std::size_t, u64>{0, Main}, std::pair<std::size_t, u64>{1, Main + 1}}) {
+        INFO(index);
+        Loader::AppLoader_NX loader{system, OpenFixture("multiple_programs.nx"), Main, index};
+        u64 program_id{};
+        REQUIRE(loader.ReadProgramId(program_id) == Loader::ResultStatus::Success);
+        CHECK(program_id == expected);
+    }
+}
