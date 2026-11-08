@@ -36,6 +36,12 @@ inline std::atomic<u64> g_tickwork_skipped{0};
 /// verify mode, the [gpu_dirty_memory] test runs both ways.
 inline bool gather{};
 
+/// A small uniform buffer bound at a new address keeps no CPU copy until that address comes back
+/// (Quixomatic ed4efcbc76). It only compares fewer binds, so no verify mode.
+inline bool ubo_newaddr{};
+
+inline std::atomic<u64> g_ubo_newaddr_uncopied{0};
+
 inline void ReadSwitches() {
     const auto read = [](const char* name) {
         const char* const value = std::getenv(name);
@@ -44,8 +50,9 @@ inline void ReadSwitches() {
     vstream = read("EDEN_NX2_EGLA66_VSTREAM");
     tickwork = read("EDEN_NX2_EGLA66_TICKWORK");
     gather = read("EDEN_NX2_EGLA66_GATHER");
-    LOG_INFO(HW_GPU, "EGLA66 sweep 3 gates: vstream {}, tickwork {}, gather {}", vstream,
-             tickwork, gather);
+    ubo_newaddr = read("EDEN_NX2_EGLA66_UBO_NEWADDR");
+    LOG_INFO(HW_GPU, "EGLA66 sweep 3 gates: vstream {}, tickwork {}, gather {}, ubo-newaddr {}",
+             vstream, tickwork, gather, ubo_newaddr);
 }
 
 /// For counters one thread writes: a plain load and store, not a locked add.
@@ -55,7 +62,7 @@ inline void Count(std::atomic<u64>& counter, u64 amount = 1) {
 
 /// The split's back thread, once per loop: logs what the enabled candidates did in the last 10 s.
 inline void Report() {
-    if (!vstream && !tickwork) {
+    if (!vstream && !tickwork && !ubo_newaddr) {
         return;
     }
     static u32 calls{};
@@ -84,6 +91,13 @@ inline void Report() {
         static u64 skipped{};
         LOG_INFO(HW_GPU, "EGLA66 tickwork: {} ticks returned without the mutex in 10 s",
                  take(g_tickwork_skipped, skipped));
+    }
+    if (ubo_newaddr) {
+        static u64 uncopied{};
+        LOG_INFO(HW_GPU,
+                 "EGLA66 ubo-newaddr: {} small uniform binds at a new address kept no CPU copy in "
+                 "10 s",
+                 take(g_ubo_newaddr_uncopied, uncopied));
     }
 }
 
