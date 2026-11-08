@@ -2458,13 +2458,15 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
         spv_module.SetObjectNameEXT(name.c_str());
     }
     Common::ThreadWorker* const thread_worker{build_in_parallel ? &workers : nullptr};
-    const Shader::Info info{program.info};
+    const Shader::Info info{std::move(program.info)};
     s64 trace_held = trace_ours;
-    if (LoadTrace::FreeIrEarly()) {
+    if (!thread_worker) {
+        // The driver compiles on this thread. Precache and boot workers would otherwise hold their
+        // IR through the compile, up to hundreds of MiB for one large shader.
         program = {};
+        code = {};
         pools.block.Free();
         pools.inst.Free();
-        code = {};
         trace_held = static_cast<s64>(pools.inst.CapacityBytes() + pools.block.CapacityBytes() +
                                       pools.flow_block.CapacityBytes());
     }

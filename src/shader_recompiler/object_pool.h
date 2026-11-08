@@ -32,7 +32,7 @@ public:
         return objects * sizeof(Storage);
     }
 
-    // TEST ONLY (EGLA-80): destroys the objects and frees their memory
+    /// Destroys the objects and returns their memory; ReleaseContents keeps it for reuse
     void Free() {
         chunks.clear();
         chunks.shrink_to_fit();
