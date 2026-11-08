@@ -125,8 +125,11 @@ class PipelineBuild {
     };
 
 public:
-    PipelineBuild(Common::ThreadWorker* workers, std::function<void()> task)
-        : state{std::make_shared<State>(std::move(task))} {
+    /// @param drop_unstarted  Destroying the build before a worker started it drops the task
+    ///                        instead of running it on the destroying thread (optional builds).
+    PipelineBuild(Common::ThreadWorker* workers, std::function<void()> task,
+                  bool drop_unstarted_ = false)
+        : state{std::make_shared<State>(std::move(task))}, drop_unstarted{drop_unstarted_} {
         if (workers) {
             workers->QueueWork([state = state] { state->Run(); });
         } else {
@@ -135,6 +138,13 @@ public:
     }
 
     ~PipelineBuild() {
+        if (drop_unstarted && !state->claimed.exchange(true)) {
+            state->task = {};
+            std::scoped_lock lock{state->mutex};
+            state->complete.store(true, std::memory_order_release);
+            state->condition.notify_all();
+            return;
+        }
         Wait(true);
     }
 
@@ -172,6 +182,7 @@ public:
 
 private:
     std::shared_ptr<State> state;
+    bool drop_unstarted{};
 };
 
 } // namespace Vulkan

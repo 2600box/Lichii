@@ -344,6 +344,27 @@ void ReportTextureMemo() {
                  hits, misses, g_memo_mismatches.load(std::memory_order_relaxed));
     }
 }
+
+/// EDEN_NX2_GPL_OPTIMIZE_THREADS=<n> (default 1): the optimized links of EDEN_NX2_GPL_OPTIMIZE run
+/// on their own pool of n low-priority threads, so they don't slow down the builds that draws
+/// wait for. 0 runs them on the shared build workers, as before.
+Common::ThreadWorker* GplOptimizeWorkers(Common::ThreadWorker* shared) {
+    static const size_t threads = [] {
+        const char* const value = std::getenv("EDEN_NX2_GPL_OPTIMIZE_THREADS");
+        const size_t count =
+            value != nullptr && *value != 0 ? std::strtoul(value, nullptr, 10) : size_t{1};
+        LOG_INFO(Render_Vulkan, "Nx2Perf gpl: optimized links on {}", count == 0
+                                    ? std::string{"the shared build workers"}
+                                    : fmt::format("{} low-priority thread(s)", count));
+        return count;
+    }();
+    if (threads == 0) {
+        return shared;
+    }
+    static Common::ThreadWorker workers(threads, "VkGplOptimize", {},
+                                        Common::ThreadPlacement::Background);
+    return &workers;
+}
 } // Anonymous namespace
 
 std::chrono::nanoseconds GraphicsPipeline::TakeHoldTime() noexcept {
@@ -616,12 +637,16 @@ GraphicsPipeline::GraphicsPipeline(
                 }
                 if (made && !libraries_only && GplOptimizeEnabled() &&
                     device.CanFastLinkGraphicsLibraries() && build_workers) {
-                    // Optimized link on a worker, swapped in at a later draw (ConfigureDraw)
-                    // like the fast first build's optimized pipeline.
-                    optimized_build.emplace(build_workers, [this, render_pass] {
-                        optimized_pipeline = LinkLibraries(render_pass, true);
-                        optimized_ready.store(true, std::memory_order_release);
-                    });
+                    // Optimized link on its own low-priority pool, swapped in at a later draw
+                    // (ConfigureDraw) like the fast first build's optimized pipeline. Dropped if
+                    // the pipeline goes away before the link started.
+                    optimized_build.emplace(
+                        GplOptimizeWorkers(build_workers),
+                        [this, render_pass] {
+                            optimized_pipeline = LinkLibraries(render_pass, true);
+                            optimized_ready.store(true, std::memory_order_release);
+                        },
+                        true);
                 }
                 // The libraries hold the shaders now (the fallback has used them too).
                 for (vk::ShaderModule& module : spv_modules) {
