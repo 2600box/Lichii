@@ -227,12 +227,9 @@ std::vector<std::filesystem::path> RelatedPackages(const FileSys::VirtualFilesys
     for (const u64 id : own) {
         bases.push_back(FileSys::GetBaseTitleID(id));
     }
-    std::error_code ec;
-    for (const auto& entry : std::filesystem::directory_iterator(package.parent_path(), ec)) {
-        const auto& path = entry.path();
+    for (const auto& path : FrontendCommon::NxArchive::RegularFiles(package.parent_path())) {
         const auto utf8 = ToUtf8(path);
-        if (!entry.is_regular_file(ec) || path == package ||
-            !(HasExtension(utf8, ".nsp") || HasExtension(utf8, ".xci"))) {
+        if (path == package || !(HasExtension(utf8, ".nsp") || HasExtension(utf8, ".xci"))) {
             continue;
         }
         // A name with another game's ID is skipped without opening the file.
@@ -409,7 +406,7 @@ void NxTools::ConvertToNx(const std::string& game_path) {
     }
     const auto output = FrontendCommon::NxArchive::WithNxExtension(ToUtf8(chosen));
     chosen = QString::fromStdString(output);
-    if (std::filesystem::exists(ToPath(output))) {
+    if (std::error_code ec; std::filesystem::exists(ToPath(output), ec)) {
         QMessageBox::warning(parent_widget, title,
                              tr("The archive already exists:\n%1").arg(chosen));
         return;
@@ -868,7 +865,7 @@ void NxTools::ReplyOriginal(Job& job, const QString& text) {
     QString label;
     if (originals.size() > 1) {
         label = tr("Move the %1 original packages to the Recycle Bin").arg(originals.size());
-    } else if (std::filesystem::is_directory(originals.front())) {
+    } else if (std::error_code ec; std::filesystem::is_directory(originals.front(), ec)) {
         label = tr("Move the original folder to the Recycle Bin:\n%1").arg(names.front());
     } else {
         label = tr("Move the original game to the Recycle Bin:\n%1").arg(names.front());

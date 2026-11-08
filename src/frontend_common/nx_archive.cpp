@@ -21,4 +21,16 @@ std::string WithNxExtension(std::string path) {
     return path;
 }
 
+std::vector<std::filesystem::path> RegularFiles(const std::filesystem::path& directory) {
+    std::vector<std::filesystem::path> files;
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(directory, ec), end; !ec && it != end;
+         it.increment(ec)) {
+        if (std::error_code type_ec; it->is_regular_file(type_ec)) {
+            files.push_back(it->path());
+        }
+    }
+    return files;
+}
+
 } // namespace FrontendCommon::NxArchive
