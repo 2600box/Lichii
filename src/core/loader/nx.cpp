@@ -714,10 +714,17 @@ AppLoader_NX::AppLoader_NX(Core::System& system, FileSys::VirtualFile file_, u64
 AppLoader_NX::~AppLoader_NX() = default;
 
 FileType AppLoader_NX::IdentifyType(const FileSys::VirtualFile& nx_file) {
-    std::array<u8, 4> magic{};
-    if (nx_file != nullptr && nx_file->Read(magic.data(), magic.size()) == magic.size() &&
-        std::memcmp(magic.data(), "NXAR", 4) == 0) {
-        return FileType::NX;
+    // Two 4 KiB header slots; the reader recovers an archive whose first slot is damaged.
+    constexpr std::size_t PageSize = 4096;
+    if (nx_file == nullptr || nx_file->GetSize() < 2 * PageSize) {
+        return FileType::Error;
+    }
+    for (const std::size_t page : {std::size_t{0}, PageSize}) {
+        std::array<u8, 4> magic{};
+        if (nx_file->Read(magic.data(), magic.size(), page) == magic.size() &&
+            std::memcmp(magic.data(), "NXAR", 4) == 0) {
+            return FileType::NX;
+        }
     }
     return FileType::Error;
 }
