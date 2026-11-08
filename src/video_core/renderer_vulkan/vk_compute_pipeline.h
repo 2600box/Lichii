@@ -17,6 +17,7 @@
 #include "common/common_types.h"
 #include "common/thread_worker.h"
 #include "shader_recompiler/shader_info.h"
+#include "video_core/renderer_vulkan/pipeline_build.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_descriptor_buffer.h"
@@ -41,10 +42,12 @@ public:
                              DescriptorPool& descriptor_pool,
                              GuestDescriptorQueue& guest_descriptor_queue,
                              DescriptorBufferRing& descriptor_buffer_ring,
-                             Common::ThreadWorker* thread_worker,
+                             const PipelineBuildQueue& build_queue,
                              PipelineStatistics* pipeline_statistics,
                              VideoCore::ShaderNotify* shader_notify, const Shader::Info& info,
                              vk::ShaderModule spv_module, u64 shader_hash);
+
+    ~ComputePipeline();
 
     ComputePipeline& operator=(ComputePipeline&&) noexcept = delete;
     ComputePipeline(ComputePipeline&&) noexcept = delete;
@@ -93,7 +96,12 @@ public:
 
     /// Whether no build of this pipeline is left queued on a worker thread, which holds it
     [[nodiscard]] bool IsBuildTaskDone() const noexcept {
-        return build_task_done.load(std::memory_order::acquire);
+        return jobs ? job.Ready() : build_task_done.load(std::memory_order::acquire);
+    }
+
+    /// Builds it on this thread, for a pipeline made with PipelineBuildQueue::owner_builds
+    void Build() {
+        RunBuild();
     }
 
 private:
@@ -128,6 +136,9 @@ private:
     std::condition_variable build_condvar;
     std::mutex build_mutex;
     std::atomic_bool is_built{false};
+    /// Shader cache v2: the job that builds it (PipelineBuildQueue::jobs)
+    VideoCommon::ShaderJobScheduler* jobs{};
+    VideoCommon::ShaderJobHandle job;
 };
 
 } // namespace Vulkan

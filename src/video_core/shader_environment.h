@@ -8,6 +8,7 @@
 
 #include <array>
 #include <filesystem>
+#include <functional>
 #include <iosfwd>
 #include <limits>
 #include <memory>
@@ -377,6 +378,29 @@ void ReadPipelinePayload(
     std::span<const u8> payload,
     Common::UniqueFunction<void, std::istream&, FileEnvironment>& load_compute,
     Common::UniqueFunction<void, std::istream&, std::vector<FileEnvironment>>& load_graphics);
+
+/// New code for the native program of an environment in a cache record (ReplacePipelineCode)
+struct NativeCodeReplacement {
+    std::span<const u64> code;
+    u32 texture_bound; ///< The environment's texture bound buffer with this code
+};
+
+/// Answers, for the shader hash (NativeShaderHash) of a native environment's code and its texture
+/// bound buffer, the code to replace it with, or nothing to keep it
+using NativeCodeReplacer =
+    std::function<std::optional<NativeCodeReplacement>(u64 shader_hash, u32 texture_bound)>;
+
+struct ReplacedPipelineCode {
+    std::vector<u8> payload;
+    /// For each environment, the shader hash of its code before and after (equal when kept)
+    std::vector<std::pair<u64, u64>> shader_hashes;
+};
+
+/// A record (SerializePipelinePayload) with the code of its native environments replaced as
+/// `replace` answers, and every other byte kept, the key included. Throws std::ios_base::failure
+/// when the record is damaged, as ReadPipelinePayload does.
+[[nodiscard]] ReplacedPipelineCode ReplacePipelineCode(std::span<const u8> payload,
+                                                       const NativeCodeReplacer& replace);
 
 /// Reads the records of a cache file in order, up to the first damaged one, without its lock and
 /// without ever changing or removing the file. False when it isn't a cache of this version.

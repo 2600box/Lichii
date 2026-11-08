@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <deque>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -205,6 +206,12 @@ private:
     ShaderJobStats stats;
     std::vector<std::thread> threads;
 };
+
+/// Calls `function` with every index below `count`, as NeedNow jobs that the calling thread helps
+/// run, and returns once every call returned. Calls cancelled by a shutdown are left out.
+/// `function` must not throw.
+void ParallelFor(ShaderJobScheduler& scheduler, size_t count,
+                 const std::function<void(size_t)>& function);
 
 /// Given to a CPU stage while it runs.
 class ShaderJobContext {

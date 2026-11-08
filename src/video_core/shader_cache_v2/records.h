@@ -70,6 +70,10 @@ struct ProgramRecord {
 /// that fails.
 [[nodiscard]] std::shared_ptr<LoweredNativeCode> RelowerProgram(const ProgramRecord& record);
 
+/// The record of a program lowered again by this build (RelowerProgram), with its stamp. Nullopt
+/// for a record without native instructions or one that doesn't lower.
+[[nodiscard]] std::optional<ProgramRecord> RelowerProgramRecord(const ProgramRecord& record);
+
 /// The record key of a program: a hash of everything its lowering depends on except the build.
 /// The address of the code is part of it only where the lowering puts it into the code.
 [[nodiscard]] u64 ProgramKey(const ProgramRecord& record);

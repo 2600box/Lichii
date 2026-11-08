@@ -11,6 +11,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -500,8 +501,10 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
                                 !DriverCachesPipelines(device_)},
       num_pipeline_workers{device.HasBrokenParallelShaderCompiling() ? 1ULL
                                                                      : GetTotalPipelineWorkers()},
-      emission_budget{num_pipeline_workers},
-      workers(num_pipeline_workers, "VkPipelineBuilder", {}, Common::ThreadPlacement::Background),
+      emission_budget{VideoCommon::ShaderCacheV2::Enabled() ? std::numeric_limits<size_t>::max()
+                                                            : num_pipeline_workers},
+      workers(VideoCommon::ShaderCacheV2::Enabled() ? 0 : num_pipeline_workers, "VkPipelineBuilder",
+              {}, Common::ThreadPlacement::Background),
       serialization_thread(1, "VkPipelineSerialization", {}, Common::ThreadPlacement::Background),
       background_pipelines{64, 16 * 1024 * 1024, device.HasBrokenParallelShaderCompiling()} {
     const auto& float_control{device.FloatControlProperties()};
@@ -722,6 +725,20 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         device.SupportsProvokingVertexLastMode();
     dynamic_features.has_provoking_vertex_tf_preserve =
         device.SupportsTransformFeedbackProvokingVertexPreservation();
+
+    if (VideoCommon::ShaderCacheV2::Enabled()) {
+        const size_t cpu_threads = GetTotalPipelineWorkers();
+        const size_t driver_threads =
+            device.HasBrokenParallelShaderCompiling()
+                ? 1
+                : std::min(cpu_threads,
+                           std::max<size_t>(std::thread::hardware_concurrency() / 2, 2));
+        shader_jobs.emplace(VideoCommon::ShaderJobConfig{
+            .cpu_threads = cpu_threads,
+            .driver_threads = driver_threads,
+            .name = "VkShader",
+        });
+    }
 }
 
 namespace {
@@ -754,6 +771,28 @@ constexpr size_t MaxPipelinesWithoutUsedList = 3000;
 // for a later precache.
 constexpr size_t PrecacheCaptureLimit = size_t{1} << 30;
 
+// Shader cache v2: the records of the background prebuild the queue may hold, by payload bytes
+constexpr u64 PrebuildCaptureLimit = u64{256} << 20;
+
+// Shader cache v2: bytes a job's stage is taken to hold for the scheduler's budget. EGLA-80
+// measured ~100 MiB of commit per driver compile in flight (24 at once held ~2.5 GB more than
+// idle). A translation's IR pools grow with the program; first guesses until measured.
+constexpr u64 DriverCompileBytes = u64{96} << 20;
+
+u64 TranslationBytes(u64 record_bytes) {
+    return std::clamp<u64>(record_bytes * 512, u64{8} << 20, u64{512} << 20);
+}
+
+u64 IrBytes(std::span<const Shader::IR::Program> programs) {
+    u64 bytes{};
+    for (const Shader::IR::Program& program : programs) {
+        for (const Shader::IR::Block* const block : program.blocks) {
+            bytes += sizeof(Shader::IR::Block) + block->Instructions().size() * sizeof(Shader::IR::Inst);
+        }
+    }
+    return bytes;
+}
+
 // EDEN_NX2_PRELOAD_ALL_PIPELINES=1 builds every cached pipeline at boot, as before.
 bool PreloadAllPipelines() {
     static const bool all = [] {
@@ -766,6 +805,11 @@ bool PreloadAllPipelines() {
 
 PipelineCache::~PipelineCache() {
     serialization_stop.request_stop();
+    StopBackgroundJobs();
+    if (shader_jobs) {
+        // The pipelines' builds end before the driver pipeline cache they build into goes.
+        shader_jobs->Shutdown();
+    }
     background_pipelines.Stop();
     workers.WaitForRequests();
     serialization_thread.WaitForRequests();
@@ -981,6 +1025,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         return;
     }
     if (!pipeline_cache_filename.empty()) {
+        StopBackgroundJobs();
         background_pipelines.Stop();
         workers.WaitForRequests();
         serialization_thread.WaitForRequests();
@@ -1002,7 +1047,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         return;
     }
     namespace CacheV2 = VideoCommon::ShaderCacheV2;
-    std::optional<CacheV2::LogFile> log_v2;
+    std::shared_ptr<CacheV2::LogFile> log_v2;
     if (CacheV2::Enabled()) {
         pipeline_cache_filename = base_dir / CacheV2::FileName;
         used_pipelines_filename.clear();
@@ -1020,7 +1065,12 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         cache_v2 = std::make_unique<CacheV2::Cache>(pipeline_cache_filename);
         shader_cache_v2 = cache_v2.get();
         // Without the lock: another emulator's appends are complete records or a cut-off tail.
-        log_v2.emplace(CacheV2::ReadLogFile(pipeline_cache_filename));
+        // The payload hashes are checked on the shader job workers.
+        log_v2 = std::make_shared<CacheV2::LogFile>(CacheV2::ReadLogFile(
+            pipeline_cache_filename,
+            [this](size_t count, const std::function<void(size_t)>& task) {
+                VideoCommon::ParallelFor(*shader_jobs, count, task);
+            }));
         const CacheV2::LogStats& stats = log_v2->parsed.stats;
         LOG_INFO(Render_Vulkan,
                  "Shader cache v2: {} bytes, {} live records, {} superseded, {} tombstones, {} "
@@ -1101,6 +1151,11 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         vulkan_pipeline_cache =
             LoadVulkanPipelineCache(vulkan_pipeline_cache_filename, CACHE_VERSION);
     }
+    if (log_v2) {
+        LoadPipelinesV2(title_id, std::move(log_v2), stop_loading, callback, load_begin, precache,
+                        std::move(precached_pipelines));
+        return;
+    }
 
     struct {
         std::mutex mutex;
@@ -1121,14 +1176,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         compute_envs;
     // Where each record read begins and ends, to remove those the load never chooses.
     u64 record_begin{VideoCommon::PipelineCacheMagic.size() + sizeof(CACHE_VERSION)};
-    // In v2 the kind and key of each record read, which a record's index stands for
-    std::vector<std::pair<CacheV2::RecordKind, u64>> records_v2;
     const auto read_record{[&](std::istream& file) {
-        if (log_v2) {
-            const u64 index{records_v2.size() - 1};
-            return VideoCommon::PipelineRecord{
-                .begin = index, .end = index + 1, .hash = records_v2.back().second};
-        }
         const auto record{VideoCommon::ReadPipelineRecord(file, record_begin)};
         record_begin = record.end;
         return record;
@@ -1194,31 +1242,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             graphics_duplicates.push_back({record, first->second.first});
         }
 
-        if ((key.state.extended_dynamic_state != 0) !=
-                dynamic_features.has_extended_dynamic_state ||
-            (key.state.extended_dynamic_state_2 != 0) !=
-                dynamic_features.has_extended_dynamic_state_2 ||
-            (key.state.extended_dynamic_state_2_logic_op != 0) !=
-                dynamic_features.has_extended_dynamic_state_2_logic_op ||
-            (key.state.extended_dynamic_state_3_blend != 0) !=
-                dynamic_features.has_extended_dynamic_state_3_blend ||
-            (key.state.extended_dynamic_state_3_enables != 0) !=
-                dynamic_features.has_extended_dynamic_state_3_enables ||
-            (key.state.color_write_enable_dynamic != 0) !=
-                dynamic_features.has_color_write_enable ||
-            (key.state.dynamic_vertex_input != 0) !=
-                dynamic_features.has_dynamic_vertex_input) {
-            return;
-        }
-
-        const bool key_requests_provoking_last = key.state.provoking_vertex_last != 0;
-        if (key_requests_provoking_last && !dynamic_features.has_provoking_vertex_last_mode) {
-            return;
-        }
-
-        const bool key_uses_transform_feedback = key.state.xfb_enabled != 0;
-        if (key_uses_transform_feedback && key_requests_provoking_last &&
-            !dynamic_features.has_provoking_vertex_tf_preserve) {
+        if (!KeyFitsDevice(key)) {
             return;
         }
 
@@ -1301,54 +1325,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         });
         ++state.total;
     }};
-    if (log_v2) {
-        Common::UniqueFunction<void, std::istream&, FileEnvironment> compute_v2{
-            [&](std::istream& file, FileEnvironment env) {
-                if (records_v2.back().first != CacheV2::RecordKind::Compute) {
-                    throw std::ios_base::failure("Compute pipeline in another kind of record");
-                }
-                load_compute(file, std::move(env));
-            }};
-        Common::UniqueFunction<void, std::istream&, std::vector<FileEnvironment>> graphics_v2{
-            [&](std::istream& file, std::vector<FileEnvironment> envs) {
-                if (records_v2.back().first != CacheV2::RecordKind::Graphics) {
-                    throw std::ios_base::failure("Graphics pipeline in another kind of record");
-                }
-                load_graphics(file, std::move(envs));
-            }};
-        try {
-            for (const CacheV2::LogRecord& record : log_v2->parsed.live) {
-                if (stop_loading.stop_requested()) {
-                    break;
-                }
-                if (record.kind == CacheV2::RecordKind::Program) {
-                    if (const auto stamp = CacheV2::ProgramStamp(record.payload)) {
-                        cache_v2->AddProgram(record.key, *stamp);
-                    }
-                    continue;
-                }
-                if (record.kind != CacheV2::RecordKind::Graphics &&
-                    record.kind != CacheV2::RecordKind::Compute) {
-                    continue;
-                }
-                records_v2.emplace_back(record.kind, record.key);
-                try {
-                    VideoCommon::ReadPipelinePayload(record.payload, compute_v2, graphics_v2);
-                } catch (const std::ios_base::failure& e) {
-                    // Intact, but not a record this build reads: it goes.
-                    LOG_ERROR(Common_Filesystem, "Shader cache v2 record {:016x}: {}", record.key,
-                              e.what());
-                    cache_v2->Writer().Append(CacheV2::RecordKind::Tombstone, record.key,
-                                              CacheV2::TombstonePayload(record.kind));
-                }
-            }
-        } catch (const std::bad_alloc& e) {
-            LOG_ERROR(Common_Filesystem, "Stopped loading shader cache v2: {}", e.what());
-        }
-    } else {
-        VideoCommon::LoadPipelines(stop_loading, pipeline_cache_filename, CACHE_VERSION,
-                                   load_compute, load_graphics);
-    }
+    VideoCommon::LoadPipelines(stop_loading, pipeline_cache_filename, CACHE_VERSION, load_compute,
+                               load_graphics);
     for (auto& [key, candidates] : compute_envs) {
         OrderComputeTranslations(candidates);
         queue_compute(key, std::move(candidates));
@@ -1382,24 +1360,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     for (const auto& duplicate : graphics_duplicates) {
         superseded_bytes += duplicate.record.end - duplicate.record.begin;
     }
-    if (log_v2) {
-        // The records the load never chooses go by tombstones, and the log is compacted once a
-        // quarter of it is records no load reads.
-        if (!stop_loading.stop_requested()) {
-            for (const auto* removed : {&state.incomplete, &state.copies}) {
-                for (const VideoCommon::PipelineRecord& record : *removed) {
-                    const auto& [kind, key] = records_v2[record.begin];
-                    cache_v2->Writer().Append(CacheV2::RecordKind::Tombstone, key,
-                                              CacheV2::TombstonePayload(kind));
-                }
-            }
-            const CacheV2::LogStats& stats = log_v2->parsed.stats;
-            if (stats.dead_bytes != 0 && stats.dead_bytes >= stats.file_size / 4) {
-                cache_v2->Writer().Compact();
-            }
-        }
-        log_v2.reset();
-    } else if (!stop_loading.stop_requested() &&
+    if (!stop_loading.stop_requested() &&
         (!state.incomplete.empty() ||
          (superseded_bytes != 0 && superseded_bytes >= record_begin / 8))) {
         auto removed{std::move(state.incomplete)};
@@ -1461,6 +1422,531 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     }
 }
 
+bool PipelineCache::KeyFitsDevice(const GraphicsPipelineCacheKey& key) const {
+    if ((key.state.extended_dynamic_state != 0) != dynamic_features.has_extended_dynamic_state ||
+        (key.state.extended_dynamic_state_2 != 0) !=
+            dynamic_features.has_extended_dynamic_state_2 ||
+        (key.state.extended_dynamic_state_2_logic_op != 0) !=
+            dynamic_features.has_extended_dynamic_state_2_logic_op ||
+        (key.state.extended_dynamic_state_3_blend != 0) !=
+            dynamic_features.has_extended_dynamic_state_3_blend ||
+        (key.state.extended_dynamic_state_3_enables != 0) !=
+            dynamic_features.has_extended_dynamic_state_3_enables ||
+        (key.state.color_write_enable_dynamic != 0) != dynamic_features.has_color_write_enable ||
+        (key.state.dynamic_vertex_input != 0) != dynamic_features.has_dynamic_vertex_input) {
+        return false;
+    }
+    const bool key_requests_provoking_last = key.state.provoking_vertex_last != 0;
+    if (key_requests_provoking_last && !dynamic_features.has_provoking_vertex_last_mode) {
+        return false;
+    }
+    const bool key_uses_transform_feedback = key.state.xfb_enabled != 0;
+    return !key_uses_transform_feedback || !key_requests_provoking_last ||
+           dynamic_features.has_provoking_vertex_tf_preserve;
+}
+
+PipelineBuildQueue PipelineCache::BuildQueue(bool build_in_parallel, u64 cpu_bytes) {
+    if (!shader_jobs) {
+        return {.workers = build_in_parallel ? &workers : nullptr};
+    }
+    if (!build_in_parallel) {
+        return {.owner_builds = true};
+    }
+    return {.jobs = &*shader_jobs, .cpu_bytes = cpu_bytes, .driver_bytes = DriverCompileBytes};
+}
+
+void PipelineCache::StopBackgroundJobs() {
+    scheduled_prebuild.reset();
+    if (revalidation) {
+        shader_jobs->Cancel(*revalidation);
+        revalidation->Wait();
+        revalidation.reset();
+    }
+}
+
+std::unique_ptr<GraphicsPipeline> PipelineCache::TranslateCachedGraphics(
+    std::span<const u8> payload, const GraphicsPipelineCacheKey& key,
+    PipelineStatistics* statistics, bool& incomplete) {
+    std::vector<FileEnvironment> envs;
+    Common::UniqueFunction<void, std::istream&, FileEnvironment> read_compute{
+        [](std::istream&, FileEnvironment) {
+            throw std::ios_base::failure("Compute pipeline in another kind of record");
+        }};
+    Common::UniqueFunction<void, std::istream&, std::vector<FileEnvironment>> read_graphics{
+        [&](std::istream& file, std::vector<FileEnvironment> read) {
+            GraphicsPipelineCacheKey read_key;
+            file.read(reinterpret_cast<char*>(&read_key), sizeof(read_key));
+            VideoCommon::CheckGraphicsRecord(read_key.unique_hashes, read.size());
+            envs = std::move(read);
+        }};
+    VideoCommon::ReadPipelinePayload(payload, read_compute, read_graphics);
+    ShaderPools pools;
+    boost::container::static_vector<Shader::Environment*, Maxwell::MaxShaderProgram> env_ptrs;
+    for (auto& env : envs) {
+        env_ptrs.push_back(&env);
+    }
+    auto pipeline{CreateGraphicsPipeline(pools, key, MakeSpan(env_ptrs), statistics, false)};
+    incomplete = !pipeline && std::ranges::any_of(envs, [this](const FileEnvironment& env) {
+        return env.LacksRecordedValue(host_info.EnvironmentReadProperties());
+    });
+    return pipeline;
+}
+
+void PipelineCache::LoadPipelinesV2(u64 title_id,
+                                    std::shared_ptr<const VideoCommon::ShaderCacheV2::LogFile> log,
+                                    std::stop_token stop_loading,
+                                    const VideoCore::DiskResourceLoadCallback& callback,
+                                    std::chrono::steady_clock::time_point load_begin,
+                                    bool precache, std::unordered_set<u64> precached_pipelines) {
+    namespace CacheV2 = VideoCommon::ShaderCacheV2;
+    namespace StutterTrace = VideoCommon::StutterTrace;
+    using CacheV2::RecordKind;
+    using VideoCommon::ShaderJobPriority;
+    auto& jobs = *shader_jobs;
+    const u32 read_properties = host_info.EnvironmentReadProperties();
+
+    // The boot builds (Soon), which Loading Shaders waits for, the background prebuild and the
+    // revalidation of other builds' programs (Background). A stopped load cancels all three; the
+    // workers stay for the game.
+    const VideoCommon::ShaderJobBatch boot = jobs.CreateBatch();
+    scheduled_prebuild.emplace(jobs, PrebuildCaptureLimit);
+    revalidation.emplace(jobs.CreateBatch());
+    const std::stop_callback cancel_load{
+        stop_loading, [&jobs, boot, prebuild = scheduled_prebuild->Batch(),
+                       revalidating = *revalidation] {
+            jobs.Cancel(boot);
+            jobs.Cancel(prebuild);
+            jobs.Cancel(revalidating);
+        }};
+
+    struct {
+        std::mutex mutex;
+        size_t total{};
+        size_t built{};
+        bool has_loaded{};
+        std::unique_ptr<PipelineStatistics> statistics;
+        /// Records the load never chooses, as in the old cache; begin is the index in records
+        std::vector<VideoCommon::PipelineRecord> incomplete;
+        std::vector<std::pair<u64, VideoCommon::PipelineRecord>> incomplete_graphics;
+        std::vector<VideoCommon::PipelineRecord> copies;
+    } state;
+    if (device.IsKhrPipelineExecutablePropertiesEnabled()) {
+        state.statistics = std::make_unique<PipelineStatistics>(device);
+    }
+    // Under state.mutex
+    const auto built_one = [&state, &callback] {
+        ++state.built;
+        if (state.has_loaded) {
+            callback(VideoCore::LoadCallbackStage::Build, state.built, state.total);
+        }
+    };
+    // The graphics and compute records read, by the index a PipelineRecord's begin stands for
+    std::vector<const CacheV2::LogRecord*> records;
+    const auto pipeline_record = [&records](size_t index) {
+        return VideoCommon::PipelineRecord{.begin = index, .end = index + 1, .hash = records[index]->key};
+    };
+    // Intact, but not a record this build reads: it goes.
+    const auto unreadable = [this](const CacheV2::LogRecord& record, const char* reason) {
+        LOG_ERROR(Common_Filesystem, "Shader cache v2 record {:016x}: {}", record.key, reason);
+        cache_v2->Writer().Append(RecordKind::Tombstone, record.key,
+                                  CacheV2::TombstonePayload(record.kind));
+    };
+
+    // One pass over the records without reading them, which the jobs do in parallel: all
+    // translations of a compute key go to one job, graphics records by their key's hash.
+    ::Common::unordered_map<ComputePipelineCacheKey, std::vector<size_t>> compute_keys;
+    std::vector<std::pair<size_t, GraphicsPipelineCacheKey>> boot_graphics;
+    struct PrebuildRecord {
+        GraphicsPipelineCacheKey key;
+        std::vector<u8> payload;
+    };
+    std::vector<PrebuildRecord> prebuild;
+    u64 prebuild_bytes = 0;
+    std::vector<PrecacheJob> precache_graphics;
+    u64 precache_capture_bytes = 0;
+    std::vector<CacheV2::ProgramRecord> stale_programs;
+    size_t graphics_records = 0;
+    size_t compute_records = 0;
+    size_t skipped_pipelines = 0;
+    size_t queued_graphics = 0;
+    for (const CacheV2::LogRecord& record : log->parsed.live) {
+        if (stop_loading.stop_requested()) {
+            break;
+        }
+        if (record.kind == RecordKind::Program) {
+            const auto stamp = CacheV2::ProgramStamp(record.payload);
+            if (!stamp) {
+                continue;
+            }
+            cache_v2->AddProgram(record.key, *stamp);
+            if (*stamp != CacheV2::LoweringStamp()) {
+                if (auto program = CacheV2::DecodeProgram(record.payload)) {
+                    stale_programs.push_back(std::move(*program));
+                }
+            }
+            continue;
+        }
+        if (record.kind == RecordKind::Compute) {
+            ++compute_records;
+            const auto key = PipelineRecordKey<ComputePipelineCacheKey>(record.payload);
+            if (!key) {
+                unreadable(record, "Compute pipeline record without a key");
+                continue;
+            }
+            compute_keys[*key].push_back(records.size());
+            records.push_back(&record);
+            continue;
+        }
+        if (record.kind != RecordKind::Graphics) {
+            continue;
+        }
+        ++graphics_records;
+        const auto key = PipelineRecordKey<GraphicsPipelineCacheKey>(record.payload);
+        if (!key) {
+            unreadable(record, "Graphics pipeline record without a key");
+            continue;
+        }
+        const size_t index = records.size();
+        records.push_back(&record);
+        if (!KeyFitsDevice(*key)) {
+            continue;
+        }
+        const u64 hash = key->Hash();
+        if (!disk_pipelines.insert(hash).second) {
+            continue;
+        }
+        if (PreloadAllPipelines() || (used_pipelines.empty()
+                                          ? queued_graphics < MaxPipelinesWithoutUsedList
+                                          : used_pipelines.contains(hash))) {
+            ++queued_graphics;
+            boot_graphics.emplace_back(index, *key);
+            continue;
+        }
+        ++skipped_pipelines;
+        const u64 bytes = record.payload.size();
+        std::vector<u8> payload(record.payload.begin(), record.payload.end());
+        if (precache && !precached_pipelines.contains(hash) &&
+            bytes <= PrecacheCaptureLimit - precache_capture_bytes) {
+            precache_capture_bytes += bytes;
+            precache_graphics.push_back({
+                .graphics_hash = hash,
+                .translate = [this, key = *key, payload = std::move(payload)]()
+                    -> Common::UniqueFunction<bool> {
+                    bool incomplete{};
+                    auto pipeline = TranslateCachedGraphics(payload, key, nullptr, incomplete);
+                    if (!pipeline) {
+                        return {};
+                    }
+                    return [pipeline = std::move(pipeline)] {
+                        pipeline->Build();
+                        return !pipeline->Failed();
+                    };
+                },
+                .cpu_bytes = TranslationBytes(bytes),
+            });
+        } else if (bytes <= PrebuildCaptureLimit - prebuild_bytes) {
+            prebuild_bytes += bytes;
+            prebuild.push_back({*key, std::move(payload)});
+        }
+    }
+
+    for (auto& [key, indices] : compute_keys) {
+        ++state.total;
+        u64 bytes = 0;
+        for (const size_t index : indices) {
+            bytes = std::max<u64>(bytes, records[index]->payload.size());
+        }
+        jobs.Submit(
+            {
+                .priority = ShaderJobPriority::Soon,
+                .cpu_bytes = TranslationBytes(bytes),
+                .driver_bytes = DriverCompileBytes,
+                .cpu = [this, &state, &built_one, &records, &pipeline_record, &unreadable, key,
+                        indices = std::move(indices),
+                        read_properties](VideoCommon::ShaderJobContext& context)
+                    -> VideoCommon::ShaderDriverStage {
+                    std::vector<CachedComputeTranslation> candidates;
+                    for (const size_t index : indices) {
+                        const CacheV2::LogRecord& record = *records[index];
+                        Common::UniqueFunction<void, std::istream&, FileEnvironment> read_compute{
+                            [&](std::istream& file, FileEnvironment env) {
+                                ComputePipelineCacheKey read_key;
+                                file.read(reinterpret_cast<char*>(&read_key), sizeof(read_key));
+                                VideoCommon::CheckComputeRecord(env, read_key.shared_memory_size,
+                                                                read_key.workgroup_size);
+                                candidates.push_back({std::move(env), pipeline_record(index)});
+                            }};
+                        Common::UniqueFunction<void, std::istream&, std::vector<FileEnvironment>>
+                            read_graphics{[](std::istream&, std::vector<FileEnvironment>) {
+                                throw std::ios_base::failure(
+                                    "Graphics pipeline in another kind of record");
+                            }};
+                        try {
+                            VideoCommon::ReadPipelinePayload(record.payload, read_compute,
+                                                             read_graphics);
+                        } catch (const std::ios_base::failure& e) {
+                            unreadable(record, e.what());
+                        }
+                    }
+                    OrderComputeTranslations(candidates);
+                    ShaderPools pools;
+                    ComputePipelineCacheEntry entry;
+                    size_t chosen{};
+                    for (; chosen < candidates.size() && !context.StopRequested(); ++chosen) {
+                        pools.ReleaseContents();
+                        entry = CreateComputePipeline(pools, key, candidates[chosen].env,
+                                                      state.statistics.get(), false);
+                        if (entry.pipeline) {
+                            break;
+                        }
+                    }
+                    std::scoped_lock lock{state.mutex};
+                    AddUnchosenComputeTranslations(candidates, chosen, read_properties,
+                                                   state.incomplete, state.copies);
+                    if (!entry.pipeline) {
+                        built_one();
+                        return {};
+                    }
+                    return [this, &state, &built_one, key, entry = std::move(entry)]() mutable {
+                        entry.pipeline->Build();
+                        std::scoped_lock driver_lock{state.mutex};
+                        compute_cache.emplace(key, std::move(entry));
+                        built_one();
+                    };
+                },
+            },
+            &boot);
+    }
+    compute_keys.clear();
+    for (const auto& [index, key] : boot_graphics) {
+        ++state.total;
+        const CacheV2::LogRecord& record = *records[index];
+        jobs.Submit(
+            {
+                .priority = ShaderJobPriority::Soon,
+                .cpu_bytes = TranslationBytes(record.payload.size()),
+                .driver_bytes = DriverCompileBytes,
+                .cpu = [this, &state, &built_one, &pipeline_record, &unreadable, &record, index,
+                        key](VideoCommon::ShaderJobContext& context)
+                    -> VideoCommon::ShaderDriverStage {
+                    std::unique_ptr<GraphicsPipeline> pipeline;
+                    bool incomplete{};
+                    if (!context.StopRequested()) {
+                        try {
+                            pipeline = TranslateCachedGraphics(record.payload, key,
+                                                               state.statistics.get(), incomplete);
+                        } catch (const std::ios_base::failure& e) {
+                            unreadable(record, e.what());
+                        }
+                    }
+                    if (!pipeline) {
+                        std::scoped_lock lock{state.mutex};
+                        if (incomplete) {
+                            state.incomplete_graphics.emplace_back(key.Hash(),
+                                                                   pipeline_record(index));
+                        }
+                        built_one();
+                        return {};
+                    }
+                    return [this, &state, &built_one, key,
+                            pipeline = std::move(pipeline)]() mutable {
+                        pipeline->Build();
+                        std::scoped_lock lock{state.mutex};
+                        graphics_cache.emplace(key, std::move(pipeline));
+                        built_one();
+                    };
+                },
+            },
+            &boot);
+    }
+    boot_graphics.clear();
+
+    // After the boot builds, so that they never wait behind these in the queue. With the
+    // precache, the prebuild waits for it as before.
+    RevalidatePrograms(log, std::move(stale_programs));
+    size_t deferred_pipelines = 0;
+    const auto start_prebuild = [&] {
+        for (PrebuildRecord& record : prebuild) {
+            const u64 bytes = record.payload.size();
+            const bool added = scheduled_prebuild->Add(
+                record.key, bytes, TranslationBytes(bytes), DriverCompileBytes,
+                [this, key = record.key, payload = std::move(record.payload)] {
+                    bool incomplete{};
+                    try {
+                        return TranslateCachedGraphics(payload, key, nullptr, incomplete);
+                    } catch (const std::ios_base::failure&) {
+                        return std::unique_ptr<GraphicsPipeline>{};
+                    }
+                });
+            deferred_pipelines += added ? 1 : 0;
+        }
+        prebuild.clear();
+    };
+    if (!precache) {
+        start_prebuild();
+    }
+
+    LOG_INFO(Render_Vulkan, "Total Pipeline Count: {}", state.total);
+    if (skipped_pipelines != 0) {
+        LOG_INFO(Render_Vulkan,
+                 "{} cached graphics pipelines skipped at boot, {} {} for background prebuild",
+                 skipped_pipelines, precache ? prebuild.size() : deferred_pipelines,
+                 precache ? "held" : "admitted");
+    }
+    {
+        std::scoped_lock lock{state.mutex};
+        callback(VideoCore::LoadCallbackStage::Build, state.built, state.total);
+        state.has_loaded = true;
+    }
+    boot.Wait();
+
+    std::vector<DuplicateGraphicsRecord> no_duplicates;
+    AddIncompleteGraphics(state.incomplete_graphics, no_duplicates, disk_pipelines,
+                          state.incomplete);
+    // The records the load never chooses go by tombstones, and the log is compacted once a
+    // quarter of it is records no load reads.
+    if (!stop_loading.stop_requested()) {
+        for (const auto* removed : {&state.incomplete, &state.copies}) {
+            for (const VideoCommon::PipelineRecord& record : *removed) {
+                const CacheV2::LogRecord& read = *records[record.begin];
+                cache_v2->Writer().Append(RecordKind::Tombstone, read.key,
+                                          CacheV2::TombstonePayload(read.kind));
+            }
+        }
+        const CacheV2::LogStats& stats = log->parsed.stats;
+        if (stats.dead_bytes != 0 && stats.dead_bytes >= stats.file_size / 4) {
+            cache_v2->Writer().Compact();
+        }
+    }
+    records.clear();
+    log.reset();
+
+    if (use_vulkan_pipeline_cache) {
+        SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
+                                     CACHE_VERSION);
+        size_t size = 0;
+        vulkan_pipeline_cache.Read(&size, nullptr);
+        last_cache_size.store(size, std::memory_order_relaxed);
+        last_flush = std::chrono::steady_clock::now();
+    }
+    if (state.statistics) {
+        state.statistics->Report();
+    }
+    if (StutterTrace::Enabled()) {
+        const auto bytes = [](const std::filesystem::path& path) {
+            std::error_code error;
+            const auto size = std::filesystem::file_size(path, error);
+            return error ? std::uintmax_t{0} : size;
+        };
+        StutterTrace::SetCacheFile(Common::FS::PathToUTF8String(pipeline_cache_filename));
+        StutterTrace::BootMarker(
+            "shader_load_end",
+            fmt::format("seconds={:.3f} graphics_records={} compute_records={} queued={} skipped={} "
+                        "deferred={} cache_bytes={} driver_cache_bytes={}",
+                        std::chrono::duration<double>(std::chrono::steady_clock::now() - load_begin)
+                            .count(),
+                        graphics_records, compute_records, state.total, skipped_pipelines,
+                        precache ? prebuild.size() : deferred_pipelines,
+                        bytes(pipeline_cache_filename), bytes(vulkan_pipeline_cache_filename)));
+    }
+    if (precache && !stop_loading.stop_requested()) {
+        PrecacheShaders(title_id, std::move(precache_graphics), std::move(precached_pipelines),
+                        stop_loading, callback);
+    }
+    if (stop_loading.stop_requested()) {
+        scheduled_prebuild.reset();
+    } else if (precache) {
+        start_prebuild();
+        LOG_INFO(Render_Vulkan, "{} cached graphics pipelines admitted for background prebuild",
+                 deferred_pipelines);
+    }
+}
+
+void PipelineCache::RevalidatePrograms(
+    std::shared_ptr<const VideoCommon::ShaderCacheV2::LogFile> log,
+    std::vector<VideoCommon::ShaderCacheV2::ProgramRecord> programs) {
+    namespace CacheV2 = VideoCommon::ShaderCacheV2;
+    if (programs.empty()) {
+        return;
+    }
+    LOG_INFO(Render_Vulkan, "Shader cache v2: lowering {} programs of another build again",
+             programs.size());
+    // The pipeline records of programs whose code changed are moved once all are lowered. Their
+    // own records follow last, so that a revalidation cut short is done again at the next boot.
+    struct Relinking {
+        std::shared_ptr<const CacheV2::LogFile> log;
+        std::mutex mutex;
+        RelinkedPrograms programs;
+        std::atomic<size_t> pending;
+    };
+    auto relinking = std::make_shared<Relinking>();
+    relinking->log = std::move(log);
+    relinking->pending = programs.size();
+    const auto relink = [this, relinking] {
+        shader_jobs->Submit(
+            {
+                .priority = VideoCommon::ShaderJobPriority::Background,
+                .cpu = [this, relinking](VideoCommon::ShaderJobContext& context) {
+                    const auto appends =
+                        RelinkPipelineRecords(relinking->log->parsed.live, relinking->programs,
+                                              [&context] { return context.StopRequested(); });
+                    if (context.StopRequested()) {
+                        return VideoCommon::ShaderDriverStage{};
+                    }
+                    size_t moved = 0;
+                    for (const CacheV2::LogAppend& append : appends) {
+                        cache_v2->Writer().Append(append.kind, append.key, append.payload);
+                        moved += append.kind != CacheV2::RecordKind::Tombstone ? 1 : 0;
+                    }
+                    for (const auto& [hash, relinked] : relinking->programs) {
+                        cache_v2->RecordProgram(relinked.program);
+                    }
+                    LOG_INFO(Render_Vulkan,
+                             "Shader cache v2: {} programs lower to other code in this build, {} "
+                             "pipeline records moved to it",
+                             relinking->programs.size(), moved);
+                    return VideoCommon::ShaderDriverStage{};
+                },
+            },
+            &*revalidation);
+    };
+    for (CacheV2::ProgramRecord& program : programs) {
+        shader_jobs->Submit(
+            {
+                .priority = VideoCommon::ShaderJobPriority::Background,
+                .cpu = [this, relinking, relink, program = std::move(program)](
+                           VideoCommon::ShaderJobContext& context) {
+                    std::optional<CacheV2::ProgramRecord> relowered;
+                    try {
+                        relowered = CacheV2::RelowerProgramRecord(program);
+                    } catch (const std::exception& e) {
+                        LOG_DEBUG(Render_Vulkan, "Shader cache v2: program {:016x}: {}",
+                                  program.unique_hash, e.what());
+                    }
+                    if (!relowered) {
+                        // Kept as it is: its pipeline records still match the programs it lowers
+                        // to in the build that recorded it.
+                    } else if (relowered->unique_hash == program.unique_hash) {
+                        cache_v2->RecordProgram(*relowered);
+                    } else {
+                        std::scoped_lock lock{relinking->mutex};
+                        relinking->programs.emplace(
+                            program.unique_hash,
+                            RelinkedProgram{.old_unique_hash = program.unique_hash,
+                                            .old_texture_bound = program.texture_bound,
+                                            .program = std::move(*relowered)});
+                    }
+                    if (relinking->pending.fetch_sub(1) == 1 && !relinking->programs.empty() &&
+                        !context.StopRequested()) {
+                        relink();
+                    }
+                    return VideoCommon::ShaderDriverStage{};
+                },
+            },
+            &*revalidation);
+    }
+}
+
 void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
                                     std::unordered_set<u64> precached, std::stop_token stop_loading,
                                     const VideoCore::DiskResourceLoadCallback& callback) {
@@ -1515,6 +2001,28 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
                 if (compute_cache.contains(key)) {
                     continue;
                 }
+                if (shader_jobs) {
+                    const u64 cpu_bytes = TranslationBytes(env.MemorySize());
+                    jobs.push_back({
+                        .translate = [this, key, env = std::move(env)]() mutable
+                            -> Common::UniqueFunction<bool> {
+                            static const GuessMissing guess{};
+                            env.SetGuessMissing(&guess);
+                            ShaderPools pools;
+                            auto pipeline = CreateComputePipeline(pools, key, env, nullptr, false)
+                                                .pipeline;
+                            if (!pipeline) {
+                                return {};
+                            }
+                            return [pipeline = std::move(pipeline)] {
+                                pipeline->Build();
+                                return true;
+                            };
+                        },
+                        .cpu_bytes = cpu_bytes,
+                    });
+                    continue;
+                }
                 jobs.push_back({0, [this, key, env = std::move(env)]() mutable {
                                     static const GuessMissing guess{};
                                     env.SetGuessMissing(&guess);
@@ -1536,7 +2044,9 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
     }
 
     const auto begin = std::chrono::steady_clock::now();
-    const size_t num_threads = std::clamp<size_t>(std::thread::hardware_concurrency(), 1, 64);
+    const size_t num_threads = shader_jobs ? GetTotalPipelineWorkers()
+                                           : std::clamp<size_t>(std::thread::hardware_concurrency(),
+                                                                1, 64);
     std::vector<u8> built(jobs.size());
     std::atomic<size_t> next{};
     std::atomic<size_t> done{};
@@ -1547,7 +2057,58 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
              "build on {} threads",
              graphics_jobs, jobs.size() - graphics_jobs, file_entries, num_threads);
     VideoCommon::StutterTrace::BootMarker("precache_begin", fmt::format("jobs={}", jobs.size()));
-    if (!jobs.empty()) {
+    if (!jobs.empty() && shader_jobs) {
+        // Background jobs of the shader workers, each built and destroyed: only the driver's
+        // cache keeps it.
+        const VideoCommon::ShaderJobBatch batch = shader_jobs->CreateBatch();
+        for (size_t index = 0; index < jobs.size(); ++index) {
+            shader_jobs->Submit(
+                {
+                    .priority = VideoCommon::ShaderJobPriority::Background,
+                    .cpu_bytes = jobs[index].cpu_bytes,
+                    .driver_bytes = DriverCompileBytes,
+                    .cpu = [&built, &done, index, translate = std::move(jobs[index].translate)](
+                               VideoCommon::ShaderJobContext& context) mutable
+                    -> VideoCommon::ShaderDriverStage {
+                        Common::UniqueFunction<bool> build;
+                        if (!context.StopRequested()) {
+                            try {
+                                build = translate();
+                            } catch (const std::exception& e) {
+                                LOG_DEBUG(Render_Vulkan, "Shader precache: {}", e.what());
+                            }
+                        }
+                        translate = {};
+                        if (!build) {
+                            done.fetch_add(1);
+                            return {};
+                        }
+                        return [&built, &done, index, build = std::move(build)]() mutable {
+                            try {
+                                built[index] = build();
+                            } catch (const std::exception& e) {
+                                LOG_DEBUG(Render_Vulkan, "Shader precache: {}", e.what());
+                            }
+                            done.fetch_add(1);
+                        };
+                    },
+                },
+                &batch);
+        }
+        while (!batch.Idle()) {
+            if (stop_loading.stop_requested() || ShaderWarm::TakeSkipWarm()) {
+                // The builds not started are dropped; the running ones end first.
+                shader_jobs->Cancel(batch);
+                skipped = true;
+                break;
+            }
+            if (callback) {
+                callback(VideoCore::LoadCallbackStage::Warm, done, jobs.size());
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{100});
+        }
+        batch.Wait();
+    } else if (!jobs.empty()) {
         std::vector<std::jthread> threads;
         for (size_t thread = 0; thread < num_threads; ++thread) {
             threads.emplace_back([&jobs, &built, &next, &done, &cancel] {
@@ -1788,7 +2349,8 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     auto& pipeline{pair->second};
     if (is_new) {
         ReportNewPipelineKey(graphics_key);
-        pipeline = background_pipelines.Take(graphics_key);
+        pipeline = scheduled_prebuild ? scheduled_prebuild->Take(graphics_key)
+                                      : background_pipelines.Take(graphics_key);
         if (StutterTrace::Enabled()) {
             StutterTrace::CountLookup(pipeline ? StutterTrace::Lookup::GraphicsBackground
                                       : disk_pipelines.contains(graphics_key.Hash())
@@ -2308,6 +2870,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         }
         previous_stage = &program;
     }
+    const u64 deferred_ir_bytes = emit_pools ? IrBytes(programs) : 0;
     std::function<std::array<vk::ShaderModule, Maxwell::MaxShaderStage>()> emit_stages;
     if (emit_pools) {
         auto job = std::make_shared<DeferredStages>();
@@ -2346,10 +2909,10 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             return stage_modules;
         };
     }
-    Common::ThreadWorker* const thread_worker{build_in_parallel ? &workers : nullptr};
     return std::make_unique<GraphicsPipeline>(
         scheduler, buffer_cache, texture_cache, vulkan_pipeline_cache, &shader_notify, device,
-        descriptor_pool, guest_descriptor_queue, descriptor_buffer_ring, thread_worker, statistics,
+        descriptor_pool, guest_descriptor_queue, descriptor_buffer_ring,
+        BuildQueue(build_in_parallel, deferred_ir_bytes), statistics,
         render_pass_cache, key, std::move(modules), infos, std::move(emit_stages),
         std::move(mesh_emulation));
 
@@ -2596,10 +3159,9 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
         const auto name{fmt::format("Shader {:016x}", key.unique_hash)};
         spv_module.SetObjectNameEXT(name.c_str());
     }
-    Common::ThreadWorker* const thread_worker{build_in_parallel ? &workers : nullptr};
     return {.pipeline = std::make_unique<ComputePipeline>(
                 device, scheduler, vulkan_pipeline_cache, descriptor_pool, guest_descriptor_queue,
-                descriptor_buffer_ring, thread_worker, statistics, &shader_notify, program.info,
+                descriptor_buffer_ring, BuildQueue(build_in_parallel), statistics, &shader_notify, program.info,
                 std::move(spv_module), key.unique_hash),
             .null_pointer_slots = env.IsNativeProgram() ? env.NullStoragePointerSlots()
                                                         : std::vector<std::pair<u32, u32>>{},

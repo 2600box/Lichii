@@ -341,7 +341,7 @@ GraphicsPipeline::GraphicsPipeline(
     vk::PipelineCache& pipeline_cache_, VideoCore::ShaderNotify* shader_notify,
     const Device& device_, DescriptorPool& descriptor_pool,
     GuestDescriptorQueue& guest_descriptor_queue_, DescriptorBufferRing& descriptor_buffer_ring_,
-    Common::ThreadWorker* worker_thread,
+    const PipelineBuildQueue& build_queue,
     PipelineStatistics* pipeline_statistics, RenderPassCache& render_pass_cache,
     const GraphicsPipelineCacheKey& key_, std::array<vk::ShaderModule, NUM_STAGES> stages,
     const std::array<const Shader::Info*, NUM_STAGES>& infos,
@@ -351,7 +351,7 @@ GraphicsPipeline::GraphicsPipeline(
       pipeline_cache(pipeline_cache_), scheduler{scheduler_},
       guest_descriptor_queue{guest_descriptor_queue_},
       descriptor_buffer_ring{descriptor_buffer_ring_}, spv_modules{std::move(stages)},
-      worker_only_build{worker_thread && static_cast<bool>(emit_stages)},
+      worker_only_build{(build_queue.workers || build_queue.jobs) && static_cast<bool>(emit_stages)},
       mesh_emulation{std::move(mesh_emulation_)} {
     if (shader_notify) {
         shader_notify->MarkShaderBuilding();
@@ -529,6 +529,27 @@ GraphicsPipeline::GraphicsPipeline(
         }
     }
 
+    // Shader cache v2: the emission is the CPU stage of the build's job.
+    std::function<void()> emit;
+    if (build_queue.jobs && emit_stages) {
+        emit = [this, shader_notify, emit_stages = std::exchange(emit_stages, {})] {
+            try {
+                spv_modules = emit_stages();
+            } catch (const Shader::Exception& exception) {
+                LOG_ERROR(Render_Vulkan, "Graphics pipeline {:016x}: {}", key.Hash(),
+                          exception.what());
+                if (shader_notify) {
+                    shader_notify->MarkShaderComplete();
+                }
+                throw;
+            } catch (...) {
+                if (shader_notify) {
+                    shader_notify->MarkShaderComplete();
+                }
+                throw;
+            }
+        };
+    }
     auto func{[this, shader_notify, &render_pass_cache, pipeline_statistics,
                 emit_stages = std::move(emit_stages)] {
         const auto begin = std::chrono::steady_clock::now();
@@ -580,7 +601,7 @@ GraphicsPipeline::GraphicsPipeline(
         present_stages[stage] = infos[stage] != nullptr;
     }
     configure_func = ConfigureFunc(present_stages, stage_infos);
-    build.emplace(worker_thread, std::move(func));
+    build.emplace(build_queue, std::move(func), std::move(emit));
 }
 
 void GraphicsPipeline::AddTransition(GraphicsPipeline* transition) {

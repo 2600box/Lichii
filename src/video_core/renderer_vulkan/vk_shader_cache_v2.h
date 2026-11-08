@@ -3,7 +3,9 @@
 
 #pragma once
 
+#include <cstring>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <span>
 #include <unordered_map>
@@ -11,10 +13,23 @@
 
 #include "common/common_types.h"
 #include "video_core/shader_cache_v2/cache_format.h"
+#include "video_core/shader_cache_v2/records.h"
 
 namespace Vulkan {
 
 struct GraphicsPipelineCacheKey;
+
+/// The pipeline key a graphics or compute record (SerializePipelinePayload) ends with, read
+/// without the rest of it. Nullopt when the record is too short to hold one.
+template <typename Key>
+[[nodiscard]] std::optional<Key> PipelineRecordKey(std::span<const u8> payload) {
+    if (payload.size() < sizeof(Key)) {
+        return std::nullopt;
+    }
+    Key key;
+    std::memcpy(&key, payload.data() + payload.size() - sizeof(Key), sizeof(Key));
+    return key;
+}
 
 /// Clears the driver of a graphics key, which the v2 cache keeps out of its keys: a driver update
 /// would leave every recorded pipeline unmatched.
@@ -42,6 +57,37 @@ struct LegacyCacheMigration {
 /// last one. A Migrated record names the source. The older files are only read.
 LegacyCacheMigration MigrateLegacyPipelineCache(const std::filesystem::path& directory,
                                                 const std::filesystem::path& log, u8 max_used_age);
+
+/// A program this build lowers to other code than the build that recorded it
+struct RelinkedProgram {
+    u64 old_unique_hash{};
+    /// What the old lowering made the environments' texture bound buffer (~0U: the engine's)
+    u32 old_texture_bound{~0U};
+    VideoCommon::ShaderCacheV2::ProgramRecord program; ///< Lowered by this build
+};
+
+/// Programs by the unique hash their pipeline records use
+using RelinkedPrograms = std::unordered_map<u64, RelinkedProgram>;
+
+struct RekeyedRecord {
+    u64 key;
+    std::vector<u8> payload;
+};
+
+/// A graphics or compute record with the code of the relinked programs it uses replaced and its
+/// pipeline key moved to their new unique hashes, recorded values kept. Nullopt when it uses none
+/// of them, or a stage's texture bound buffer came from the engine and can't be told now. Throws
+/// std::ios_base::failure for a damaged record, as ReadPipelinePayload does.
+[[nodiscard]] std::optional<RekeyedRecord> RekeyPipelineRecord(
+    VideoCommon::ShaderCacheV2::RecordKind kind, std::span<const u8> payload,
+    const RelinkedPrograms& programs);
+
+/// The records that move the graphics and compute records among `live` to the relinked
+/// programs they use: each one's new record, then a tombstone for it. Damaged records are left
+/// alone. Stops early once `stop` is true.
+[[nodiscard]] std::vector<VideoCommon::ShaderCacheV2::LogAppend> RelinkPipelineRecords(
+    std::span<const VideoCommon::ShaderCacheV2::LogRecord> live, const RelinkedPrograms& programs,
+    const std::function<bool()>& stop = {});
 
 /// The used-list session key and time of a used list carried over: `age` sessions old
 [[nodiscard]] u64 MigratedUsedSessionKey(u8 age);

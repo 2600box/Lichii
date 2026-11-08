@@ -206,7 +206,7 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
                                  DescriptorPool& descriptor_pool,
                                  GuestDescriptorQueue& guest_descriptor_queue_,
                                  DescriptorBufferRing& descriptor_buffer_ring_,
-                                 Common::ThreadWorker* thread_worker,
+                                 const PipelineBuildQueue& build_queue,
                                  PipelineStatistics* pipeline_statistics,
                                  VideoCore::ShaderNotify* shader_notify, const Shader::Info& info_,
                                  vk::ShaderModule spv_module_, u64 shader_hash_)
@@ -338,15 +338,30 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
         }
     }};
     build_task = std::move(func);
-    if (thread_worker) {
+    if (build_queue.jobs) {
+        jobs = build_queue.jobs;
+        job = jobs->Submit({
+            .priority = VideoCommon::ShaderJobPriority::Soon,
+            .driver_bytes = build_queue.driver_bytes,
+            .driver = [this] { RunBuild(); },
+        });
+    } else if (build_queue.workers) {
         build_task_done = false;
-        thread_worker->QueueWork([this] {
+        build_queue.workers->QueueWork([this] {
             RunBuild();
             // The last access to this pipeline from the worker.
             build_task_done.store(true, std::memory_order::release);
         });
-    } else {
+    } else if (!build_queue.owner_builds) {
         RunBuild();
+    }
+}
+
+ComputePipeline::~ComputePipeline() {
+    if (jobs) {
+        // Nothing needs a pipeline that goes: a build still queued is dropped.
+        jobs->Cancel(job);
+        job.Wait();
     }
 }
 
@@ -626,7 +641,15 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
         // Wait for the pipeline to be built
         scheduler.Record([this](vk::CommandBuffer) {
             const VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::PipelineWait};
-            RunBuild();
+            if (jobs) {
+                // Raised to NeedNow, and built here unless a driver worker builds it already
+                jobs->RunOrWait(job);
+                if (job.Status() == VideoCommon::ShaderJobStatus::Cancelled) {
+                    return; // The scheduler shut down
+                }
+            } else {
+                RunBuild();
+            }
             std::unique_lock lock{build_mutex};
             build_condvar.wait(lock, [this] { return is_built.load(std::memory_order::relaxed); });
         });

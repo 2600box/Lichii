@@ -134,6 +134,23 @@ std::shared_ptr<LoweredNativeCode> RelowerProgram(const ProgramRecord& record) {
                                  NativeTrapOffsets(record.native), lowered);
 }
 
+std::optional<ProgramRecord> RelowerProgramRecord(const ProgramRecord& record) {
+    if (record.native.empty()) {
+        return std::nullopt;
+    }
+    const auto lowered = RelowerProgram(record);
+    if (!lowered) {
+        return std::nullopt;
+    }
+    ProgramRecord relowered = record;
+    relowered.lowering_stamp = LoweringStamp();
+    relowered.lowered_code = lowered->code;
+    relowered.texture_bound = lowered->texture_bound;
+    relowered.source_size = lowered->source_size;
+    relowered.unique_hash = NativeShaderHash(lowered->code);
+    return relowered;
+}
+
 u64 ProgramKey(const ProgramRecord& record) {
     Writer key;
     key.Put(record.source);

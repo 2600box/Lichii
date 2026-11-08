@@ -8,6 +8,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <random>
 #include <set>
@@ -43,6 +44,7 @@
 #include "video_core/shader_cache_v2/cache_writer.h"
 #include "video_core/shader_cache_v2/records.h"
 #include "video_core/shader_environment.h"
+#include "video_core/shader_jobs.h"
 #include "video_core/shader_warm/warm_records.h"
 
 namespace {
@@ -136,6 +138,43 @@ public:
         texture_bound = 2;
         cbuf_values.emplace((u64{1} << 32) | 16, 0x1357);
         texture_types.emplace(3, Shader::TextureType::Color2D);
+        if (shader_stage == Shader::Stage::Compute) {
+            workgroup_size = {8, 4, 1};
+            shared_memory_size = 0x400;
+        }
+    }
+
+    u32 ReadCbufValue(u32, u32) override {
+        return 0;
+    }
+    Shader::TextureType ReadTextureType(u32) override {
+        return Shader::TextureType::Color2D;
+    }
+    Shader::TexturePixelFormat ReadTexturePixelFormat(u32) override {
+        return {};
+    }
+    bool IsTexturePixelFormatInteger(u32) override {
+        return false;
+    }
+    u32 ReadViewportTransformState() override {
+        return 1;
+    }
+    std::optional<Shader::ReplaceConstant> GetReplaceConstBuffer(u32, u32) override {
+        return std::nullopt;
+    }
+};
+
+/// An environment of a lowered native program's code
+class NativeTestEnvironment final : public VideoCommon::GenericEnvironment {
+public:
+    NativeTestEnvironment(Shader::Stage shader_stage, std::span<const u64> lowered_code,
+                          u32 texture_bound_) {
+        stage = shader_stage;
+        code.assign(lowered_code.begin(), lowered_code.end());
+        cached_lowest = 0;
+        cached_highest = static_cast<u32>((code.size() - 1) * sizeof(u64));
+        texture_bound = texture_bound_;
+        cbuf_values.emplace((u64{1} << 32) | 16, 0x1357);
         if (shader_stage == Shader::Stage::Compute) {
             workgroup_size = {8, 4, 1};
             shared_memory_size = 0x400;
@@ -700,6 +739,139 @@ TEST_CASE("Shader cache v2: the precache lowers as the emulator does", "[video_c
             (Common::CityHash64(reinterpret_cast<const char*>(words.data()),
                                 words.size() * sizeof(u64)) ^
              0x4f554e4345000002ULL));
+}
+
+TEST_CASE("Shader cache v2: a log parsed in parallel reads as one parsed in order",
+          "[video_core][shader_cache_v2]") {
+    TestLog log = MakeLog(1500);
+    log.bytes[log.ranges[10].second - 9] ^= 0x40;   // A payload byte
+    log.bytes[log.ranges[700].first + 13] ^= 0x01;  // A header's key
+    log.bytes[log.ranges[1200].first + 30] ^= 0x80; // Another payload
+    V2::EncodeRecord(log.bytes, RecordKind::Compute, 0x1000 + 1, TestPayload(7));
+    V2::EncodeRecord(log.bytes, RecordKind::Tombstone, 0x1000 + 4,
+                     V2::TombstonePayload(RecordKind::Compute));
+    std::vector<u8> torn;
+    V2::EncodeRecord(torn, RecordKind::Graphics, 0x9999, TestPayload(3));
+    log.bytes.insert(log.bytes.end(), torn.begin(), torn.begin() + torn.size() / 2);
+
+    const V2::ParsedLog in_order = V2::ParseLog(log.bytes);
+    VideoCommon::ShaderJobScheduler jobs{{.cpu_threads = 4, .driver_threads = 1}};
+    std::atomic<size_t> tasks{};
+    const V2::ParsedLog parallel =
+        V2::ParseLog(log.bytes, [&](size_t count, const std::function<void(size_t)>& task) {
+            tasks += count;
+            VideoCommon::ParallelFor(jobs, count, task);
+        });
+    // A task left out is checked by the walk itself.
+    const V2::ParsedLog partial =
+        V2::ParseLog(log.bytes, [](size_t count, const std::function<void(size_t)>& task) {
+            for (size_t index = 0; index < count; index += 2) {
+                task(index);
+            }
+        });
+
+    REQUIRE(tasks > 1);
+    REQUIRE(in_order.stats.bad_payloads == 2);
+    REQUIRE(in_order.stats.bad_headers >= 1);
+    REQUIRE(in_order.stats.superseded >= 2);
+    REQUIRE(in_order.stats.torn_tail_bytes != 0);
+    for (const V2::ParsedLog* other : {&parallel, &partial}) {
+        REQUIRE(Live(*other) == Live(in_order));
+        REQUIRE(other->header == in_order.header);
+        const auto& a = other->stats;
+        const auto& b = in_order.stats;
+        REQUIRE(std::tie(a.file_size, a.records, a.live, a.superseded, a.tombstones, a.bad_headers,
+                         a.bad_payloads, a.skipped_bytes, a.torn_tail_bytes, a.dead_bytes) ==
+                std::tie(b.file_size, b.records, b.live, b.superseded, b.tombstones, b.bad_headers,
+                         b.bad_payloads, b.skipped_bytes, b.torn_tail_bytes, b.dead_bytes));
+    }
+}
+
+TEST_CASE("Shader cache v2: a program of this build's lowering keeps its code",
+          "[video_core][shader_cache_v2]") {
+    V2::ProgramRecord program = LowerTestProgram(PlainProgram, false, 0x2000);
+    program.lowering_stamp ^= 1;
+    const auto relowered = V2::RelowerProgramRecord(program);
+    REQUIRE(relowered.has_value());
+    REQUIRE(relowered->lowering_stamp == V2::LoweringStamp());
+    REQUIRE(relowered->unique_hash == program.unique_hash);
+    REQUIRE(relowered->lowered_code == program.lowered_code);
+
+    // A migrated record without the native program stays as it is.
+    V2::ProgramRecord migrated = program;
+    migrated.native.clear();
+    REQUIRE_FALSE(V2::RelowerProgramRecord(migrated).has_value());
+}
+
+TEST_CASE("Shader cache v2: pipeline records move to the code a program lowers to now",
+          "[video_core][shader_cache_v2]") {
+    const V2::ProgramRecord old_program = LowerTestProgram(PlainProgram, false, 0);
+    V2::ProgramRecord new_program = LowerTestProgram(ProgramCounterProgram, true, 0x40);
+    REQUIRE(new_program.unique_hash != old_program.unique_hash);
+    new_program.texture_bound = 6;
+    const V2::ProgramRecord unchanged = LowerTestProgram(ProgramCounterProgram, true, 0x80);
+
+    const NativeTestEnvironment old_fragment{Shader::Stage::Fragment, old_program.lowered_code, 5};
+    const NativeTestEnvironment new_fragment{Shader::Stage::Fragment, new_program.lowered_code, 6};
+    const NativeTestEnvironment old_compute{Shader::Stage::Compute, old_program.lowered_code, 5};
+    const NativeTestEnvironment new_compute{Shader::Stage::Compute, new_program.lowered_code, 6};
+    const NativeTestEnvironment other_compute{Shader::Stage::Compute, unchanged.lowered_code, 5};
+    const auto payload = [](const auto& key, const VideoCommon::GenericEnvironment& env) {
+        const std::array<const VideoCommon::GenericEnvironment*, 1> envs{&env};
+        return VideoCommon::SerializePipelinePayload(KeyBytes(key), envs, ReadProperties);
+    };
+    auto graphics_key = TestGraphicsKey(old_program.unique_hash, 0);
+    graphics_key.unique_hashes[4] ^= 0x77; // As the mesh state mixed into a hash
+    const auto graphics = payload(graphics_key, old_fragment);
+    const auto compute = payload(TestComputeKey(old_program.unique_hash), old_compute);
+    const auto other = payload(TestComputeKey(unchanged.unique_hash), other_compute);
+
+    std::vector<u8> bytes;
+    const auto header = V2::EncodeFileHeader(1);
+    bytes.assign(header.begin(), header.end());
+    const u64 graphics_record = Vulkan::GraphicsRecordKey(graphics_key);
+    const u64 compute_record = Vulkan::ComputeRecordKey(compute);
+    V2::EncodeRecord(bytes, RecordKind::Graphics, graphics_record, graphics);
+    V2::EncodeRecord(bytes, RecordKind::Compute, compute_record, compute);
+    V2::EncodeRecord(bytes, RecordKind::Compute, Vulkan::ComputeRecordKey(other), other);
+    std::vector<u8> damaged = compute;
+    damaged.resize(damaged.size() / 2);
+    damaged.insert(damaged.end(), compute.end() - sizeof(Vulkan::ComputePipelineCacheKey),
+                   compute.end());
+    V2::EncodeRecord(bytes, RecordKind::Compute, 0x5555, damaged);
+    const V2::ParsedLog log = V2::ParseLog(bytes);
+    REQUIRE(log.live.size() == 4);
+
+    Vulkan::RelinkedPrograms programs;
+    programs.emplace(old_program.unique_hash,
+                     Vulkan::RelinkedProgram{.old_unique_hash = old_program.unique_hash,
+                                             .old_texture_bound = 5,
+                                             .program = new_program});
+    const auto appends = Vulkan::RelinkPipelineRecords(log.live, programs);
+
+    auto new_graphics_key = TestGraphicsKey(new_program.unique_hash, 0);
+    new_graphics_key.unique_hashes[4] ^= 0x77;
+    const auto new_graphics = payload(new_graphics_key, new_fragment);
+    const auto new_compute_payload = payload(TestComputeKey(new_program.unique_hash), new_compute);
+    REQUIRE(appends.size() == 4);
+    REQUIRE(appends[0] == V2::LogAppend{RecordKind::Graphics,
+                                        Vulkan::GraphicsRecordKey(new_graphics_key), new_graphics});
+    REQUIRE(appends[1] == V2::LogAppend{RecordKind::Tombstone, graphics_record,
+                                        V2::TombstonePayload(RecordKind::Graphics)});
+    REQUIRE(appends[2] == V2::LogAppend{RecordKind::Compute,
+                                        Vulkan::ComputeRecordKey(new_compute_payload),
+                                        new_compute_payload});
+    REQUIRE(appends[3] == V2::LogAppend{RecordKind::Tombstone, compute_record,
+                                        V2::TombstonePayload(RecordKind::Compute)});
+    REQUIRE(ReadPayload(appends[0].payload).stages ==
+            std::vector<Shader::Stage>{Shader::Stage::Fragment});
+
+    // A texture bound buffer the engine gave the old code can't be told for the new code.
+    programs.begin()->second.program.texture_bound = ~0U;
+    REQUIRE(Vulkan::RelinkPipelineRecords(log.live, programs).empty());
+    // Stopped before the first record
+    programs.begin()->second.program.texture_bound = 6;
+    REQUIRE(Vulkan::RelinkPipelineRecords(log.live, programs, [] { return true; }).empty());
 }
 
 TEST_CASE("Shader cache v2: an older Vulkan cache and its used list are migrated",

@@ -171,6 +171,94 @@ LegacyCacheMigration MigrateLegacyPipelineCache(const std::filesystem::path& dir
     return result;
 }
 
+std::optional<RekeyedRecord> RekeyPipelineRecord(RecordKind kind, std::span<const u8> payload,
+                                                 const RelinkedPrograms& programs) {
+    auto replaced = VideoCommon::ReplacePipelineCode(
+        payload,
+        [&](u64 shader_hash, u32 texture_bound) -> std::optional<VideoCommon::NativeCodeReplacement> {
+            const auto it = programs.find(shader_hash);
+            if (it == programs.end()) {
+                return std::nullopt;
+            }
+            const auto& program = it->second.program;
+            if (program.texture_bound != ~0U) {
+                return VideoCommon::NativeCodeReplacement{program.lowered_code, program.texture_bound};
+            }
+            if (it->second.old_texture_bound != ~0U) {
+                return std::nullopt; // The engine's value was never recorded
+            }
+            return VideoCommon::NativeCodeReplacement{program.lowered_code, texture_bound};
+        });
+    if (std::ranges::all_of(replaced.shader_hashes,
+                            [](const auto& hashes) { return hashes.first == hashes.second; })) {
+        return std::nullopt;
+    }
+    RekeyedRecord record{.key = 0, .payload = std::move(replaced.payload)};
+    const auto store = [&record]<typename Key>(const Key& key) {
+        std::memcpy(record.payload.data() + record.payload.size() - sizeof(Key), &key, sizeof(Key));
+    };
+    if (kind == RecordKind::Compute) {
+        auto key = PipelineRecordKey<ComputePipelineCacheKey>(record.payload);
+        if (!key || replaced.shader_hashes.size() != 1 ||
+            key->unique_hash != replaced.shader_hashes[0].first) {
+            throw std::ios_base::failure("Compute record key doesn't match its program");
+        }
+        key->unique_hash = replaced.shader_hashes[0].second;
+        store(*key);
+        record.key = ComputeRecordKey(record.payload);
+        return record;
+    }
+    auto key = PipelineRecordKey<GraphicsPipelineCacheKey>(record.payload);
+    if (!key) {
+        throw std::ios_base::failure("Graphics record without a key");
+    }
+    VideoCommon::CheckGraphicsRecord(key->unique_hashes, replaced.shader_hashes.size());
+    size_t env{};
+    for (u64& unique_hash : key->unique_hashes) {
+        if (unique_hash == 0) {
+            continue;
+        }
+        // Task and mesh stages hold their program's hash with the mesh state's mixed in.
+        const auto [old_hash, new_hash] = replaced.shader_hashes[env++];
+        unique_hash ^= old_hash ^ new_hash;
+    }
+    store(*key);
+    record.key = GraphicsRecordKey(*key);
+    return record;
+}
+
+std::vector<ShaderCacheV2::LogAppend> RelinkPipelineRecords(
+    std::span<const ShaderCacheV2::LogRecord> live, const RelinkedPrograms& programs,
+    const std::function<bool()>& stop) {
+    std::vector<ShaderCacheV2::LogAppend> appends;
+    if (programs.empty()) {
+        return appends;
+    }
+    for (const ShaderCacheV2::LogRecord& record : live) {
+        if (stop && stop()) {
+            break;
+        }
+        if (record.kind != RecordKind::Graphics && record.kind != RecordKind::Compute) {
+            continue;
+        }
+        std::optional<RekeyedRecord> rekeyed;
+        try {
+            rekeyed = RekeyPipelineRecord(record.kind, record.payload, programs);
+        } catch (const std::ios_base::failure&) {
+            continue; // The boot load removes it
+        }
+        if (!rekeyed) {
+            continue;
+        }
+        appends.push_back({record.kind, rekeyed->key, std::move(rekeyed->payload)});
+        if (rekeyed->key != record.key) {
+            appends.push_back({RecordKind::Tombstone, record.key,
+                               ShaderCacheV2::TombstonePayload(record.kind)});
+        }
+    }
+    return appends;
+}
+
 std::unordered_map<u64, u8> UsedPipelinesFromLog(
     std::span<const ShaderCacheV2::LogRecord> live, u8 max_age, std::vector<u64>& expired) {
     struct Session {

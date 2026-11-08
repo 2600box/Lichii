@@ -19,6 +19,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "video_core/renderer_vulkan/pipeline_build.h"
+#include "video_core/renderer_vulkan/vk_pipeline_cache_prebuild.h"
 #include "video_core/shader_jobs.h"
 
 namespace {
@@ -695,4 +697,178 @@ TEST_CASE("Shader jobs stay consistent with many producers", "[video_core][shade
     REQUIRE(cancelled > 0);
     REQUIRE(stats.in_flight_bytes == 0);
     REQUIRE(batch.Idle());
+}
+
+TEST_CASE("ParallelFor calls every index once, helped by the calling thread",
+          "[video_core][shader_jobs]") {
+    ShaderJobScheduler scheduler{Config(3, 1)};
+    std::vector<std::atomic<int>> calls(1000);
+    VideoCommon::ParallelFor(scheduler, calls.size(), [&](size_t index) { ++calls[index]; });
+    for (const auto& count : calls) {
+        REQUIRE(count == 1);
+    }
+
+    // With every worker busy, the calling thread makes every call.
+    Gate gate;
+    std::vector<ShaderJobHandle> blockers;
+    for (int worker = 0; worker < 3; ++worker) {
+        blockers.push_back(Block(scheduler, gate));
+    }
+    const auto self = std::this_thread::get_id();
+    std::atomic<int> here{};
+    VideoCommon::ParallelFor(scheduler, 50, [&](size_t) {
+        if (std::this_thread::get_id() == self) {
+            ++here;
+        }
+    });
+    gate.Open();
+    for (const auto& blocker : blockers) {
+        blocker.Wait();
+    }
+    REQUIRE(here == 50);
+}
+
+namespace {
+struct TestPipeline {
+    explicit TestPipeline(std::atomic<int>& builds_, bool fails_ = false)
+        : builds{builds_}, fails{fails_} {}
+
+    void Build() {
+        ++builds;
+    }
+    bool Failed() const {
+        return fails;
+    }
+
+    std::atomic<int>& builds;
+    bool fails;
+};
+using TestPrebuild = Vulkan::ScheduledPrebuild<int, TestPipeline>;
+} // namespace
+
+TEST_CASE("A lookup builds a queued prebuild once, on the looking thread",
+          "[video_core][shader_jobs]") {
+    ShaderJobScheduler scheduler{Config(1, 1)};
+    Gate gate;
+    const auto blocker = Block(scheduler, gate);
+    std::atomic<int> builds{};
+    std::atomic<int> translations{};
+    std::thread::id translated_on;
+    TestPrebuild prebuild{scheduler, 100};
+    REQUIRE(prebuild.Add(1, 60, 0, 0, [&] {
+        ++translations;
+        translated_on = std::this_thread::get_id();
+        return std::make_unique<TestPipeline>(builds);
+    }));
+    REQUIRE_FALSE(prebuild.Add(1, 1, 0, 0, [&] { return std::make_unique<TestPipeline>(builds); }));
+    REQUIRE_FALSE(prebuild.Add(2, 41, 0, 0, [&] { return std::make_unique<TestPipeline>(builds); }));
+
+    const auto pipeline = prebuild.Take(1);
+    REQUIRE(pipeline != nullptr);
+    REQUIRE(builds == 1);
+    REQUIRE(translations == 1);
+    REQUIRE(translated_on == std::this_thread::get_id());
+    REQUIRE(prebuild.Take(1) == nullptr);
+
+    // Its capture was let go once translated; one that doesn't translate gives nothing.
+    REQUIRE(prebuild.Add(2, 100, 0, 0, [] { return std::unique_ptr<TestPipeline>{}; }));
+    REQUIRE(prebuild.Take(2) == nullptr);
+    REQUIRE(prebuild.Take(3) == nullptr);
+    gate.Open();
+    scheduler.RunOrWait(blocker);
+}
+
+TEST_CASE("Prebuilds built in the background are taken without building again",
+          "[video_core][shader_jobs]") {
+    ShaderJobScheduler scheduler{Config(2, 2)};
+    std::atomic<int> builds{};
+    TestPrebuild prebuild{scheduler, 1 << 20};
+    for (int key = 0; key < 20; ++key) {
+        REQUIRE(prebuild.Add(key, 10, 0, 0, [&builds, key] {
+            return std::make_unique<TestPipeline>(builds, key % 4 == 0);
+        }));
+    }
+    prebuild.Batch().Wait();
+    REQUIRE(builds == 20);
+    for (int key = 0; key < 20; ++key) {
+        const auto pipeline = prebuild.Take(key);
+        // The failed ones are dropped
+        REQUIRE((pipeline != nullptr) == (key % 4 != 0));
+    }
+    REQUIRE(builds == 20);
+}
+
+TEST_CASE("A cancelled prebuild leaves the scheduler usable", "[video_core][shader_jobs]") {
+    ShaderJobScheduler scheduler{Config(1, 1)};
+    Gate gate;
+    const auto blocker = Block(scheduler, gate);
+    std::atomic<int> builds{};
+    std::atomic<int> translations{};
+    TestPrebuild prebuild{scheduler, 1 << 20};
+    for (int key = 0; key < 10; ++key) {
+        REQUIRE(prebuild.Add(key, 1, 0, 0, [&] {
+            ++translations;
+            return std::make_unique<TestPipeline>(builds);
+        }));
+    }
+    scheduler.Cancel(prebuild.Batch());
+    REQUIRE(prebuild.Take(3) == nullptr);
+    gate.Open();
+    scheduler.RunOrWait(blocker);
+    prebuild.Stop();
+    REQUIRE(translations == 0);
+    REQUIRE(builds == 0);
+    REQUIRE(prebuild.Take(5) == nullptr);
+    REQUIRE_FALSE(prebuild.Add(20, 1, 0, 0, [&] { return std::make_unique<TestPipeline>(builds); }));
+
+    std::atomic<bool> ran{};
+    const auto after = scheduler.Submit(CpuJob(Background, [&] { ran = true; }));
+    after.Wait();
+    REQUIRE(after.Status() == ShaderJobStatus::Done);
+    REQUIRE(ran);
+}
+
+TEST_CASE("A pipeline build job is dropped while queued and run by a waiting draw",
+          "[video_core][shader_jobs]") {
+    ShaderJobScheduler scheduler{Config(1, 1)};
+    Gate gate;
+    const auto blocker = Block(scheduler, gate);
+    std::atomic<int> builds{};
+    std::atomic<int> emissions{};
+    const Vulkan::PipelineBuildQueue queue{.jobs = &scheduler};
+    {
+        Vulkan::PipelineBuild dropped{queue, [&] { ++builds; }, [&] { ++emissions; }};
+    }
+    REQUIRE(builds == 0);
+    REQUIRE(emissions == 0);
+
+    Vulkan::PipelineBuild build{queue, [&] { ++builds; }, [&] { ++emissions; }};
+    REQUIRE_FALSE(build.IsBuilt());
+    build.Wait(true);
+    REQUIRE(build.IsBuilt());
+    REQUIRE_FALSE(build.Failed());
+    REQUIRE(builds == 1);
+    REQUIRE(emissions == 1);
+
+    // An emission that throws fails the build without running it.
+    Vulkan::PipelineBuild failing{queue, [&] { ++builds; },
+                                  [] { throw std::runtime_error("emission"); }};
+    failing.Wait(true);
+    REQUIRE(failing.Failed());
+    REQUIRE(builds == 1);
+
+    gate.Open();
+    scheduler.RunOrWait(blocker);
+    // A draw that may not emit waits for the workers.
+    Vulkan::PipelineBuild on_workers{queue, [&] { ++builds; }, [&] { ++emissions; }};
+    on_workers.Wait();
+    REQUIRE(on_workers.IsBuilt());
+    REQUIRE(builds == 2);
+
+    // Left for its owner to build
+    Vulkan::PipelineBuild owned{{.owner_builds = true}, [&] { ++builds; }};
+    REQUIRE_FALSE(owned.IsBuilt());
+    owned.Build();
+    REQUIRE(owned.IsBuilt());
+    REQUIRE(builds == 3);
 }

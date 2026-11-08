@@ -59,7 +59,7 @@ u64 UnixNow() {
                                 .count());
 }
 
-LogFile ReadLogFile(const std::filesystem::path& file) {
+LogFile ReadLogFile(const std::filesystem::path& file, const ForEach& for_each) {
     LogFile log;
     std::ifstream stream(file, std::ios::binary | std::ios::ate);
     if (stream.is_open()) {
@@ -72,7 +72,7 @@ LogFile ReadLogFile(const std::filesystem::path& file) {
             log.bytes.resize(static_cast<size_t>(stream.gcount()));
         }
     }
-    log.parsed = ParseLog(log.bytes);
+    log.parsed = ParseLog(log.bytes, for_each);
     return log;
 }
 

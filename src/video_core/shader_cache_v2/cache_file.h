@@ -25,8 +25,9 @@ struct LogFile {
 };
 
 /// Reads the whole log without its lock: records are only appended under it, and the reader
-/// ignores one cut off by an append still in progress. A missing file reads as empty.
-[[nodiscard]] LogFile ReadLogFile(const std::filesystem::path& file);
+/// ignores one cut off by an append still in progress. A missing file reads as empty. See ParseLog
+/// for `for_each`.
+[[nodiscard]] LogFile ReadLogFile(const std::filesystem::path& file, const ForEach& for_each = {});
 
 enum class WriteResult {
     Written,

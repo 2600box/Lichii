@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <functional>
 #include <span>
 #include <vector>
 
@@ -65,6 +66,15 @@ enum class HeaderStatus {
     OtherVersion, ///< Another format version's file, never changed by this build
 };
 
+/// A record to append to a log
+struct LogAppend {
+    RecordKind kind;
+    u64 key;
+    std::vector<u8> payload;
+
+    bool operator==(const LogAppend&) const = default;
+};
+
 struct LogRecord {
     RecordKind kind;
     u16 flags;
@@ -94,9 +104,14 @@ struct ParsedLog {
     LogStats stats;
 };
 
+/// Calls its task with every index below its count, on any threads, and returns once every call
+/// returned. A call left out is made by the caller of the task instead.
+using ForEach = std::function<void(size_t count, const std::function<void(size_t)>& task)>;
+
 /// Reads a whole log held in memory. Never throws on any input: a damaged record header is
 /// skipped by scanning for the next valid one, a record whose payload doesn't match its hash is
-/// dropped alone, and a record cut off at the end is ignored.
-[[nodiscard]] ParsedLog ParseLog(std::span<const u8> bytes);
+/// dropped alone, and a record cut off at the end is ignored. With `for_each`, the payload hashes
+/// are checked on its threads; the result is the same.
+[[nodiscard]] ParsedLog ParseLog(std::span<const u8> bytes, const ForEach& for_each = {});
 
 } // namespace VideoCommon::ShaderCacheV2

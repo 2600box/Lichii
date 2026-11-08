@@ -502,6 +502,24 @@ void ShaderJobScheduler::Finish(ShaderJobState& job, ShaderJobStatus status,
     job.condition.notify_all();
 }
 
+void ParallelFor(ShaderJobScheduler& scheduler, size_t count,
+                 const std::function<void(size_t)>& function) {
+    std::vector<ShaderJobHandle> handles;
+    handles.reserve(count);
+    for (size_t index = 0; index < count; ++index) {
+        handles.push_back(scheduler.Submit({
+            .priority = ShaderJobPriority::NeedNow,
+            .cpu = [&function, index](ShaderJobContext&) {
+                function(index);
+                return ShaderDriverStage{};
+            },
+        }));
+    }
+    for (const ShaderJobHandle& handle : handles) {
+        scheduler.RunOrWait(handle);
+    }
+}
+
 void ShaderJobScheduler::ReleaseBytes(ShaderJobState& job) {
     if (job.held_bytes == 0) {
         return;

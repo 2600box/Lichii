@@ -1641,6 +1641,72 @@ void ReadPipelinePayload(
     }
 }
 
+ReplacedPipelineCode ReplacePipelineCode(std::span<const u8> payload,
+                                         const NativeCodeReplacer& replace) {
+    // Where Serialize writes the texture bound buffer, the read range and the code
+    constexpr size_t TextureBoundOffset = 6 * sizeof(u64) + sizeof(u32);
+    constexpr size_t ReadHighestOffset = TextureBoundOffset + 3 * sizeof(u32);
+    constexpr size_t CodeOffset = 6 * sizeof(u64) + 7 * sizeof(u32);
+    SpanBuffer buffer{payload};
+    std::istream file{&buffer};
+    file.exceptions(std::ios::failbit);
+    const std::streampos end{static_cast<std::streamoff>(payload.size())};
+    u32 num_envs{};
+    file.read(reinterpret_cast<char*>(&num_envs), sizeof(num_envs));
+    if (num_envs == 0 || num_envs > Maxwell::MaxShaderProgram) {
+        throw std::ios_base::failure("Invalid number of shader environments");
+    }
+    const auto load = [&payload]<typename T>(T& value, size_t offset) {
+        std::memcpy(&value, payload.data() + offset, sizeof(T));
+    };
+    ReplacedPipelineCode result;
+    size_t copied{};
+    for (u32 index = 0; index < num_envs; ++index) {
+        const auto begin = static_cast<size_t>(std::streamoff{file.tellg()});
+        FileEnvironment env;
+        env.Deserialize(file, end);
+        const auto env_end = static_cast<size_t>(std::streamoff{file.tellg()});
+        u64 code_size{};
+        u32 texture_bound{};
+        u32 read_lowest{};
+        load(code_size, begin);
+        load(texture_bound, begin + TextureBoundOffset);
+        load(read_lowest, begin + ReadHighestOffset - sizeof(u32));
+        std::vector<u64> code(static_cast<size_t>(code_size / sizeof(u64)));
+        std::memcpy(code.data(), payload.data() + begin + CodeOffset, code.size() * sizeof(u64));
+        const u64 hash{NativeShaderHash(code)};
+        const auto replacement =
+            env.IsNativeProgram() ? replace(hash, texture_bound) : std::nullopt;
+        if (!replacement || replacement->code.empty()) {
+            result.shader_hashes.emplace_back(hash, hash);
+            continue;
+        }
+        const auto store = [&result]<typename T>(const T& value, size_t offset) {
+            std::memcpy(result.payload.data() + offset, &value, sizeof(T));
+        };
+        result.payload.insert(result.payload.end(), payload.begin() + copied,
+                              payload.begin() + begin + CodeOffset);
+        const size_t header{result.payload.size() - CodeOffset};
+        const u64 new_size{replacement->code.size_bytes()};
+        store(new_size, header);
+        store(replacement->texture_bound, header + TextureBoundOffset);
+        store(static_cast<u32>(read_lowest + new_size - sizeof(u64)), header + ReadHighestOffset);
+        const auto* const new_code = reinterpret_cast<const u8*>(replacement->code.data());
+        result.payload.insert(result.payload.end(), new_code, new_code + new_size);
+        copied = begin + CodeOffset + static_cast<size_t>(code_size);
+        result.payload.insert(result.payload.end(), payload.begin() + copied,
+                              payload.begin() + env_end);
+        copied = env_end;
+        result.shader_hashes.emplace_back(hash, NativeShaderHash(replacement->code));
+    }
+    if (copied == 0) {
+        result.payload.assign(payload.begin(), payload.end());
+    } else {
+        result.payload.insert(result.payload.end(), payload.begin() + copied, payload.end());
+    }
+    return result;
+}
+
 bool ReadPipelinesUnchanged(
     const std::filesystem::path& filename, u32 cache_version,
     Common::UniqueFunction<void, std::istream&, FileEnvironment> load_compute,
