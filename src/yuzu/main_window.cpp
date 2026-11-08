@@ -46,6 +46,7 @@
 #include "yuzu/game/game_list.h"
 #include "yuzu/nup_dialogs.h"
 #include "yuzu/shader_warm_dialog.h"
+#include "video_core/shader_warm/shader_warm_builder.h"
 
 #include "applets/qt_amiibo_settings.h"
 #include "applets/qt_controller.h"
@@ -2112,6 +2113,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
         Settings::UpdateGPUAccuracy();
         LOG_INFO(Config, "Applied recommended MKW settings after per-game configuration");
     }
+    AskWarmBeforeStart(title_id);
     Settings::LogSettings();
 
     if (UISettings::values.select_user_on_boot && !user_flag_cmd_line) {
@@ -4467,6 +4469,40 @@ void MainWindow::OnGameListPrepareShaderWarm(u64 program_id, const std::string& 
     connect(shader_warm_dialog, &QDialog::finished, shader_warm_dialog, &QObject::deleteLater);
     shader_warm_dialog->show();
     shader_warm_dialog->Start();
+}
+
+/// With shader_warm_at_boot = Ask and a warm-up the title has never finished, asks whether to run
+/// it on the loading screen before the game starts. "Don't ask again" keeps the answer as the
+/// setting (saved with the other settings).
+void MainWindow::AskWarmBeforeStart(u64 title_id) {
+    namespace ShaderWarm = VideoCommon::ShaderWarm;
+    ShaderWarm::RequestWarmBeforeStart(false);
+    if (title_id == 0 ||
+        Settings::values.shader_warm_at_boot.GetValue() != Settings::ShaderWarmAtBoot::Ask ||
+        !ShaderWarm::WarmPending(title_id)) {
+        return;
+    }
+    QMessageBox box(QMessageBox::Question, tr("Prepare Shaders"),
+                    tr("The shaders of this game are not prepared yet. Prepare them now?\n\n"
+                       "The game starts when they are done: about 10 minutes the first time, on "
+                       "every CPU thread. Later launches skip this.\n\n"
+                       "Without it, they are prepared in the background while you play, with "
+                       "more stutter until then."),
+                    QMessageBox::NoButton, this);
+    QPushButton* const prepare = box.addButton(tr("Prepare now"), QMessageBox::AcceptRole);
+    box.addButton(tr("Start without"), QMessageBox::RejectRole);
+    box.setDefaultButton(prepare);
+    auto* const remember = new QCheckBox(tr("Don't ask again"), &box);
+    box.setCheckBox(remember);
+    box.exec();
+    const bool now = box.clickedButton() == prepare;
+    ShaderWarm::RequestWarmBeforeStart(now);
+    if (remember->isChecked()) {
+        Settings::values.shader_warm_at_boot.SetValue(now ? Settings::ShaderWarmAtBoot::Always
+                                                          : Settings::ShaderWarmAtBoot::Never);
+    }
+    LOG_INFO(Frontend, "Shader warm-up before the game starts: {}{}", now ? "yes" : "no",
+             remember->isChecked() ? " (don't ask again)" : "");
 }
 
 /// Deletes the game's warm-up files after a confirmation, showing the error when it fails.

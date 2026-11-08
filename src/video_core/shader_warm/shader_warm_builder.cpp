@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -306,6 +307,28 @@ void WriteHeader(std::ofstream& out) {
 }
 
 } // Anonymous namespace
+
+bool WarmPending(u64 title_id) {
+    std::error_code ec;
+    for (const auto& file : {ComputeWarmPath(title_id), GraphicsWarmPath(title_id)}) {
+        if (fs::exists(file, ec) && !fs::exists(WarmMarkerPath(file), ec)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+namespace {
+std::atomic<bool> warm_before_start{false};
+} // Anonymous namespace
+
+void RequestWarmBeforeStart(bool before_start) {
+    warm_before_start.store(before_start, std::memory_order_relaxed);
+}
+
+bool TakeWarmBeforeStart() {
+    return warm_before_start.exchange(false, std::memory_order_relaxed);
+}
 
 fs::path ComputeWarmPath(u64 title_id) {
     return TitleDir(title_id) / "warm-compute.bin";

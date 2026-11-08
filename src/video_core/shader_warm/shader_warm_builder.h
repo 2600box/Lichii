@@ -40,6 +40,16 @@ std::filesystem::path WarmCountPath(const std::filesystem::path& warm_file);
 /// file of another size.
 u64 ReadWarmCount(const std::filesystem::path& warm_file);
 
+/// True when the title has a warm file whose warm-up never finished (no marker next to it). A
+/// marker that no longer matches (new driver, changed settings) is not seen here: the emulator
+/// checks that at boot.
+bool WarmPending(u64 title_id);
+
+/// The launch's answer to "prepare shaders before the game starts" (shader_warm_at_boot = Ask):
+/// set by the frontend before booting, taken (and cleared) by the renderer when it loads.
+void RequestWarmBeforeStart(bool before_start);
+bool TakeWarmBeforeStart();
+
 /// Removes the title's warm files, their markers and leftover temporary files (rebuild or delete
 /// from the UI). Returns false when a file exists but cannot be removed, with the reason in
 /// `error` when given.
