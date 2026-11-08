@@ -273,7 +273,8 @@ template <class P>
 void TextureCache<P>::MarkStale(const ImageBase& image) {
     if (!Tegra::g_nx2_ampere.load(std::memory_order_relaxed) ||
         False(image.flags & ImageFlagBits::GpuModified) ||
-        True(image.flags & (ImageFlagBits::Sparse | ImageFlagBits::Unbacked))) {
+        True(image.flags & (ImageFlagBits::CpuModified | ImageFlagBits::Sparse |
+                            ImageFlagBits::Unbacked))) {
         return;
     }
     // Tracked from here on so CPU writes reach WriteMemory. Marking before the image's own
