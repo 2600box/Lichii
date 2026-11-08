@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <bit>
+#include <cctype>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -17,6 +19,7 @@
 #include <fmt/format.h>
 #include <nlohmann/json.hpp>
 
+#include "common/cityhash.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
@@ -35,6 +38,11 @@ using Shader::Ampere::Instruction;
 struct MissingContext : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
+
+// Serialized environment layouts this tool reads. 54 has 53's layout (see
+// CompatibleVulkanPipelineCacheVersions in video_core/pipeline_cache_files.h).
+constexpr u32 OldestCacheVersion = 46;
+constexpr u32 NewestCacheVersion = 54;
 
 constexpr std::array StageNames{"vertex",  "tess-control", "tess-eval", "geometry", "fragment",
                                 "compute", "vertex-a",     "task",      "mesh"};
@@ -108,8 +116,7 @@ u64 IndirectCbufKey(u32 bank, u32 offset, u32 indirect) {
 
 class OfflineEnvironment final : public Shader::Environment {
 public:
-    void Load(std::span<const u8> bytes, u32 version) {
-        Reader reader{bytes};
+    void Load(Reader& reader, u32 version) {
         const u64 size = reader.Read<u64>();
         const u64 type_count = reader.Read<u64>();
         const u64 format_count = reader.Read<u64>();
@@ -121,7 +128,7 @@ public:
         }
         for (const u64 count :
              {type_count, format_count, cbuf_count, pointer_count, replacement_count}) {
-            if (count > bytes.size() / 8)
+            if (count > reader.Remaining() / 8)
                 throw std::runtime_error("Invalid environment entry count");
         }
         local_memory = reader.Read<u32>();
@@ -189,8 +196,6 @@ public:
                 mesh_primitive_header = reader.Read<Shader::ProgramHeader>();
             }
         }
-        if (reader.Remaining())
-            throw std::runtime_error("Trailing bytes after environment record");
         is_proprietary_driver = texture_bound == 2 || IsNativeProgram();
         captured = true;
     }
@@ -344,6 +349,88 @@ void WriteFile(const std::filesystem::path& path, const std::vector<T>& words) {
         throw std::runtime_error("Cannot close " + path.string());
 }
 
+u32 KeyWord(std::span<const u8> key, size_t offset) {
+    u32 value;
+    std::memcpy(&value, key.data() + offset, sizeof(value));
+    return value;
+}
+
+Shader::InputTopology InputTopology(u32 topology) {
+    switch (topology) {
+    case 0:
+        return Shader::InputTopology::Points;
+    case 1:
+    case 2:
+    case 3:
+        return Shader::InputTopology::Lines;
+    case 4:
+    case 5:
+    case 6:
+    case 7:
+    case 8:
+    case 9:
+    case 14:
+        return Shader::InputTopology::Triangles;
+    case 10:
+    case 11:
+        return Shader::InputTopology::LinesAdjacency;
+    case 12:
+    case 13:
+        return Shader::InputTopology::TrianglesAdjacency;
+    default:
+        throw std::runtime_error("Invalid pipeline input topology");
+    }
+}
+
+void SetTessellation(u32 raw1, Shader::RuntimeInfo& info) {
+    const u32 primitive = (raw1 >> 10) & 3, spacing = (raw1 >> 12) & 3;
+    if (primitive > 2 || spacing > 2)
+        throw std::runtime_error("Invalid tessellation state");
+    info.tess_primitive = static_cast<Shader::TessPrimitive>(primitive);
+    info.tess_spacing = static_cast<Shader::TessSpacing>(spacing);
+    info.tess_clockwise = (raw1 >> 14) & 1;
+}
+
+void SetVertexInputTypes(std::span<const u8> key, Shader::RuntimeInfo& info) {
+    const u32 raw1 = KeyWord(key, 48);
+    for (size_t index = 0; index < info.generic_input_types.size(); ++index) {
+        auto& type = info.generic_input_types[index];
+        if (raw1 & (1U << 5)) {
+            constexpr std::array types{
+                Shader::AttributeType::Disabled, Shader::AttributeType::Float,
+                Shader::AttributeType::SignedInt, Shader::AttributeType::UnsignedInt};
+            type = types[(KeyWord(key, 112 + (index / 16) * 4) >> ((index % 16) * 2)) & 3];
+            continue;
+        }
+        const u32 attribute = KeyWord(key, 160 + index * 4);
+        if (!(attribute & 1)) {
+            type = Shader::AttributeType::Disabled;
+            continue;
+        }
+        switch ((attribute >> 20) & 7) {
+        case 1:
+        case 2:
+        case 7:
+            type = Shader::AttributeType::Float;
+            break;
+        case 3:
+            type = Shader::AttributeType::SignedInt;
+            break;
+        case 4:
+            type = Shader::AttributeType::UnsignedInt;
+            break;
+        case 5:
+            type = Shader::AttributeType::UnsignedScaled;
+            break;
+        case 6:
+            type = Shader::AttributeType::SignedScaled;
+            break;
+        default:
+            throw std::runtime_error("Invalid pipeline vertex attribute type");
+        }
+    }
+}
+
 Shader::RuntimeInfo Runtime(std::span<const u8> key, Stage stage, Json& assumptions) {
     Shader::RuntimeInfo info{};
     info.previous_stage_stores.mask.set();
@@ -357,52 +444,14 @@ Shader::RuntimeInfo Runtime(std::span<const u8> key, Stage stage, Json& assumpti
     if (key.size() != 1056 || stage == Stage::Compute) {
         throw std::runtime_error("Expected a 1056-byte graphics pipeline key");
     }
-    const auto word = [&](size_t offset) {
-        u32 value;
-        std::memcpy(&value, key.data() + offset, sizeof(value));
-        return value;
-    };
+    const auto word = [&](size_t offset) { return KeyWord(key, offset); };
     const u32 raw1 = word(48), raw2 = word(52);
     if (raw1 & (1U << 6))
         throw MissingContext("Transform feedback pipeline state is not supported offline");
     const u32 topology = (raw1 >> 24) & 15;
-    switch (topology) {
-    case 0:
-        info.input_topology = Shader::InputTopology::Points;
-        break;
-    case 1:
-    case 2:
-    case 3:
-        info.input_topology = Shader::InputTopology::Lines;
-        break;
-    case 4:
-    case 5:
-    case 6:
-    case 7:
-    case 8:
-    case 9:
-    case 14:
-        info.input_topology = Shader::InputTopology::Triangles;
-        break;
-    case 10:
-    case 11:
-        info.input_topology = Shader::InputTopology::LinesAdjacency;
-        break;
-    case 12:
-    case 13:
-        info.input_topology = Shader::InputTopology::TrianglesAdjacency;
-        break;
-    default:
-        throw std::runtime_error("Invalid pipeline input topology");
-    }
-    if (stage == Stage::TessellationEval) {
-        const u32 primitive = (raw1 >> 10) & 3, spacing = (raw1 >> 12) & 3;
-        if (primitive > 2 || spacing > 2)
-            throw std::runtime_error("Invalid tessellation state");
-        info.tess_primitive = static_cast<Shader::TessPrimitive>(primitive);
-        info.tess_spacing = static_cast<Shader::TessSpacing>(spacing);
-        info.tess_clockwise = (raw1 >> 14) & 1;
-    }
+    info.input_topology = InputTopology(topology);
+    if (stage == Stage::TessellationEval)
+        SetTessellation(raw1, info);
     info.force_early_z = (raw2 >> 4) & 1;
     info.y_negate = (raw2 >> 11) & 1;
     if (stage == Stage::Geometry || (stage == Stage::VertexB && word(32) == 0 && word(36) == 0)) {
@@ -482,47 +531,302 @@ Shader::RuntimeInfo Runtime(std::span<const u8> key, Stage stage, Json& assumpti
             }
         }
     }
-    if (stage == Stage::VertexB) {
-        for (size_t index = 0; index < info.generic_input_types.size(); ++index) {
-            auto& type = info.generic_input_types[index];
-            if (raw1 & (1U << 5)) {
-                constexpr std::array types{
-                    Shader::AttributeType::Disabled, Shader::AttributeType::Float,
-                    Shader::AttributeType::SignedInt, Shader::AttributeType::UnsignedInt};
-                type = types[(word(112 + (index / 16) * 4) >> ((index % 16) * 2)) & 3];
-                continue;
-            }
-            const u32 attribute = word(160 + index * 4);
-            if (!(attribute & 1)) {
-                type = Shader::AttributeType::Disabled;
-                continue;
-            }
-            switch ((attribute >> 20) & 7) {
-            case 1:
-            case 2:
-            case 7:
-                type = Shader::AttributeType::Float;
-                break;
-            case 3:
-                type = Shader::AttributeType::SignedInt;
-                break;
-            case 4:
-                type = Shader::AttributeType::UnsignedInt;
-                break;
-            case 5:
-                type = Shader::AttributeType::UnsignedScaled;
-                break;
-            case 6:
-                type = Shader::AttributeType::SignedScaled;
-                break;
-            default:
-                throw std::runtime_error("Invalid pipeline vertex attribute type");
-            }
-        }
-    }
+    if (stage == Stage::VertexB)
+        SetVertexInputTypes(key, info);
     assumptions.push_back("Pipeline key supplies vertex/fragment interface types and fixed state; "
                           "integer fragment attachments use typed outputs on every offline host");
     return info;
+}
+
+Shader::HostTranslateInfo OfflineHost() {
+    Shader::HostTranslateInfo host{};
+    host.support_float64 = true;
+    host.support_float16 = true;
+    host.support_int64 = true;
+    host.support_conditional_barrier = true;
+    host.support_viewport_index_layer = true;
+    host.support_geometry_shader_passthrough = true;
+    host.ApplyDescriptorLimitPolicy();
+    return host;
+}
+
+Shader::Profile OfflineProfile(const Shader::HostTranslateInfo& host) {
+    Shader::Profile profile{};
+    profile.supported_spirv = 0x00010400;
+    profile.unified_descriptor_binding = true;
+    profile.min_ssbo_alignment = host.min_ssbo_alignment;
+    profile.support_int64 = true;
+    profile.support_int16 = true;
+    profile.support_int8 = true;
+    profile.support_vote = true;
+    profile.support_shuffle_relative = true;
+    profile.support_geometry_streams = true;
+    profile.support_geometry_shader_passthrough = true;
+    profile.support_viewport_index_layer_non_geometry = true;
+    profile.support_multi_viewport = true;
+    profile.max_user_clip_distances = 8;
+    profile.max_subgroup_size = 32;
+    profile.support_typeless_image_loads = true;
+    return profile;
+}
+
+// Byte count GraphicsPipelineCacheKey::Hash() and operator== cover: the six unique hashes and
+// FixedPipelineState::Size(). The offsets are those of the 1056-byte serialized key.
+size_t GraphicsKeySize(std::span<const u8> key) {
+    const u32 raw1 = KeyWord(key, 48);
+    const bool extended_dynamic_state = raw1 & 1, extended_dynamic_state_3_blend = raw1 & (1U << 3),
+               dynamic_vertex_input = raw1 & (1U << 5), xfb_enabled = raw1 & (1U << 6);
+    if (xfb_enabled)
+        return key.size();
+    if (dynamic_vertex_input)
+        return extended_dynamic_state_3_blend ? 128 : 160; // attachments, attributes
+    return extended_dynamic_state ? 416 : 480;             // vertex_strides, xfb_state
+}
+
+// MakeRuntimeInfo in renderer_vulkan/vk_pipeline_cache.cpp for a device with the offline profile:
+// geometry, viewport-layer and mesh shaders, not MoltenVK. Keep the two in step.
+Shader::RuntimeInfo PipelineRuntime(std::span<const u8> key, std::span<const u64, 6> hashes,
+                                    std::span<const Shader::IR::Program, 6> programs,
+                                    const Shader::IR::Program& program,
+                                    const Shader::IR::Program* previous) {
+    Shader::RuntimeInfo info;
+    if (previous) {
+        info.previous_stage_stores = previous->info.stores;
+        info.previous_stage_legacy_stores_mapping = previous->info.legacy_stores_mapping;
+        if (previous->is_geometry_passthrough)
+            info.previous_stage_stores.mask |= previous->info.passthrough.mask;
+    } else {
+        info.previous_stage_stores.mask.set();
+    }
+    if (previous && previous->stage == Stage::Mesh) {
+        for (const u32 line : previous->mesh.primitive_lines) {
+            const auto attribute = static_cast<Shader::IR::Attribute>(line);
+            if (Shader::IR::IsGeneric(attribute))
+                info.per_primitive_generics.set(Shader::IR::GenericAttributeIndex(attribute));
+        }
+    }
+    const u32 raw1 = KeyWord(key, 48), raw2 = KeyWord(key, 52);
+    const u32 topology = (raw1 >> 24) & 15;
+    const bool xfb_enabled = (raw1 >> 6) & 1, gl_ndc = (raw1 >> 7) & 1;
+    const bool has_geometry = hashes[4] != 0 && !programs[4].is_geometry_passthrough;
+    const float point_size = std::bit_cast<float>(KeyWord(key, 76));
+    if (xfb_enabled &&
+        (program.stage == Stage::Geometry || (program.stage == Stage::VertexB && !has_geometry))) {
+        throw MissingContext("Transform feedback pipeline state is not supported offline");
+    }
+    switch (program.stage) {
+    case Stage::VertexB:
+        if (!has_geometry) {
+            if (topology == 0)
+                info.fixed_state_point_size = point_size;
+            info.convert_depth_mode = gl_ndc;
+        }
+        SetVertexInputTypes(key, info);
+        break;
+    case Stage::TessellationEval:
+        SetTessellation(raw1, info);
+        break;
+    case Stage::Mesh:
+        info.convert_depth_mode = gl_ndc;
+        if (program.mesh.topology == 0)
+            info.fixed_state_point_size = point_size;
+        break;
+    case Stage::Geometry:
+        if (program.output_topology == Shader::OutputTopology::PointList)
+            info.fixed_state_point_size = point_size;
+        info.convert_depth_mode = gl_ndc;
+        break;
+    case Stage::Fragment:
+        info.alpha_test_func = static_cast<Shader::CompareFunction>((raw2 >> 1) & 7);
+        info.alpha_test_reference = std::bit_cast<float>(KeyWord(key, 72));
+        info.dual_source_blend = (raw1 >> 21) & 1;
+        break;
+    default:
+        break;
+    }
+    info.input_topology = InputTopology(topology);
+    info.force_early_z = (raw2 >> 4) & 1;
+    info.y_negate = (raw2 >> 11) & 1;
+    const bool geometry_passthrough = hashes[4] != 0 && programs[4].is_geometry_passthrough;
+    if (hashes[5] != 0 && !geometry_passthrough && !xfb_enabled &&
+        !programs[5].info.loads_indexed_attributes) {
+        const bool has_tess = hashes[3] != 0;
+        const Stage stage = program.stage;
+        const bool last_pre_raster = (stage == Stage::VertexB && !has_tess && !has_geometry) ||
+                                     (stage == Stage::TessellationEval && !has_geometry) ||
+                                     (stage == Stage::Geometry && has_geometry);
+        if (stage == Stage::Fragment) {
+            info.scaled_noperspective_inputs =
+                previous &&
+                (previous->stage == Stage::VertexB || previous->stage == Stage::TessellationEval ||
+                 previous->stage == Stage::Geometry);
+        }
+        if (last_pre_raster) {
+            const auto& fragment_info = programs[5].info;
+            for (size_t index = 0; index < 32; ++index) {
+                if (fragment_info.interpolation[index] == Shader::Interpolation::NoPerspective)
+                    info.noperspective_outputs.set(index);
+            }
+        }
+    }
+    return info;
+}
+
+struct PipelineStage {
+    u32 slot;
+    Stage stage;
+    std::vector<u32> spirv;
+};
+
+// The legacy path: translation and emission as PipelineCache::CreateGraphicsPipeline and
+// CreateComputePipeline do them, one module per stage. Vertex A merges into vertex B and has no
+// module of its own.
+std::vector<PipelineStage> CompileLegacyPipeline(std::span<OfflineEnvironment> envs,
+                                                 std::span<const u8> key, Json& diagnostic) {
+    const Shader::HostTranslateInfo host = OfflineHost();
+    const Shader::Profile profile = OfflineProfile(host);
+    Shader::ObjectPool<Shader::Maxwell::Flow::Block> flow_pool;
+    Shader::ObjectPool<Shader::IR::Inst> inst_pool;
+    Shader::ObjectPool<Shader::IR::Block> block_pool;
+    std::vector<PipelineStage> stages;
+    if (envs.front().ShaderStage() == Stage::Compute) {
+        OfflineEnvironment& env = envs.front();
+        diagnostic["phase"] = "translate";
+        diagnostic["failed_slot"] = 0;
+        Shader::Maxwell::Flow::CFG cfg{env, flow_pool, Shader::Maxwell::Location{env.EntryPoint()}};
+        auto program = Shader::Maxwell::TranslateProgram(inst_pool, block_pool, env, cfg, host);
+        diagnostic["phase"] = "spirv";
+        stages.push_back({0, Stage::Compute, Shader::Backend::SPIRV::EmitSPIRV(profile, program)});
+        diagnostic.erase("failed_slot");
+        return stages;
+    }
+    std::array<u64, 6> hashes;
+    std::memcpy(hashes.data(), key.data(), sizeof(hashes));
+    std::array<Shader::IR::Program, 6> programs;
+    const bool uses_vertex_a = hashes[0] != 0, uses_vertex_b = hashes[1] != 0;
+    diagnostic["phase"] = "translate";
+    size_t env_index = 0;
+    for (u32 slot = 0; slot < hashes.size(); ++slot) {
+        if (hashes[slot] == 0)
+            continue;
+        diagnostic["failed_slot"] = slot;
+        OfflineEnvironment& env = envs[env_index++];
+        Shader::Maxwell::Flow::CFG cfg{env, flow_pool, Shader::Maxwell::Location{env.EntryPoint()},
+                                       slot == 0};
+        if (!uses_vertex_a || slot != 1) {
+            programs[slot] =
+                Shader::Maxwell::TranslateProgram(inst_pool, block_pool, env, cfg, host);
+        } else {
+            auto vertex_b =
+                Shader::Maxwell::TranslateProgram(inst_pool, block_pool, env, cfg, host);
+            programs[slot] =
+                Shader::Maxwell::MergeDualVertexPrograms(programs[0], vertex_b, env, host);
+        }
+        stages.push_back({slot, env.ShaderStage(), {}});
+    }
+    diagnostic["phase"] = "spirv";
+    Shader::Backend::Bindings bindings;
+    const Shader::IR::Program* previous = nullptr;
+    for (PipelineStage& stage : stages) {
+        if (stage.slot == 0 && uses_vertex_b)
+            continue;
+        diagnostic["failed_slot"] = stage.slot;
+        if (stage.slot == 0)
+            throw std::runtime_error("Vertex A program without a vertex B program");
+        Shader::IR::Program& program = programs[stage.slot];
+        auto runtime = PipelineRuntime(key, hashes, programs, program, previous);
+        Shader::Maxwell::ConvertLegacyToGeneric(program, runtime);
+        stage.spirv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime, program, bindings);
+        previous = &program;
+    }
+    diagnostic.erase("failed_slot");
+    return stages;
+}
+
+// One pipeline record as the cache stores it: environment count, environments, pipeline key.
+int RunPipeline(const std::string& record_path, u32 version, const std::string& path_name,
+                const std::filesystem::path& output_dir, Json& diagnostic) {
+    diagnostic["input_format"] = "pipeline";
+    diagnostic["path"] = path_name;
+    const auto bytes = ReadFile(record_path);
+    Reader reader{bytes};
+    const u32 count = reader.Read<u32>();
+    if (count == 0 || count > 6)
+        throw std::runtime_error("Invalid number of shader environments");
+    std::vector<OfflineEnvironment> envs(count);
+    for (OfflineEnvironment& env : envs)
+        env.Load(reader, version);
+    const bool compute = envs.front().ShaderStage() == Stage::Compute;
+    if (compute ? count != 1 : std::ranges::any_of(envs, [](const auto& env) {
+            return env.ShaderStage() == Stage::Compute;
+        })) {
+        throw std::runtime_error("Invalid shader stages in the pipeline record");
+    }
+    std::vector<u8> key(compute ? 24 : 1056);
+    reader.Copy(key.data(), key.size());
+    if (reader.Remaining())
+        throw std::runtime_error("Trailing bytes after pipeline record");
+    std::array<u64, 6> hashes{};
+    if (compute) {
+        u32 shared_memory;
+        std::array<u32, 3> workgroup;
+        std::memcpy(&shared_memory, key.data() + 8, sizeof(shared_memory));
+        std::memcpy(workgroup.data(), key.data() + 12, sizeof(workgroup));
+        if (envs.front().SharedMemorySize() != shared_memory ||
+            envs.front().WorkgroupSize() != workgroup) {
+            throw std::runtime_error("Pipeline key and shader environment disagree");
+        }
+    } else {
+        std::memcpy(hashes.data(), key.data(), sizeof(hashes));
+        if (static_cast<size_t>(std::ranges::count_if(hashes, [](u64 h) { return h != 0; })) !=
+            count) {
+            throw std::runtime_error("Pipeline key and shader environments disagree");
+        }
+    }
+    // The key the legacy cache looks the pipeline up by; every stage module belongs to it.
+    const u64 pipeline_hash = Common::CityHash64(reinterpret_cast<const char*>(key.data()),
+                                                 compute ? key.size() : GraphicsKeySize(key));
+    diagnostic["kind"] = compute ? "compute" : "graphics";
+    diagnostic["pipeline_hash"] = fmt::format("{:016x}", pipeline_hash);
+    Json stages = Json::array();
+    size_t env_index = 0;
+    for (u32 slot = 0; slot < (compute ? 1U : 6U); ++slot) {
+        if (!compute && hashes[slot] == 0)
+            continue;
+        const auto& env = envs[env_index++];
+        u64 unique_hash = hashes[slot];
+        if (compute)
+            std::memcpy(&unique_hash, key.data(), sizeof(unique_hash));
+        stages.push_back({{"slot", slot},
+                          {"unique_hash", fmt::format("{:016x}", unique_hash)},
+                          {"stage", StageNames[static_cast<u32>(env.ShaderStage())]},
+                          {"key", compute ? fmt::format("{:016x}", pipeline_hash)
+                                          : fmt::format("{:016x}/{}", pipeline_hash, slot)},
+                          {"spirv", nullptr},
+                          {"spirv_words", 0}});
+    }
+    diagnostic["stages"] = stages;
+    diagnostic["assumptions"].push_back(
+        "Pipeline replay mirrors the runtime's per-pipeline translation on the offline SPIR-V 1.4 "
+        "profile: geometry, viewport-layer and mesh shader support, not MoltenVK, no transform "
+        "feedback");
+    auto compiled = CompileLegacyPipeline(envs, key, diagnostic);
+    diagnostic["phase"] = "output";
+    std::filesystem::create_directories(output_dir);
+    for (size_t index = 0; index < compiled.size(); ++index) {
+        auto& entry = diagnostic["stages"][index];
+        const PipelineStage& stage = compiled[index];
+        if (stage.spirv.empty())
+            continue;
+        const auto name =
+            fmt::format("{}-{}.spv", stage.slot, StageNames[static_cast<u32>(stage.stage)]);
+        WriteFile(output_dir / name, stage.spirv);
+        entry["spirv"] = name;
+        entry["spirv_words"] = stage.spirv.size();
+    }
+    diagnostic["status"] = "ok";
+    std::cout << diagnostic.dump() << '\n';
+    return 0;
 }
 } // namespace
 
@@ -534,7 +838,8 @@ int main(int argc, char** argv) {
         if constexpr (std::endian::native != std::endian::little) {
             throw std::runtime_error("Only little-endian hosts are supported");
         }
-        std::string input, output, environment, pipeline_key, format{"instructions"};
+        std::string input, output, environment, pipeline_key, pipeline, output_dir;
+        std::string format{"instructions"}, path{"legacy"};
         std::optional<Stage> requested_stage;
         u32 version{};
         bool lower_only{};
@@ -546,9 +851,11 @@ int main(int argc, char** argv) {
                 std::cout << "shader-sweep [INPUT] [--stage "
                              "vertex|tess-control|tess-eval|geometry|fragment|compute|task|mesh]\n"
                              "  [--format instructions|native-header] [--environment FILE "
-                             "--cache-version 46|47|48|49|50|51|52|53]\n"
+                             "--cache-version 46..54]\n"
                              "  [--pipeline-key FILE] [--capture-extent] "
-                             "(--output SPV | --lower-only WORDS | --packed-code WORDS)\n";
+                             "(--output SPV | --lower-only WORDS | --packed-code WORDS)\n"
+                             "shader-sweep --pipeline RECORD --cache-version 46..54 "
+                             "--output-dir DIR [--path legacy]\n";
                 return 0;
             }
             if (!arg.starts_with("--")) {
@@ -572,11 +879,23 @@ int main(int argc, char** argv) {
                 environment = value;
             else if (arg == "--pipeline-key")
                 pipeline_key = value;
-            else if (arg == "--cache-version") {
-                if (value != "46" && value != "47" && value != "48" && value != "49" && value != "50" &&
-                    value != "51" && value != "52" && value != "53")
-                    throw std::runtime_error("Expected cache version 46 to 53");
-                version = static_cast<u32>(std::stoul(value));
+            else if (arg == "--pipeline")
+                pipeline = value;
+            else if (arg == "--output-dir")
+                output_dir = value;
+            else if (arg == "--path") {
+                if (value != "legacy")
+                    throw std::runtime_error("Unknown compilation path " + value);
+                path = value;
+            } else if (arg == "--cache-version") {
+                version = value.size() == 2 && std::isdigit(static_cast<unsigned char>(value[0])) &&
+                                  std::isdigit(static_cast<unsigned char>(value[1]))
+                              ? static_cast<u32>(std::stoul(value))
+                              : 0;
+                if (version < OldestCacheVersion || version > NewestCacheVersion) {
+                    throw std::runtime_error(fmt::format("Expected cache version {} to {}",
+                                                         OldestCacheVersion, NewestCacheVersion));
+                }
             } else if (arg == "--output" || arg == "--lower-only" || arg == "--packed-code") {
                 if (!output.empty())
                     throw std::runtime_error("Only one output mode is permitted");
@@ -586,7 +905,15 @@ int main(int argc, char** argv) {
             } else
                 throw std::runtime_error("Unknown option " + arg);
         }
-        if (output.empty() || (input.empty() && environment.empty()) ||
+        if (!pipeline.empty()) {
+            if (!input.empty() || !environment.empty() || !pipeline_key.empty() ||
+                !output.empty() || requested_stage || capture_extent || version == 0 ||
+                output_dir.empty()) {
+                throw std::runtime_error("Invalid arguments; see --help");
+            }
+            return RunPipeline(pipeline, version, path, output_dir, diagnostic);
+        }
+        if (output.empty() || !output_dir.empty() || (input.empty() && environment.empty()) ||
             (environment.empty() != (version == 0)) || (lower_only && input.empty()) ||
             (capture_extent && input.empty())) {
             throw std::runtime_error("Invalid arguments; see --help");
@@ -600,8 +927,13 @@ int main(int argc, char** argv) {
             }
         }
         OfflineEnvironment env;
-        if (!environment.empty())
-            env.Load(ReadFile(environment), version);
+        if (!environment.empty()) {
+            const auto bytes = ReadFile(environment);
+            Reader reader{bytes};
+            env.Load(reader, version);
+            if (reader.Remaining())
+                throw std::runtime_error("Trailing bytes after environment record");
+        }
         if (requested_stage) {
             if (env.captured && env.ShaderStage() != *requested_stage)
                 throw std::runtime_error("Stage disagrees with environment");
@@ -741,33 +1073,11 @@ int main(int argc, char** argv) {
         Shader::Maxwell::Flow::CFG cfg{env, flow_pool, Shader::Maxwell::Location{env.EntryPoint()}};
         Shader::ObjectPool<Shader::IR::Inst> inst_pool;
         Shader::ObjectPool<Shader::IR::Block> block_pool;
-        Shader::HostTranslateInfo host{};
-        host.support_float64 = true;
-        host.support_float16 = true;
-        host.support_int64 = true;
-        host.support_conditional_barrier = true;
-        host.support_viewport_index_layer = true;
-        host.support_geometry_shader_passthrough = true;
-        host.ApplyDescriptorLimitPolicy();
+        const Shader::HostTranslateInfo host = OfflineHost();
         auto program = Shader::Maxwell::TranslateProgram(inst_pool, block_pool, env, cfg, host);
         Shader::Maxwell::ConvertLegacyToGeneric(program, runtime);
         diagnostic["phase"] = "spirv";
-        Shader::Profile profile{};
-        profile.supported_spirv = 0x00010400;
-        profile.unified_descriptor_binding = true;
-        profile.min_ssbo_alignment = host.min_ssbo_alignment;
-        profile.support_int64 = true;
-        profile.support_int16 = true;
-        profile.support_int8 = true;
-        profile.support_vote = true;
-        profile.support_shuffle_relative = true;
-        profile.support_geometry_streams = true;
-        profile.support_geometry_shader_passthrough = true;
-        profile.support_viewport_index_layer_non_geometry = true;
-        profile.support_multi_viewport = true;
-        profile.max_user_clip_distances = 8;
-        profile.max_subgroup_size = 32;
-        profile.support_typeless_image_loads = true;
+        const Shader::Profile profile = OfflineProfile(host);
         Shader::Backend::Bindings bindings{};
         const auto spirv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime, program, bindings);
         diagnostic["spirv_words"] = spirv.size();
