@@ -1861,7 +1861,7 @@ void EmitContext::DefineInputs(const IR::Program& program) {
             case Interpolation::Smooth:
                 break;
             case Interpolation::NoPerspective:
-                // The previous stage may write it times Position.w (NoPerspectiveAsSmooth).
+                // The previous stage may write it times Position.w (noperspective_outputs).
                 if (!runtime_info.scaled_noperspective_inputs) {
                     Decorate(id, spv::Decoration::NoPerspective);
                 } else {

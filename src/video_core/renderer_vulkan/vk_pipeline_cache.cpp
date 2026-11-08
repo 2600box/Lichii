@@ -338,7 +338,7 @@ Shader::RuntimeInfo MakeRuntimeInfo(std::span<const Shader::IR::Program> program
     info.y_negate = key.state.y_negate != 0;
     // Transform feedback would capture the scaled values, and indexed attribute reads in the
     // fragment stage don't undo the scaling, so both keep native noperspective interpolation.
-    if (Shader::NoPerspectiveAsSmooth() && key.unique_hashes[5] != 0 &&
+    if (key.unique_hashes[5] != 0 &&
         key.state.xfb_enabled == 0 && !programs[5].info.loads_indexed_attributes) {
         const bool has_tess{key.unique_hashes[3] != 0};
         const bool last_pre_raster{
