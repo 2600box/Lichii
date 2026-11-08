@@ -25,7 +25,9 @@
 #include "common/common_types.h"
 #include "core/core.h"
 #include "core/file_sys/nup_writer.h"
+#ifdef LICHII_NX_TOOLS
 #include "yuzu/nx_tools.h"
+#endif
 #include "core/file_sys/patch_manager.h"
 #include "core/file_sys/registered_cache.h"
 #include "qt_common/config/uisettings.h"
@@ -527,13 +529,14 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
         convert_nup->setEnabled(!nup_conversion_running);
     }
     QAction* convert_nx = nullptr;
+    QAction* add_to_nx = nullptr;
+    QAction* remove_from_nx = nullptr;
+    QAction* edit_nx_metadata = nullptr;
+#ifdef LICHII_NX_TOOLS
     if (NxTools::CanConvert(path)) {
         convert_nx = context_menu.addAction(tr("Convert to NX..."));
         convert_nx->setEnabled(!nx_tool_running);
     }
-    QAction* add_to_nx = nullptr;
-    QAction* remove_from_nx = nullptr;
-    QAction* edit_nx_metadata = nullptr;
     if (NxTools::IsNxArchive(path)) {
         QMenu* nx_menu = context_menu.addMenu(tr("Manage NX Archive"));
         add_to_nx = nx_menu->addAction(tr("Add Update or DLC..."));
@@ -542,6 +545,7 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
         edit_nx_metadata = nx_menu->addAction(tr("Edit Title and Icon..."));
         nx_menu->setEnabled(!nx_tool_running);
     }
+#endif
 #if !defined(__APPLE__)
     QMenu* shortcut_menu = context_menu.addMenu(tr("Create Shortcut"));
     QAction* create_desktop_shortcut = shortcut_menu->addAction(tr("Add to Desktop"));

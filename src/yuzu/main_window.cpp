@@ -47,7 +47,9 @@
 #include "yuzu/nup_dialogs.h"
 #include "yuzu/shader_warm_dialog.h"
 #include "video_core/shader_warm/shader_warm_builder.h"
+#ifdef LICHII_NX_TOOLS
 #include "yuzu/nx_tools.h"
+#endif
 
 #include "applets/qt_amiibo_settings.h"
 #include "applets/qt_controller.h"
@@ -1514,6 +1516,7 @@ void MainWindow::ConnectWidgetEvents() {
     connect(game_list, &GameList::ExtractNupRequested, this, &MainWindow::OnGameListExtractNup);
     connect(game_list, &GameList::EditNupMetadataRequested, this,
             &MainWindow::OnGameListEditNupMetadata);
+#ifdef LICHII_NX_TOOLS
     nx_tools = new NxTools(QtCommon::vfs, this);
     connect(nx_tools, &NxTools::RunningChanged, game_list, &GameList::SetNxToolRunning);
     connect(nx_tools, &NxTools::ArchivesChanged, this, &MainWindow::OnGameListRefresh);
@@ -1525,6 +1528,7 @@ void MainWindow::ConnectWidgetEvents() {
             [this](const std::string& path) { OnGameListNxTool(path, &NxTools::RemoveFromNx); });
     connect(game_list, &GameList::EditNxMetadataRequested, this,
             [this](const std::string& path) { OnGameListNxTool(path, &NxTools::EditNxMetadata); });
+#endif
     connect(game_list, &GameList::CopyTIDRequested, this, &MainWindow::OnGameListCopyTID);
     connect(game_list, &GameList::CreateShortcut, this, &MainWindow::OnGameListCreateShortcut);
     connect(game_list, &GameList::AddDirectory, this, &MainWindow::OnGameListAddDirectory);
@@ -4309,6 +4313,7 @@ void MainWindow::OnGameListRefresh() {
     SetFirmwareVersion();
 }
 
+#ifdef LICHII_NX_TOOLS
 void MainWindow::OnGameListNxTool(const std::string& game_path,
                                   void (NxTools::*tool)(const std::string&)) {
     // An archive edited in place must not be read by a running game.
@@ -4320,6 +4325,7 @@ void MainWindow::OnGameListNxTool(const std::string& game_path,
     }
     (nx_tools->*tool)(game_path);
 }
+#endif
 
 void MainWindow::OnGameListConvertToNup(const std::string& game_path) {
     if (nup_running)

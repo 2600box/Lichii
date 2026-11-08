@@ -234,7 +234,6 @@ add_executable(yuzu
     migration_dialog.h migration_dialog.cpp
     nup_dialogs.h nup_dialogs.cpp
     shader_warm_dialog.h shader_warm_dialog.cpp
-    nx_tools.h nx_tools.cpp
     migration_worker.h migration_worker.cpp
     libqt_common.h libqt_common.cpp
 
@@ -497,7 +496,11 @@ endif()
 target_link_libraries(yuzu PRIVATE OpenSSL::SSL OpenSSL::Crypto SDL3::SDL3)
 
 # NX archive conversion and editing (nx_tools.cpp) runs nxformat in the process.
-target_link_libraries(yuzu PRIVATE nxformat::nxformat)
+if (TARGET nxformat::nxformat)
+    target_sources(yuzu PRIVATE nx_tools.h nx_tools.cpp)
+    target_link_libraries(yuzu PRIVATE nxformat::nxformat)
+    target_compile_definitions(yuzu PRIVATE LICHII_NX_TOOLS)
+endif()
 if (LICHII_NXFORMAT_RUNTIME)
     add_custom_command(TARGET yuzu POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
