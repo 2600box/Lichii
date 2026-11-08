@@ -31,8 +31,9 @@ class Memorymanager;
 }
 
 namespace VideoCommon::ShaderCacheV2 {
+class Cache;
 struct ProgramRecord;
-}
+} // namespace VideoCommon::ShaderCacheV2
 
 namespace VideoCommon {
 
@@ -116,10 +117,13 @@ protected:
     virtual std::optional<u32> ReadTrapGuardConstant(u32, u32) { return std::nullopt; }
 
     /// Adopts an already lowered native program, or captures and lowers it when there is none.
+    /// With a v2 cache, a captured program it holds a record of isn't lowered again.
     void InitializeNativeCode(std::shared_ptr<const LoweredNativeCode> lowered,
-                              u32 source_header_size = 128, bool geometry_stage = false);
+                              u32 source_header_size = 128, bool geometry_stage = false,
+                              ShaderCacheV2::Cache* cache_v2 = nullptr);
     std::shared_ptr<const LoweredNativeCode> LowerNativeCode(u32 source_header_size,
-                                                          bool geometry_stage);
+                                                          bool geometry_stage,
+                                                          ShaderCacheV2::Cache* cache_v2);
     size_t native_source_size{};
     std::shared_ptr<const LoweredNativeCode> lowered_native;
     std::shared_ptr<const ShaderCacheV2::ProgramRecord> program_record;
@@ -162,7 +166,8 @@ public:
                                  Tegra::MemoryManager& gpu_memory_,
                                  Tegra::Engines::Maxwell3D::Regs::ShaderType program,
                                  GPUVAddr program_base_, u32 start_address_,
-                                 std::shared_ptr<const LoweredNativeCode> lowered_native_ = {});
+                                 std::shared_ptr<const LoweredNativeCode> lowered_native_ = {},
+                                 ShaderCacheV2::Cache* cache_v2 = nullptr);
 
     ~GraphicsEnvironment() override = default;
 
@@ -189,7 +194,8 @@ public:
     explicit ComputeEnvironment(Tegra::Engines::KeplerCompute& kepler_compute_,
                                 Tegra::MemoryManager& gpu_memory_, GPUVAddr program_base_,
                                 u32 start_address_,
-                                std::shared_ptr<const LoweredNativeCode> lowered_native_ = {});
+                                std::shared_ptr<const LoweredNativeCode> lowered_native_ = {},
+                                ShaderCacheV2::Cache* cache_v2 = nullptr);
 
     ~ComputeEnvironment() override = default;
 

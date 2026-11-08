@@ -1071,6 +1071,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             [this](size_t count, const std::function<void(size_t)>& task) {
                 VideoCommon::ParallelFor(*shader_jobs, count, task);
             }));
+        cache_v2->LoadPrograms(log_v2->parsed.live);
         const CacheV2::LogStats& stats = log_v2->parsed.stats;
         LOG_INFO(Render_Vulkan,
                  "Shader cache v2: {} bytes, {} live records, {} superseded, {} tombstones, {} "

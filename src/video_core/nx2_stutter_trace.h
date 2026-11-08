@@ -49,7 +49,8 @@ enum class Thread : u8 {
 
 inline constexpr size_t ThreadCount = static_cast<size_t>(Thread::Count);
 
-/// Pipeline lookups, counted at each pipeline's first use in the session.
+/// Pipeline lookups, counted at each pipeline's first use in the session, and native program
+/// lookups (shader cache v2), at each program's first bind.
 enum class Lookup : u8 {
     GraphicsPrebuilt,   ///< Built from the disk cache at boot
     GraphicsBackground, ///< Built from the disk cache by the background prebuild
@@ -57,6 +58,9 @@ enum class Lookup : u8 {
     GraphicsNew,        ///< Not in the disk cache
     ComputePrebuilt,
     ComputeNew,
+    ProgramHit,   ///< Native program from a shader cache v2 record, not lowered
+    ProgramMiss,  ///< Native program lowered: no record
+    ProgramStale, ///< Native program lowered: a record of another build's lowering
     Count,
 };
 
