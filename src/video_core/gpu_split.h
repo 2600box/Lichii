@@ -301,6 +301,11 @@ public:
     /// the writers a command list fetched now is ordered after. Returns whether any of it was
     /// still queued.
     bool WaitForSyncedWriters();
+    /// EXPERIMENT (writer-wait-synced): whether WaitForSyncedWriters would stop short of a writer
+    /// WaitForWriters waits for.
+    [[nodiscard]] bool SyncedWritersWaitShorter() const {
+        return last_sync_position < last_writer_position && WritersMayBePending();
+    }
 
 private:
     friend struct GpuSplitTestAccess;

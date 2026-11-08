@@ -37,9 +37,10 @@ enum Switch : u32 {
     AliasSkip = 32768,      ///< alias-skip: no alias walk while no alias is newer (e368878151)
     AcquireMetSkip = 262144, ///< acquire-met-skip: met GEQUAL acquires skip the drain (fb4d4e47a7)
     DmaReadKnown = 524288,   ///< dma-read-known: macro reads of report memory skip the drain (#243)
+    WriterWaitSynced = 1048576, ///< writer-wait-synced: lists wait for writers up to the last sync
 };
 
-inline constexpr std::array<std::pair<Switch, const char*>, 18> switch_files{{
+inline constexpr std::array<std::pair<Switch, const char*>, 19> switch_files{{
     {BackPicksOff, "back-perf-off"},
     {EntryWaitSkip, "entry-wait-skip"},
     {UboInPlace, "ubo-inplace"},
@@ -58,6 +59,7 @@ inline constexpr std::array<std::pair<Switch, const char*>, 18> switch_files{{
     {AliasSkip, "alias-skip"},
     {AcquireMetSkip, "acquire-met-skip"},
     {DmaReadKnown, "dma-read-known"},
+    {WriterWaitSynced, "writer-wait-synced"},
 }};
 
 inline std::atomic<u32> g_on{0};
@@ -79,6 +81,7 @@ inline std::atomic<u64> g_dma_known_drains{0};
 inline std::atomic<u64> g_dma_known_checked{0};
 inline std::atomic<u64> g_dma_known_unverified{0};
 inline std::atomic<u64> g_dma_known_differ{0};
+inline std::atomic<u64> g_writer_waits_shortened{0};
 
 /// For counters one thread writes: a plain load and store, not a locked add.
 inline void Count(std::atomic<u64>& counter) {
@@ -163,6 +166,10 @@ inline void Refresh() {
                      known_reads, known_drains, g_dma_known_checked.load(std::memory_order_relaxed),
                      g_dma_known_unverified.load(std::memory_order_relaxed),
                      g_dma_known_differ.load(std::memory_order_relaxed));
+        }
+        if (const u64 shortened = g_writer_waits_shortened.exchange(0, std::memory_order_relaxed);
+            shortened != 0) {
+            LOG_INFO(HW_GPU, "EXPERIMENT writer-wait-synced: {} waits shortened in 10 s", shortened);
         }
     }
 }

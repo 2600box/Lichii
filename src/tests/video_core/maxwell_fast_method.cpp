@@ -803,6 +803,27 @@ TEST_CASE("Split remembers the semaphore writes its back has not run yet",
     REQUIRE_FALSE(split.QueuedSemaphoreWriteAt(0x2000).has_value());
 }
 
+TEST_CASE("Split tells when the synced writer wait stops short of the last writer",
+          "[video_core][gpu_split_dependencies]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    Fixture f;
+    f.system.Initialize();
+    VideoCommon::GpuSplit split;
+    Access::Initialize(split, f.system);
+    REQUIRE_FALSE(split.SyncedWritersWaitShorter());
+    // A writer before the last sync: both waits end at it.
+    split.Defer([] {});
+    split.NoteWriter();
+    split.NoteSync();
+    REQUIRE_FALSE(split.SyncedWritersWaitShorter());
+    // A writer after it: only WaitForWriters waits for that one.
+    split.Defer([] {});
+    split.NoteWriter();
+    REQUIRE(split.SyncedWritersWaitShorter());
+    split.NoteSync();
+    REQUIRE_FALSE(split.SyncedWritersWaitShorter());
+}
+
 TEST_CASE("Split command list fetches wait only for the writers before the last host sync",
           "[video_core][gpu_split_dependencies]") {
     using Access = VideoCommon::GpuSplitTestAccess;

@@ -248,8 +248,20 @@ bool DmaPusher::Step() {
         // queued before it. The GPU fetches the list after that work only past a host-level wait
         // (NoteSync): later work is not ordered before the fetch, and the list does not wait for
         // it (nor for draws, which write memory too; draw-written lists wait for the last sync).
+        // EXPERIMENT (writer-wait-synced): off, the list waits for every writer sent so far.
+        const auto wait_for_writers = [] {
+            namespace Experiment = VideoCommon::Nx2Experiment;
+            auto& split = VideoCommon::GpuSplit::Get();
+            if (!Experiment::On(Experiment::WriterWaitSynced)) {
+                return split.WaitForWriters();
+            }
+            if (split.SyncedWritersWaitShorter()) {
+                Experiment::Count(Experiment::g_writer_waits_shortened);
+            }
+            return split.WaitForSyncedWriters();
+        };
         if (!gpu_written && !skip_writer_wait && VideoCommon::GpuSplit::Get().Active() &&
-            VideoCommon::GpuSplit::Get().WaitForSyncedWriters()) {
+            wait_for_writers()) {
             gpu_written =
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
         }
