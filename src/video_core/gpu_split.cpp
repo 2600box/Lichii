@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <charconv>
 #include <cstdlib>
+#include <string_view>
 #include <thread>
 
 #ifdef _MSC_VER
@@ -45,6 +47,40 @@ void Pause() {
 #else
     std::this_thread::yield();
 #endif
+}
+
+/// Test-only spin budgets for the split-wait A/B (upstream 007a132f6f, Djihads80): the PAUSE
+/// spins before the front sleeps in a wait for the back, and before the idle back sleeps. Read
+/// once, at the first wait; unset keeps 16384 and 8192.
+u32 ReadSpinBudget(const char* name, u32 default_value) {
+    constexpr u64 max_spin_budget = 65536;
+    const char* const value = std::getenv(name);
+    if (value == nullptr) {
+        return default_value;
+    }
+    const std::string_view text{value};
+    u64 parsed{};
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), parsed);
+    if (error != std::errc{} || end != text.data() + text.size()) {
+        LOG_WARNING(HW_GPU, "Invalid {} value '{}'; using {}", name, value, default_value);
+        return default_value;
+    }
+    if (parsed > max_spin_budget) {
+        LOG_INFO(HW_GPU, "{} value {} capped at {}", name, parsed, max_spin_budget);
+        parsed = max_spin_budget;
+    }
+    LOG_INFO(HW_GPU, "{}: {} spins (default {})", name, parsed, default_value);
+    return static_cast<u32>(parsed);
+}
+
+u32 FrontSpinBudget() {
+    static const u32 budget = ReadSpinBudget("EDEN_NX2_SPLIT_FRONT_SPINS", 16384);
+    return budget;
+}
+
+u32 BackSpinBudget() {
+    static const u32 budget = ReadSpinBudget("EDEN_NX2_SPLIT_BACK_SPINS", 8192);
+    return budget;
 }
 
 [[maybe_unused]] std::atomic<u32> g_back_thread_id{};
@@ -253,7 +289,7 @@ bool GpuSplit::WaitFor(u64 target, DrainSite site) {
 }
 
 void GpuSplit::Backoff(u32 spins, u64 target) {
-    if (spins < 16384) {
+    if (spins < FrontSpinBudget()) {
         Pause();
         return;
     }
@@ -434,6 +470,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
 #ifdef _WIN32
     g_back_thread_id.store(GetCurrentThreadId(), std::memory_order_relaxed);
 #endif
+    const u32 spin_budget = BackSpinBudget();
     u64 read_position = 0;
     while (!stop_token.stop_requested()) {
         Nx2Egla66Sweep3::Report();
@@ -442,7 +479,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
         if (available == read_position) {
             Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
             // The front usually sends more within microseconds: spin briefly before sleeping.
-            for (u32 spins = 0; spins < 8192 && available == read_position &&
+            for (u32 spins = 0; spins < spin_budget && available == read_position &&
                                 !hook_requested.load(std::memory_order_relaxed);
                  ++spins) {
                 Pause();
