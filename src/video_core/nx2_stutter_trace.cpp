@@ -34,7 +34,9 @@ constexpr auto ComputeMissIndex = static_cast<size_t>(Category::ComputeMiss);
 constexpr auto IdleIndex = static_cast<size_t>(Category::Idle);
 constexpr std::array<std::string_view, ThreadCount> thread_names{"front", "back", "worker"};
 constexpr std::array<std::string_view, LookupCount> lookup_names{
-    "gfx_prebuilt", "gfx_background", "gfx_recorded", "gfx_new", "compute_prebuilt", "compute_new",
+    "gfx_prebuilt",     "gfx_background", "gfx_recorded", "gfx_new",
+    "compute_prebuilt", "compute_new",    "program_hit",  "program_miss",
+    "program_stale",
 };
 
 

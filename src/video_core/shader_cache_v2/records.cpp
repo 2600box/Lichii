@@ -1,9 +1,15 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
+#include <cstddef>
 #include <cstring>
 
+#define XXH_INLINE_ALL
+#include <xxhash.h>
+
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
+#include "shader_recompiler/frontend/ampere/program_override.h"
 #include "shader_recompiler/program_header.h"
 #include "shader_recompiler/stage.h"
 #include "video_core/native_lowering.h"
@@ -92,23 +98,58 @@ u64 LoweringStamp() {
     return GeneratedLoweringStamp;
 }
 
+ProgramKeyInputs MakeProgramKeyInputs(Shader::Stage stage, u32 header_size,
+                                      const Shader::ProgramHeader& sph,
+                                      std::span<const Shader::Ampere::Instruction> native,
+                                      const NativeLoweringInputs& inputs,
+                                      std::span<const u32> verified_traps) {
+    return {
+        .source = stage == Shader::Stage::Compute ? ProgramSource::NativeCompute
+                                                  : ProgramSource::NativeGraphics,
+        .stage = static_cast<u32>(stage),
+        .header_size = header_size,
+        .sph = {reinterpret_cast<const u8*>(&sph), sizeof(sph)},
+        .geometry = inputs.geometry,
+        .tessellation_stage = static_cast<u32>(inputs.tessellation_stage),
+        .native_code_address =
+            LoadsProgramCounter(native, inputs.geometry) ? inputs.native_code_address : 0,
+        .verified_traps = verified_traps,
+        .native = native,
+    };
+}
+
+ProgramKeyInputs ProgramKeyInputsOf(const ProgramRecord& record) {
+    return {
+        .source = record.source,
+        .stage = record.stage,
+        .header_size = record.header_size,
+        .sph = record.sph,
+        .geometry = record.geometry,
+        .tessellation_stage = record.tessellation_stage,
+        .native_code_address = record.native_code_address,
+        .verified_traps = record.verified_traps,
+        .native = record.native,
+    };
+}
+
 ProgramRecord MakeProgramRecord(Shader::Stage stage, u32 header_size,
                                 const Shader::ProgramHeader& sph,
                                 std::span<const Shader::Ampere::Instruction> native,
                                 const NativeLoweringInputs& inputs,
                                 const LoweredNativeCode& lowered) {
+    const std::vector<u32> verified_traps = NativeTrapOffsets(native);
+    const ProgramKeyInputs key =
+        MakeProgramKeyInputs(stage, header_size, sph, native, inputs, verified_traps);
     ProgramRecord record;
-    record.source = stage == Shader::Stage::Compute ? ProgramSource::NativeCompute
-                                                    : ProgramSource::NativeGraphics;
-    record.stage = static_cast<u32>(stage);
+    record.source = key.source;
+    record.stage = key.stage;
     record.header_size = header_size;
     std::memcpy(record.sph.data(), &sph, sizeof(sph));
     record.native.assign(native.begin(), native.end());
-    record.geometry = inputs.geometry;
-    record.tessellation_stage = static_cast<u32>(inputs.tessellation_stage);
-    record.verified_traps = NativeTrapOffsets(native);
-    record.native_code_address =
-        LoadsProgramCounter(native, inputs.geometry) ? inputs.native_code_address : 0;
+    record.geometry = key.geometry;
+    record.tessellation_stage = key.tessellation_stage;
+    record.verified_traps = verified_traps;
+    record.native_code_address = key.native_code_address;
     record.lowering_stamp = LoweringStamp();
     record.lowered_code = lowered.code;
     record.texture_bound = lowered.texture_bound;
@@ -134,20 +175,48 @@ std::shared_ptr<LoweredNativeCode> RelowerProgram(const ProgramRecord& record) {
                                  NativeTrapOffsets(record.native), lowered);
 }
 
+std::shared_ptr<LoweredNativeCode> TakeProgramCode(ProgramRecord& record) {
+    const size_t trap_count =
+        record.verified_traps.empty()
+            ? 0
+            : record.verified_traps.back() / sizeof(Shader::Ampere::Instruction) + 1;
+    auto code = std::make_shared<LoweredNativeCode>();
+    code->native_program_key = Shader::Ampere::NativeProgramKey(record.native);
+    code->code = std::move(record.lowered_code);
+    code->trap_prefix.assign(record.native.begin(),
+                             record.native.begin() +
+                                 static_cast<std::ptrdiff_t>(
+                                     std::min(trap_count, record.native.size())));
+    code->source_size = static_cast<size_t>(record.source_size);
+    code->texture_bound = record.texture_bound;
+    return code;
+}
+
+u64 ProgramKey(const ProgramKeyInputs& inputs) {
+    // Streamed: the hash of the fields laid out one after another, without copying the program
+    XXH3_state_t state;
+    XXH3_64bits_reset(&state);
+    const auto put = [&state](const void* data, size_t size) {
+        XXH3_64bits_update(&state, data, size);
+    };
+    const u64 trap_count = inputs.verified_traps.size();
+    const u64 native_count = inputs.native.size();
+    put(&inputs.source, sizeof(inputs.source));
+    put(&inputs.stage, sizeof(inputs.stage));
+    put(&inputs.header_size, sizeof(inputs.header_size));
+    put(inputs.sph.data(), inputs.sph.size());
+    put(&inputs.geometry, sizeof(inputs.geometry));
+    put(&inputs.tessellation_stage, sizeof(inputs.tessellation_stage));
+    put(&inputs.native_code_address, sizeof(inputs.native_code_address));
+    put(&trap_count, sizeof(trap_count));
+    put(inputs.verified_traps.data(), inputs.verified_traps.size_bytes());
+    put(&native_count, sizeof(native_count));
+    put(inputs.native.data(), inputs.native.size_bytes());
+    return XXH3_64bits_digest(&state);
+}
+
 u64 ProgramKey(const ProgramRecord& record) {
-    Writer key;
-    key.Put(record.source);
-    key.Put(record.stage);
-    key.Put(record.header_size);
-    key.Put(record.sph);
-    key.Put(record.geometry);
-    key.Put(record.tessellation_stage);
-    key.Put(record.native_code_address);
-    key.Put(static_cast<u64>(record.verified_traps.size()));
-    key.PutSpan(std::span<const u32>{record.verified_traps});
-    key.Put(static_cast<u64>(record.native.size()));
-    key.PutSpan(std::span<const Shader::Ampere::Instruction>{record.native});
-    return Hash64(key.Take());
+    return ProgramKey(ProgramKeyInputsOf(record));
 }
 
 std::vector<u8> EncodeProgram(const ProgramRecord& record) {

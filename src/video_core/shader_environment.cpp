@@ -567,9 +567,10 @@ private:
 // A native program is captured and lowered once, when the shader cache first meets it. The
 // environments built later for its pipelines receive that result instead of lowering again.
 void GenericEnvironment::InitializeNativeCode(std::shared_ptr<const LoweredNativeCode> lowered,
-                                              u32 source_header_size, bool geometry_stage) {
+                                              u32 source_header_size, bool geometry_stage,
+                                              ShaderCacheV2::Cache* cache_v2) {
     if (!lowered) {
-        lowered = LowerNativeCode(source_header_size, geometry_stage);
+        lowered = LowerNativeCode(source_header_size, geometry_stage, cache_v2);
     }
     if (!Shader::Ampere::VerifyTrapGuards(lowered->trap_prefix, [&](u32 bank, u32 offset) {
             return ReadTrapGuardConstant(bank, offset);
@@ -586,9 +587,11 @@ void GenericEnvironment::InitializeNativeCode(std::shared_ptr<const LoweredNativ
     lowered_native = std::move(lowered);
 }
 
-std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32 source_header_size,
-                                                                         bool geometry_stage) {
+std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(
+    u32 source_header_size, bool geometry_stage, ShaderCacheV2::Cache* cache_v2) {
     using Shader::Ampere::Instruction;
+    using Clock = std::chrono::steady_clock;
+    const Clock::time_point capture_begin = cache_v2 ? Clock::now() : Clock::time_point{};
     const u32 native_header_size = source_header_size;
     constexpr u32 maximum_instructions = Shader::Ampere::ProgramCaptureState::MaximumInstructions;
     std::vector<Instruction> native;
@@ -641,7 +644,26 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
     const NativeLoweringInputs inputs{.geometry = geometry_stage,
                                       .tessellation_stage = tessellation_stage,
                                       .native_code_address = program_base + native_header_size};
-    auto lowered = LowerNativeProgram(native, inputs);
+    // A program the v2 cache holds a record of from this build's lowering is not lowered again:
+    // the lowering depends on nothing else. Every check below still runs on its code.
+    ShaderCacheV2::FoundProgram found;
+    if (cache_v2) {
+        found = cache_v2->FindProgram(ShaderCacheV2::MakeProgramKeyInputs(
+            stage, native_header_size, sph, native, inputs, verified_traps));
+    }
+    const Clock::time_point lookup_end = cache_v2 ? Clock::now() : Clock::time_point{};
+    Shader::Ampere::LoweredProgram lowered;
+    if (!found.code) {
+        lowered = LowerNativeProgram(native, inputs);
+    }
+    if (cache_v2) {
+        const auto nanoseconds = [](Clock::duration duration) {
+            return static_cast<u64>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count());
+        };
+        cache_v2->CountProgram(found.lookup, nanoseconds(lookup_end - capture_begin),
+                               found.code ? 0 : nanoseconds(Clock::now() - lookup_end));
+    }
     bool overridden = false;
     // EDEN_NX2_REJECT=<hex address>,...: treat these programs as rejected (to find which newly
     // lowered program changes a game's behaviour without rebuilding).
@@ -685,7 +707,7 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
             }
         }
     }
-    if (!lowered) {
+    if (!found.code && !lowered) {
         if (const char* directory = std::getenv("EDEN_NATIVE_SHADER_OVERRIDE_DIR")) {
             const auto key = fmt::format("{:016x}", Shader::Ampere::NativeProgramKey(native));
             const auto folder = std::filesystem::path{directory};
@@ -738,7 +760,7 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
             }
         }
     }
-    if (!lowered) {
+    if (!found.code && !lowered) {
         const size_t failed = lowered.error_offset / sizeof(Shader::Ampere::Instruction);
         const auto words = failed < native.size() ? native[failed].words : std::array<u32, 4>{};
         throw Shader::RuntimeError(
@@ -746,7 +768,10 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
             program_base, lowered.error_offset, lowered.error, words[0] & 0xfff, words[0],
             words[1], words[2], words[3]);
     }
-    auto result = MakeLoweredNativeCode(native, sph, native_header_size, verified_traps, lowered);
+    std::shared_ptr<const LoweredNativeCode> result = found.code;
+    if (!result) {
+        result = MakeLoweredNativeCode(native, sph, native_header_size, verified_traps, lowered);
+    }
     const auto& lowered_code = result->code;
     // EDEN_NX2_REJECT_HASH=<hash>,...: like EDEN_NX2_REJECT, but by native program key (shader
     // dump file names) or shader hash (frame dump "shaders"), which stay the same between runs.
@@ -773,6 +798,11 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(u32
             }
         }
     }
+    if (found.code) {
+        LOG_DEBUG(Shader, "Native shader at {:#x} from its v2 record: {} source bytes",
+                  program_base, result->source_size);
+        return result;
+    }
     // A program from an override file depends on more than the lowering: the v2 cache leaves it out.
     if (ShaderCacheV2::Enabled() && !overridden) {
         program_record = std::make_shared<const ShaderCacheV2::ProgramRecord>(
@@ -788,7 +818,8 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
                                          Tegra::MemoryManager& gpu_memory_,
                                          Maxwell::ShaderType program, GPUVAddr program_base_,
                                          u32 start_address_,
-                                         std::shared_ptr<const LoweredNativeCode> lowered_native_)
+                                         std::shared_ptr<const LoweredNativeCode> lowered_native_,
+                                         ShaderCacheV2::Cache* cache_v2)
     : GenericEnvironment{gpu_memory_, program_base_, start_address_}, maxwell3d{&maxwell3d_} {
     gpu_memory->ReadBlock(program_base + start_address, &sph, sizeof(sph));
     initial_offset = sizeof(sph);
@@ -935,7 +966,7 @@ GraphicsEnvironment::GraphicsEnvironment(Tegra::Engines::Maxwell3D& maxwell3d_,
                      static_cast<u32>(regs.tessellation.params.output_primitives.Value()),
                      regs.patch_vertices);
         }
-        InitializeNativeCode(std::move(lowered_native_), 128, geometry);
+        InitializeNativeCode(std::move(lowered_native_), 128, geometry, cache_v2);
     }
     const u64 local_size{sph.LocalMemorySize()};
     ASSERT(local_size <= (std::numeric_limits<u32>::max)());
@@ -1016,7 +1047,8 @@ u32 GraphicsEnvironment::ReadViewportTransformState() {
 ComputeEnvironment::ComputeEnvironment(Tegra::Engines::KeplerCompute& kepler_compute_,
                                        Tegra::MemoryManager& gpu_memory_, GPUVAddr program_base_,
                                        u32 start_address_,
-                                       std::shared_ptr<const LoweredNativeCode> lowered_native_)
+                                       std::shared_ptr<const LoweredNativeCode> lowered_native_,
+                                       ShaderCacheV2::Cache* cache_v2)
     : GenericEnvironment{gpu_memory_, program_base_, start_address_}, kepler_compute{
                                                                           &kepler_compute_} {
     const auto& qmd{kepler_compute->launch_description};
@@ -1029,7 +1061,7 @@ ComputeEnvironment::ComputeEnvironment(Tegra::Engines::KeplerCompute& kepler_com
     if (kepler_compute->IsNativeMode()) {
         initial_offset = sizeof(sph);
         is_proprietary_driver = true;
-        InitializeNativeCode(std::move(lowered_native_), 0);
+        InitializeNativeCode(std::move(lowered_native_), 0, false, cache_v2);
         start_address = sizeof(sph);
     }
 }

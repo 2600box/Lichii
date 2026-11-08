@@ -58,6 +58,29 @@ struct ProgramRecord {
     u64 unique_hash{};
 };
 
+/// What the key of a program's record covers (see ProgramKey), without copying it
+struct ProgramKeyInputs {
+    ProgramSource source{};
+    u32 stage{};
+    u32 header_size{};
+    std::span<const u8> sph;
+    bool geometry{};
+    u32 tessellation_stage{};
+    u64 native_code_address{}; ///< 0 unless the lowering puts it into the code
+    std::span<const u32> verified_traps;
+    std::span<const Shader::Ampere::Instruction> native;
+};
+
+/// The key inputs of a native program captured `header_size` bytes after the start of its header,
+/// lowered with these inputs and traps (NativeTrapOffsets)
+[[nodiscard]] ProgramKeyInputs MakeProgramKeyInputs(
+    Shader::Stage stage, u32 header_size, const Shader::ProgramHeader& sph,
+    std::span<const Shader::Ampere::Instruction> native, const NativeLoweringInputs& inputs,
+    std::span<const u32> verified_traps);
+
+/// The key inputs a record holds
+[[nodiscard]] ProgramKeyInputs ProgramKeyInputsOf(const ProgramRecord& record);
+
 /// The record of a native program captured `header_size` bytes after the start of its header and
 /// lowered with these inputs into `lowered`
 [[nodiscard]] ProgramRecord MakeProgramRecord(Shader::Stage stage, u32 header_size,
@@ -70,8 +93,13 @@ struct ProgramRecord {
 /// that fails.
 [[nodiscard]] std::shared_ptr<LoweredNativeCode> RelowerProgram(const ProgramRecord& record);
 
+/// The code a record holds, laid out as MakeLoweredNativeCode lays out a lowering. Takes the
+/// record's lowered code.
+[[nodiscard]] std::shared_ptr<LoweredNativeCode> TakeProgramCode(ProgramRecord& record);
+
 /// The record key of a program: a hash of everything its lowering depends on except the build.
 /// The address of the code is part of it only where the lowering puts it into the code.
+[[nodiscard]] u64 ProgramKey(const ProgramKeyInputs& inputs);
 [[nodiscard]] u64 ProgramKey(const ProgramRecord& record);
 
 [[nodiscard]] std::vector<u8> EncodeProgram(const ProgramRecord& record);

@@ -170,7 +170,8 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
                 // ShaderInfo keeps the result for the pipeline's environments).
                 RethrowIfRejected(*cpu_shader_addr);
                 const Nx2Profile::Scope profile_scope{Nx2Profile::Zone::ShaderCapture};
-                GraphicsEnvironment env{*maxwell3d, *gpu_memory, program, native ? shader_addr : base_addr, start_address};
+                GraphicsEnvironment env{*maxwell3d, *gpu_memory, program, native ? shader_addr : base_addr, start_address,
+                                        {}, shader_cache_v2};
                 shader_info = MakeShaderInfo(env, *cpu_shader_addr);
             } catch (const Shader::Exception&) {
                 RememberRejection(*cpu_shader_addr);
@@ -284,7 +285,8 @@ const ShaderInfo* ShaderCache::ComputeShader() {
         try {
             RethrowIfRejected(*cpu_shader_addr);
             const Nx2Profile::Scope profile_scope{Nx2Profile::Zone::ShaderCapture};
-            ComputeEnvironment env{*kepler_compute, *gpu_memory, program_base, qmd.program_start};
+            ComputeEnvironment env{*kepler_compute, *gpu_memory, program_base, qmd.program_start, {},
+                                   shader_cache_v2};
             shader = MakeShaderInfo(env, *cpu_shader_addr);
         } catch (const Shader::Ampere::TrapGuardError&) {
             // Constants can become valid on the next dispatch; do not cache this rejection.

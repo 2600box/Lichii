@@ -1021,6 +1021,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         shader_cache_v2 = cache_v2.get();
         // Without the lock: another emulator's appends are complete records or a cut-off tail.
         log_v2.emplace(CacheV2::ReadLogFile(pipeline_cache_filename));
+        cache_v2->LoadPrograms(log_v2->parsed.live);
         const CacheV2::LogStats& stats = log_v2->parsed.stats;
         LOG_INFO(Render_Vulkan,
                  "Shader cache v2: {} bytes, {} live records, {} superseded, {} tombstones, {} "
@@ -1320,12 +1321,6 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             for (const CacheV2::LogRecord& record : log_v2->parsed.live) {
                 if (stop_loading.stop_requested()) {
                     break;
-                }
-                if (record.kind == CacheV2::RecordKind::Program) {
-                    if (const auto stamp = CacheV2::ProgramStamp(record.payload)) {
-                        cache_v2->AddProgram(record.key, *stamp);
-                    }
-                    continue;
                 }
                 if (record.kind != CacheV2::RecordKind::Graphics &&
                     record.kind != CacheV2::RecordKind::Compute) {
