@@ -46,6 +46,15 @@ inline std::atomic<u64> g_ubo_mask_skipped{0};
 inline std::atomic<u64> g_ubo_mask_visited{0};
 inline std::atomic<u64> g_ubo_mask_mismatches{0};
 
+/// A uniform buffer bound again to the range it holds keeps its resolved buffer (9b06c4fd38's
+/// same-address rebind). _VERIFY resolves kept slots again at the next update and compares.
+inline bool ubo_rebind{};
+inline bool ubo_rebind_verify{};
+
+inline std::atomic<u64> g_ubo_rebind_kept{0};
+inline std::atomic<u64> g_ubo_rebind_bound{0};
+inline std::atomic<u64> g_ubo_rebind_mismatches{0};
+
 inline void ReadSwitches() {
     const auto read = [](const char* name) {
         const char* const value = std::getenv(name);
@@ -56,8 +65,13 @@ inline void ReadSwitches() {
     state_run = read("EDEN_NX2_EGLA66_STATE_RUN");
     ubo_mask = read("EDEN_NX2_EGLA66_UBO_MASK");
     ubo_mask_verify = ubo_mask && read("EDEN_NX2_EGLA66_UBO_MASK_VERIFY");
-    LOG_INFO(HW_GPU, "EGLA66 gates: ring-run {}, publish {}, state-run {}, ubo-mask {}",
-             ring_run, publish, state_run, ubo_mask);
+    ubo_rebind = read("EDEN_NX2_EGLA66_UBO_REBIND");
+    ubo_rebind_verify = ubo_rebind && read("EDEN_NX2_EGLA66_UBO_REBIND_VERIFY");
+    LOG_INFO(HW_GPU,
+             "EGLA66 gates: ring-run {}, publish {}, state-run {}, ubo-mask {} (verify {}), "
+             "ubo-rebind {} (verify {})",
+             ring_run, publish, state_run, ubo_mask, ubo_mask_verify, ubo_rebind,
+             ubo_rebind_verify);
 }
 
 /// For counters one thread writes: a plain load and store, not a locked add.
@@ -67,7 +81,7 @@ inline void Count(std::atomic<u64>& counter, u64 amount = 1) {
 
 /// The split's back thread, once per loop: logs what the enabled candidates did in the last 10 s.
 inline void Report() {
-    if (!ring_run && !publish && !state_run && !ubo_mask) {
+    if (!ring_run && !publish && !state_run && !ubo_mask && !ubo_rebind) {
         return;
     }
     static u32 calls{};
@@ -114,6 +128,18 @@ inline void Report() {
                  "EGLA66 ubo-mask: {} enabled uniform slots skipped, {} visited in 10 s{}",
                  new_skipped, new_visited,
                  ubo_mask_verify ? fmt::format(", {} mismatches (verify)", new_mismatches) : "");
+    }
+    if (ubo_rebind) {
+        static u64 kept{};
+        static u64 bound{};
+        static u64 mismatches{};
+        const u64 new_kept = take(g_ubo_rebind_kept, kept);
+        const u64 new_bound = take(g_ubo_rebind_bound, bound);
+        const u64 new_mismatches = take(g_ubo_rebind_mismatches, mismatches);
+        LOG_INFO(HW_GPU,
+                 "EGLA66 ubo-rebind: {} uniform binds kept their buffer, {} bound anew in 10 s{}",
+                 new_kept, new_bound,
+                 ubo_rebind_verify ? fmt::format(", {} mismatches (verify)", new_mismatches) : "");
     }
     if (publish) {
         static u64 idle{};

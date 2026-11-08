@@ -666,16 +666,26 @@ TEST_CASE("Uniform buffer slots resolve to the buffer that holds them with the E
     namespace Egla66 = VideoCommon::Nx2Egla66;
     const bool previous_mask = Egla66::ubo_mask;
     const bool previous_mask_verify = Egla66::ubo_mask_verify;
+    const bool previous_rebind = Egla66::ubo_rebind;
+    const bool previous_rebind_verify = Egla66::ubo_rebind_verify;
     SCOPE_EXIT {
         Egla66::ubo_mask = previous_mask;
         Egla66::ubo_mask_verify = previous_mask_verify;
+        Egla66::ubo_rebind = previous_rebind;
+        Egla66::ubo_rebind_verify = previous_rebind_verify;
     };
-    const auto mode = GENERATE(0, 1, 2);
-    CAPTURE(mode);
-    Egla66::ubo_mask = mode != 0;
-    Egla66::ubo_mask_verify = mode == 2;
+    // Each gate off, on or verifying, alone and together.
+    const auto mask_mode = GENERATE(0, 1, 2);
+    const auto rebind_mode = GENERATE(0, 1, 2);
+    CAPTURE(mask_mode, rebind_mode);
+    Egla66::ubo_mask = mask_mode != 0;
+    Egla66::ubo_mask_verify = mask_mode == 2;
+    Egla66::ubo_rebind = rebind_mode != 0;
+    Egla66::ubo_rebind_verify = rebind_mode == 2;
     const u64 mismatches = Egla66::g_ubo_mask_mismatches.load();
     const u64 skipped = Egla66::g_ubo_mask_skipped.load();
+    const u64 rebind_mismatches = Egla66::g_ubo_rebind_mismatches.load();
+    const u64 kept = Egla66::g_ubo_rebind_kept.load();
     Fixture f;
     Tegra::Control::ChannelState state{0};
     state.memory_manager = &*f.memory;
@@ -744,7 +754,11 @@ TEST_CASE("Uniform buffer slots resolve to the buffer that holds them with the E
         }
     }
     REQUIRE(Egla66::g_ubo_mask_mismatches.load() == mismatches);
+    REQUIRE(Egla66::g_ubo_rebind_mismatches.load() == rebind_mismatches);
     if (Egla66::ubo_mask) {
         REQUIRE(Egla66::g_ubo_mask_skipped.load() > skipped);
+    }
+    if (Egla66::ubo_rebind) {
+        REQUIRE(Egla66::g_ubo_rebind_kept.load() > kept);
     }
 }

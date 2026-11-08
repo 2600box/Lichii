@@ -184,6 +184,8 @@ public:
     std::array<u32, NUM_STAGES> unresolved_uniform_buffers{
         ~u32{0}, ~u32{0}, ~u32{0}, ~u32{0}, ~u32{0},
     };
+    /// EGLA-66 ubo-rebind verify: slots whose last bind kept their resolved buffer.
+    std::array<u32, NUM_STAGES> kept_uniform_buffers{};
     std::array<u32, NUM_STAGES> fast_bound_uniform_buffers{};
     std::array<std::array<u32, NUM_GRAPHICS_UNIFORM_BUFFERS>, NUM_STAGES>
         uniform_buffer_binding_sizes{};

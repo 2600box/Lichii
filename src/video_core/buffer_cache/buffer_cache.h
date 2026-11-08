@@ -588,6 +588,22 @@ void BufferCache<P>::BindGraphicsUniformBuffer(size_t stage, u32 index, GPUVAddr
         channel_state->unresolved_uniform_buffers[stage] |= 1U << index;
         return;
     }
+    if (Nx2Egla66::ubo_rebind) {
+        // EGLA-66 ubo-rebind (9b06c4fd38): the same range bound again keeps its resolved buffer
+        // (a deleted buffer's id was reset by DeleteBuffer).
+        const Binding& current = channel_state->uniform_buffers[stage][index];
+        if (current.buffer_id && current.buffer_id != NULL_BUFFER_ID &&
+            current.device_addr == *device_addr && current.size == size) {
+            Nx2Egla66::Count(Nx2Egla66::g_ubo_rebind_kept);
+            if (Nx2Egla66::ubo_rebind_verify) {
+                channel_state->kept_uniform_buffers[stage] |= 1U << index;
+                channel_state->unresolved_uniform_buffers[stage] |= 1U << index;
+            }
+            return;
+        }
+        Nx2Egla66::Count(Nx2Egla66::g_ubo_rebind_bound);
+        channel_state->kept_uniform_buffers[stage] &= ~(1U << index);
+    }
     const Binding binding{
         .device_addr = *device_addr,
         .size = size,
@@ -606,6 +622,7 @@ void BufferCache<P>::DisableGraphicsUniformBuffer(size_t stage, u32 index) {
     }
     current = NULL_BINDING;
     channel_state->unresolved_uniform_buffers[stage] &= ~(1U << index);
+    channel_state->kept_uniform_buffers[stage] &= ~(1U << index);
 }
 
 template <class P>
@@ -2055,6 +2072,19 @@ void BufferCache<P>::UpdateUniformBuffers(size_t stage) {
     ForEachEnabledBit(to_resolve, [&](u32 index) {
         Binding& binding = channel_state->uniform_buffers[stage][index];
         if (binding.buffer_id) {
+            // EGLA-66 ubo-rebind verify: a kept binding must still be the buffer of its range.
+            if (Nx2Egla66::ubo_rebind_verify &&
+                ((channel_state->kept_uniform_buffers[stage] >> index) & 1) != 0) {
+                channel_state->kept_uniform_buffers[stage] &= ~(1U << index);
+                const BufferId buffer_id = FindBuffer(binding.device_addr, binding.size, false);
+                if (buffer_id != binding.buffer_id) {
+                    Nx2Egla66::Count(Nx2Egla66::g_ubo_rebind_mismatches);
+                    if constexpr (HAS_PERSISTENT_UNIFORM_BUFFER_BINDINGS) {
+                        channel_state->dirty_uniform_buffers[stage] |= 1U << index;
+                    }
+                    binding.buffer_id = buffer_id;
+                }
+            }
             // Already updated
             return;
         }
