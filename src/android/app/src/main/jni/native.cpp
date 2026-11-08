@@ -482,7 +482,7 @@ Common::Android::SoftwareKeyboard::AndroidKeyboard* EmulationSession::SoftwareKe
 
 void EmulationSession::LoadDiskCacheProgress(VideoCore::LoadCallbackStage stage, int progress,
                                              int max) {
-    // The app's stage list has no warm-up stage: it shows as shader building.
+    // The app has no precache stage: it shows as shader building.
     if (stage == VideoCore::LoadCallbackStage::Warm) {
         stage = VideoCore::LoadCallbackStage::Build;
     }

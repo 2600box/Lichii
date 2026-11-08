@@ -50,7 +50,8 @@ using ComputeKey = std::array<u8, 24>;
 /// A program lowered and laid out like LowerNativeCode (video_core/shader_environment.cpp).
 struct LoweredCode {
     std::vector<u8> code;
-    u32 texture_buffer = ~0U;
+    /// Constant buffer the program's bound textures read, ~0U when it names none.
+    u32 texture_buffer{~0U};
 };
 
 /// Lowers one extracted program like `shader-sweep <program> --capture-extent --lower-only
@@ -60,6 +61,11 @@ struct LoweredCode {
 /// map, its count and the magic. Returns the error text when the program cannot be lowered.
 std::optional<std::string> LowerProgram(std::span<const u8> program, bool graphics,
                                         LoweredCode& out);
+
+/// LowerProgram for a compute program.
+inline std::optional<std::string> LowerProgram(std::span<const u8> program, LoweredCode& out) {
+    return LowerProgram(program, false, out);
+}
 
 /// NativeShaderHash: CityHash64(code) ^ 0x4f554e4345000002.
 u64 StageHash(std::span<const u8> code);
@@ -89,8 +95,9 @@ GraphicsKey GraphicsEntryKey(u32 stage, const GraphicsKey& template_key, u64 sta
 
 /// Draw state statistics from runtime pipeline caches recorded by the game.
 struct RuntimeStats {
-    /// Most common FixedPipelineState per stage (index 0 vertex, 1 fragment), hash slots and
-    /// color output types zeroed. Empty when the caches have no record of that stage.
+    /// Draw state per stage (index 0 vertex, 1 fragment), hash slots zeroed: among the records
+    /// with the most common render target (samples, depth, color formats), the most common
+    /// FixedPipelineState. Empty when the caches have no record of that stage.
     std::array<std::optional<GraphicsKey>, 2> templates;
     /// Vertex stage hash -> attribute types (key bytes 112-119) of each unique occurrence.
     std::unordered_map<u64, std::vector<u64>> vertex_attributes;

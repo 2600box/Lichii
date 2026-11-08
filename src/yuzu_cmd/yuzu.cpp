@@ -479,7 +479,7 @@ static bool EditNup(const Core::LaunchParams& lp) {
     }
 }
 
-/// Hidden test hook (not in --help): builds a game's shader warm-up files without booting it.
+/// Hidden test hook (not in --help): builds a game's shader precache files without booting it.
 ///   yuzu-cmd --build-warm <game file> <title id hex> <output dir> [--defaults | cache ...]
 /// With pipeline cache files, the draw state guesses come from them; --defaults uses the
 /// built-in guesses; neither uses the title's own pipeline cache when it exists.
@@ -551,10 +551,10 @@ static bool BuildWarm(Core::System& system, int argc, char** argv) {
             break;
         }
     }
-    fmt::print("{{\"ok\": {}, \"error\": \"{}\", \"compute\": {}, \"vertex\": {}, "
-               "\"fragment\": {}, \"skipped\": {}, \"seconds\": {:.1f}}}\n",
-               result.ok, error, result.compute_programs, result.vertex_programs,
-               result.fragment_programs, result.skipped,
+    fmt::print("{{\"ok\": {}, \"error\": \"{}\", \"archives\": {}, \"compute\": {}, "
+               "\"vertex\": {}, \"fragment\": {}, \"skipped\": {}, \"seconds\": {:.1f}}}\n",
+               result.ok, error, result.archives, result.compute_programs,
+               result.vertex_programs, result.fragment_programs, result.skipped,
                std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count());
     std::fflush(stdout);
     return result.ok;

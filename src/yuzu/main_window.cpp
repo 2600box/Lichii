@@ -938,8 +938,6 @@ void MainWindow::WebBrowserRequestExit() {
 #endif
 }
 
-/// Creates the render window, the loading screen and the status bar labels and buttons (shader
-/// warm-up label included).
 void MainWindow::InitializeWidgets() {
     render_window = new GRenderWindow(this, input_subsystem);
     render_window->hide();
@@ -975,9 +973,6 @@ void MainWindow::InitializeWidgets() {
     message_label->setAlignment(Qt::AlignLeft);
     statusBar()->addPermanentWidget(message_label, 1);
 
-    shader_warm_label = new QLabel();
-    shader_warm_label->setToolTip(
-        tr("Shaders prepared ahead of time so the game stutters less when it first uses them"));
     shader_building_label = new QLabel();
     shader_building_label->setToolTip(tr("The amount of shaders currently being built"));
     res_scale_label = new QLabel();
@@ -994,8 +989,8 @@ void MainWindow::InitializeWidgets() {
         tr("Time taken to emulate a Switch frame, not counting framelimiting or v-sync. For "
            "full-speed emulation this should be at most 16.67 ms."));
 
-    for (auto& label : {shader_warm_label, shader_building_label, res_scale_label, emu_speed_label,
-                        game_fps_label, emu_frametime_label}) {
+    for (auto& label : {shader_building_label, res_scale_label, emu_speed_label, game_fps_label,
+                        emu_frametime_label}) {
         label->setVisible(false);
         label->setFrameStyle(QFrame::NoFrame);
         label->setContentsMargins(4, 0, 4, 0);
@@ -1485,7 +1480,6 @@ void MainWindow::OnAppFocusStateChanged(Qt::ApplicationState state) {
     }
 }
 
-/// Connects the game list, render window and loading screen signals to their handlers.
 void MainWindow::ConnectWidgetEvents() {
     connect(game_list, &GameList::ReportCompatibilityRequested, this, [this](u64 program_id) {
         if (!report_session || report_session->program_id != program_id || emulation_running ||
@@ -2014,8 +2008,6 @@ bool MainWindow::SelectAndSetCurrentUser(
     return true;
 }
 
-/// Loads the game and starts emulation, showing the reason when it cannot start (a running shader
-/// warm-up build included).
 void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletParameters params,
                           StartGameType type) {
     if (nup_running && filename.toStdString() == nup_source_path) {
@@ -2025,9 +2017,9 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
         return;
     }
     if (shader_warm_dialog && shader_warm_dialog->IsRunning()) {
-        QMessageBox::information(this, tr("Shader Warm-up in Progress"),
-                                 tr("Games cannot be started while the shader warm-up is being "
-                                    "prepared. Wait for it to finish or cancel it."));
+        QMessageBox::information(this, tr("Shader Precache in Progress"),
+                                 tr("Games cannot be started while the shader precache is being "
+                                    "built. Wait for it to finish or cancel it."));
         shader_warm_dialog->raise();
         shader_warm_dialog->activateWindow();
         return;
@@ -2113,7 +2105,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
         Settings::UpdateGPUAccuracy();
         LOG_INFO(Config, "Applied recommended MKW settings after per-game configuration");
     }
-    AskWarmBeforeStart(title_id);
+    PrepareShaderPrecache(title_id, std::filesystem::path{filename.toStdU16String()});
     Settings::LogSettings();
 
     if (UISettings::values.select_user_on_boot && !user_flag_cmd_line) {
@@ -2458,7 +2450,6 @@ void MainWindow::TerminateEmulationThread() {
     }
 }
 
-/// Resets the window and status bar to the no game state after emulation stops.
 void MainWindow::OnEmulationStopped() {
     if (!emulation_running) {
         return;
@@ -2518,7 +2509,6 @@ void MainWindow::OnEmulationStopped() {
 
     // Disable status bar updates
     status_bar_update_timer.stop();
-    shader_warm_label->setVisible(false);
     shader_building_label->setVisible(false);
     res_scale_label->setVisible(false);
     emu_speed_label->setVisible(false);
@@ -4430,7 +4420,21 @@ void MainWindow::OnGameListConvertToNup(const std::string& game_path) {
     }));
 }
 
-/// Opens the shader warm-up dialog for the game and starts the build, or brings a running one to
+namespace {
+/// The game's title as its loader reports it, else the file name without extension.
+QString GameTitleName(const std::string& game_path) {
+    if (const auto loader = Loader::GetLoader(
+            *QtCommon::system, QtCommon::vfs->OpenFile(game_path, FileSys::OpenMode::Read))) {
+        std::string title;
+        if (loader->ReadTitle(title) == Loader::ResultStatus::Success) {
+            return QString::fromStdString(title);
+        }
+    }
+    return QFileInfo(QString::fromStdString(game_path)).completeBaseName();
+}
+} // namespace
+
+/// Opens the shader precache dialog for the game and starts the build, or brings a running one to
 /// the front. Refused while a game runs or while this game is being converted.
 void MainWindow::OnGameListPrepareShaderWarm(u64 program_id, const std::string& game_path) {
     if (shader_warm_dialog) {
@@ -4442,90 +4446,101 @@ void MainWindow::OnGameListPrepareShaderWarm(u64 program_id, const std::string& 
         shader_warm_dialog->close();
     }
     if (QtCommon::emu_thread != nullptr) {
-        QMessageBox::information(this, tr("Prepare Shaders"),
+        QMessageBox::information(this, tr("Precache Shaders"),
                                  tr("Close the running game first."));
         return;
     }
     if (nup_running && game_path == nup_source_path) {
-        QMessageBox::information(this, tr("Prepare Shaders"),
+        QMessageBox::information(this, tr("Precache Shaders"),
                                  tr("This game is being converted. Try again when it is done."));
         return;
     }
 
     const auto path = std::filesystem::path{std::u8string{game_path.begin(), game_path.end()}};
-    QString name;
-    if (const auto loader = Loader::GetLoader(
-            *QtCommon::system, QtCommon::vfs->OpenFile(game_path, FileSys::OpenMode::Read))) {
-        std::string title;
-        if (loader->ReadTitle(title) == Loader::ResultStatus::Success) {
-            name = QString::fromStdString(title);
-        }
-    }
-    if (name.isEmpty()) {
-        name = QFileInfo(QString::fromStdString(game_path)).completeBaseName();
-    }
-
-    shader_warm_dialog = new ShaderWarmDialog(*QtCommon::system, path, program_id, name, this);
+    shader_warm_dialog =
+        new ShaderWarmDialog(*QtCommon::system, path, program_id, GameTitleName(game_path), this);
     connect(shader_warm_dialog, &QDialog::finished, shader_warm_dialog, &QObject::deleteLater);
     shader_warm_dialog->show();
     shader_warm_dialog->Start();
 }
 
-/// With shader_warm_at_boot = Ask and a warm-up the title has never finished, asks whether to run
-/// it on the loading screen before the game starts. "Don't ask again" keeps the answer as the
-/// setting (saved with the other settings).
-void MainWindow::AskWarmBeforeStart(u64 title_id) {
+/// With precache_shaders on: a title precached before is precached again only when the driver or
+/// its precache file changed (the renderer checks). For one never precached, Ask asks whether to
+/// precache before the game starts, and a title without a precache file gets one built from its
+/// game files first. A stopped or failed build starts the game without precaching.
+void MainWindow::PrepareShaderPrecache(u64 title_id, const std::filesystem::path& game_path) {
     namespace ShaderWarm = VideoCommon::ShaderWarm;
     ShaderWarm::RequestWarmBeforeStart(false);
-    if (title_id == 0 ||
-        Settings::values.shader_warm_at_boot.GetValue() != Settings::ShaderWarmAtBoot::Ask ||
-        !ShaderWarm::WarmPending(title_id)) {
+    const auto mode = Settings::values.precache_shaders.GetValue();
+    // The precache runs where the disk shader cache loads.
+    if (title_id == 0 || mode == Settings::PrecacheShaders::Off ||
+        !Settings::values.use_disk_shader_cache.GetValue()) {
         return;
     }
-    QMessageBox box(QMessageBox::Question, tr("Prepare Shaders"),
-                    tr("The shaders of this game are not prepared yet. Prepare them now?\n\n"
-                       "The game starts when they are done: about 10 minutes the first time, on "
-                       "every CPU thread. Later launches skip this.\n\n"
-                       "Without it, they are prepared in the background while you play, with "
-                       "more stutter until then."),
-                    QMessageBox::NoButton, this);
-    QPushButton* const prepare = box.addButton(tr("Prepare now"), QMessageBox::AcceptRole);
-    box.addButton(tr("Start without"), QMessageBox::RejectRole);
-    box.setDefaultButton(prepare);
-    auto* const remember = new QCheckBox(tr("Don't ask again"), &box);
-    box.setCheckBox(remember);
-    box.exec();
-    const bool now = box.clickedButton() == prepare;
-    ShaderWarm::RequestWarmBeforeStart(now);
-    if (remember->isChecked()) {
-        Settings::values.shader_warm_at_boot.SetValue(now ? Settings::ShaderWarmAtBoot::Always
-                                                          : Settings::ShaderWarmAtBoot::Never);
+    if (!ShaderWarm::WarmPending(title_id)) {
+        // Precached before: the renderer runs it again only when the driver or the file changed.
+        ShaderWarm::RequestWarmBeforeStart(true);
+        return;
     }
-    LOG_INFO(Frontend, "Shader warm-up before the game starts: {}{}", now ? "yes" : "no",
-             remember->isChecked() ? " (don't ask again)" : "");
+    if (mode == Settings::PrecacheShaders::Ask) {
+        QMessageBox box(QMessageBox::Question, tr("Precache Shaders"),
+                        tr("The shaders of this game are not precached yet. Precache them now?\n\n"
+                           "The game starts when they are done. The first time, the game files "
+                           "are read and their shaders are built on every CPU thread, with the "
+                           "shaders earlier play sessions saved, which takes a few minutes. Later "
+                           "launches only build what is new, until the GPU driver changes. The "
+                           "loading screen has a Skip button.\n\n"
+                           "You can change this in Configure, Graphics, Advanced."),
+                        QMessageBox::NoButton, this);
+        QPushButton* const precache = box.addButton(tr("Precache now"), QMessageBox::AcceptRole);
+        box.addButton(tr("Start without"), QMessageBox::RejectRole);
+        box.setDefaultButton(precache);
+        box.exec();
+        const bool now = box.clickedButton() == precache;
+        LOG_INFO(Frontend, "Shader precache before the game starts: {}", now ? "yes" : "no");
+        if (!now) {
+            return;
+        }
+    }
+    std::error_code ec;
+    if (!std::filesystem::exists(ShaderWarm::ComputeWarmPath(title_id), ec)) {
+        ShaderWarmDialog dialog(*QtCommon::system, game_path, title_id,
+                                GameTitleName(Common::FS::PathToUTF8String(game_path)), this);
+        connect(&dialog, &ShaderWarmDialog::BuildFinished, &dialog, [&dialog](bool ok) {
+            if (ok) {
+                dialog.accept();
+            }
+        });
+        dialog.Start();
+        dialog.exec();
+        if (!std::filesystem::exists(ShaderWarm::ComputeWarmPath(title_id), ec)) {
+            return;
+        }
+    }
+    ShaderWarm::RequestWarmBeforeStart(true);
 }
 
-/// Deletes the game's warm-up files after a confirmation, showing the error when it fails.
+/// Deletes the game's precache files after a confirmation, showing the error when it fails.
 void MainWindow::OnGameListDeleteShaderWarm(u64 program_id) {
     if (shader_warm_dialog && shader_warm_dialog->IsRunning() &&
         shader_warm_dialog->TitleId() == program_id) {
         // The builder writes this title's files: deleting them under it would lose the result or
         // fail it. Other titles' files are in their own folders.
-        QMessageBox::information(this, tr("Delete Shader Warm-up"),
-                                 tr("Shaders are being prepared. Try again when it is done."));
+        QMessageBox::information(this, tr("Delete Shader Precache"),
+                                 tr("Shaders are being precached. Try again when it is done."));
         shader_warm_dialog->raise();
         shader_warm_dialog->activateWindow();
         return;
     }
-    if (QMessageBox::question(this, tr("Delete Shader Warm-up"),
-                              tr("Delete the shader warm-up files of this game? You can prepare "
-                                 "them again at any time."),
+    if (QMessageBox::question(this, tr("Delete Shader Precache"),
+                              tr("Delete the shader precache files of this game? They are built "
+                                 "again the next time the game is precached."),
                               QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes) {
         return;
     }
     std::string error;
     if (!DeleteShaderWarmFiles(program_id, error)) {
-        QMessageBox::critical(this, tr("Delete Shader Warm-up"),
+        QMessageBox::critical(this, tr("Delete Shader Precache"),
                               tr("The files could not be deleted: %1")
                                   .arg(QString::fromStdString(error)));
     }
@@ -5015,8 +5030,6 @@ void MainWindow::OnTasStateChanged() {
     ui->action_TAS_Reset->setEnabled(emulation_running);
 }
 
-/// Refreshes the status bar while a game runs (TAS state, shader warm-up and build progress,
-/// speed, FPS and frame time). Stops its timer once the game is off.
 void MainWindow::UpdateStatusBar() {
     if (QtCommon::emu_thread == nullptr || !QtCommon::system->IsPoweredOn()) {
         status_bar_update_timer.stop();
@@ -5039,29 +5052,6 @@ void MainWindow::UpdateStatusBar() {
         shader_building_label->setVisible(true);
     } else {
         shader_building_label->setVisible(false);
-    }
-
-    const auto warm = shader_notify.GetWarmProgress();
-    if (warm.kind == 1 || warm.kind == 2) {
-        const auto done = static_cast<qulonglong>(warm.done);
-        const auto total = static_cast<qulonglong>(warm.total);
-        QString text;
-        if (warm.kind == 1) {
-            text = total > 0 ? tr("Shader warm-up: compute %L1 / %L2").arg(done).arg(total)
-                             : tr("Shader warm-up: compute %L1").arg(done);
-        } else if (total > 0) {
-            const int percent = static_cast<int>((std::min<qulonglong>)(done * 100 / total, 100));
-            text = tr("Shader warm-up: graphics %L1 / %L2 (%3%)")
-                       .arg(done)
-                       .arg(total)
-                       .arg(percent);
-        } else {
-            text = tr("Shader warm-up: graphics %L1").arg(done);
-        }
-        shader_warm_label->setText(text);
-        shader_warm_label->setVisible(true);
-    } else {
-        shader_warm_label->setVisible(false);
     }
 
     const auto res_info = Settings::values.resolution_info;
