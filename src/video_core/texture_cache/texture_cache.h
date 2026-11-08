@@ -1103,6 +1103,9 @@ void TextureCache<P>::UnmapGPUMemory(size_t as_id, GPUVAddr gpu_addr, size_t siz
     boost::container::small_vector<ImageId, 16> deleted_images;
     ForEachImageInRegionGPU(as_id, gpu_addr, size,
                             [&](ImageId id, Image&) { deleted_images.push_back(id); });
+    if (!deleted_images.empty()) {
+        VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Map);
+    }
     for (const ImageId id : deleted_images) {
         Image& image = slot_images[id];
         if (False(image.flags & ImageFlagBits::CpuModified)) {
@@ -3833,6 +3836,7 @@ void TextureCache<P>::PrepareImage(ImageId image_id, bool is_modification, bool 
                         image.gpu_addr);
             Tegra::Nx2SparseMarkWritten(image.gpu_addr, image.guest_size_bytes);
             image.flags |= ImageFlagBits::CpuModified | ImageFlagBits::Remapped;
+            VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Invalidation);
         }
         MarkModification(image);
     }

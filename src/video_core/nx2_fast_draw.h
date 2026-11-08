@@ -5,29 +5,27 @@
 
 #include <array>
 #include <atomic>
-#include <cstdlib>
 
 #include "common/common_types.h"
+#include "video_core/nx2_experiment.h"
 
-/// EDEN_NX2_FAST_DRAW=1: a draw that follows a draw with the same bound state reuses that draw's
-/// resolved bindings, recording only the draw (and the index buffer for indexed draws). Anything
-/// that could change what the resolve produces between two draws bumps a serial: a 3D register
-/// that changes (other than draw parameters), any 3D method with side effects (constant buffer
-/// data and binds, uploads, reports, clears, barriers, ...), any other engine, deferred calls on
-/// the split's back (except the ones marked GpuSplit::FastDrawNeutral), GPU::TickWork work,
-/// memory manager invalidations and fence releases. The rasterizer reuses a draw only while the
-/// serial, the command buffer, the render pass and the bound pipeline are the ones the previous
-/// draw left.
-///
-/// EDEN_NX2_FAST_DRAW=2 also takes the delta path: index buffer registers, vertex stream
-/// addresses, sizes and limits, constant buffer binds and inline constant buffer data are light
-/// changes collected in g_delta instead of breaks, and
-/// so is the pre-draw invalidation of that data unless it reaches an image, a shader or a bound
-/// vertex buffer (those break). A draw after only light changes keeps the pipeline, image views,
-/// samplers and render targets, and resolves the constant buffers and the index buffer again,
-/// unless a changed constant buffer holds the pipeline's texture handles.
-/// EDEN_NX2_FAST_DRAW_VERIFY=1 resolves those draws in full and counts where the views, samplers
-/// or pipeline differ from what the delta path would have kept.
+/// EXPERIMENT (Nx2Experiment::FastDraw, switch file "fast-draw"): a draw that follows a draw of
+/// the same pipeline with only light state changes in between takes the delta path. It keeps the
+/// previous draw's pipeline, image views, samplers and texture buffer bindings, and resolves and
+/// binds every buffer (index, vertex, uniform, storage, texture) again as a full resolve does, so
+/// guest memory written without a notification is streamed as in a full resolve.
+/// Light changes are draw parameters, index buffer and vertex stream registers, constant buffer
+/// binds and inline constant buffer data (collected in g_delta: the rasterizer resolves in full
+/// when they reach the pipeline's texture handles). Anything else that could change what a
+/// resolve produces bumps a serial: a 3D register that changes, any 3D method with side effects
+/// (uploads, reports, clears, barriers, ...), constant buffer data reaching the texture or sampler
+/// headers, any other engine, deferred calls on the split's back (except the ones marked
+/// GpuSplit::FastDrawNeutral), GPU::TickWork requests, texture cache writes, unmaps and
+/// deletions, shader removals, fence releases, HLE macros and frames. The rasterizer takes the
+/// delta path only while the serial, the GPU memory map, the command buffer, the render pass and
+/// the bound pipeline are the ones the previous draw left.
+/// Nx2Experiment::FastDrawVerify ("fast-draw-verify") resolves those draws in full and counts
+/// where the pipeline, views, samplers or kept buffer bindings differ.
 namespace VideoCommon::Nx2FastDraw {
 
 enum class Reason : u8 {
@@ -44,6 +42,7 @@ enum class Reason : u8 {
     Frame,
     TextureHeaders,
     DeltaOverflow,
+    Map,
     Count,
 };
 
@@ -51,27 +50,21 @@ inline constexpr std::array<const char*, static_cast<size_t>(Reason::Count)> rea
     "register",      "method",    "constant buffer data", "inline data",
     "other engine",  "deferred call", "tick work",        "invalidation",
     "fence release", "indirect reset", "frame",           "texture header data",
-    "delta overflow",
+    "delta overflow", "memory map",
 };
 
-inline int ModeFromEnvironment() {
-    const char* const value = std::getenv("EDEN_NX2_FAST_DRAW");
-    return value == nullptr ? 0 : value[0] == '1' ? 1 : value[0] == '2' ? 2 : 0;
+/// Any thread: whether the switch is on. The rasterizer latches it per draw (on the thread that
+/// draws) and starts with a full resolve whenever it turns on.
+[[nodiscard]] inline bool Enabled() {
+    return Nx2Experiment::On(Nx2Experiment::FastDraw);
 }
-
-inline bool g_enabled = ModeFromEnvironment() != 0;
-inline bool g_delta_enabled = ModeFromEnvironment() == 2;
-inline const bool g_verify = [] {
-    const char* const value = std::getenv("EDEN_NX2_FAST_DRAW_VERIFY");
-    return value != nullptr && value[0] == '1';
-}();
 
 inline std::atomic<u64> g_serial{1};
 /// The last break's reason and, for Register and Method, its 3D method (diagnostics).
 inline std::atomic<u32> g_last_break{};
 
 inline void Break(Reason reason, u32 method = 0) {
-    if (g_enabled) {
+    if (Enabled()) {
         g_serial.fetch_add(1, std::memory_order_relaxed);
         g_last_break.store(static_cast<u32>(reason) | (method << 8), std::memory_order_relaxed);
     }
@@ -81,8 +74,8 @@ inline u64 Serial() {
     return g_serial.load(std::memory_order_relaxed);
 }
 
-/// Light changes since the last draw (EDEN_NX2_FAST_DRAW=2). Written and read on the thread that
-/// runs the 3D engine and the rasterizer (the split's back).
+/// Light changes since the last draw that can reach texture handles. Written and read on the
+/// thread that runs the 3D engine and the rasterizer (the split's back).
 struct Delta {
     static constexpr size_t MaxWrites = 16;
 
@@ -90,47 +83,23 @@ struct Delta {
     std::array<GPUVAddr, MaxWrites> write_begin{};
     std::array<GPUVAddr, MaxWrites> write_end{};
     u32 num_writes{};
-    bool index_buffer{};
-    bool vertex_buffers{};
-    bool invalidated{};
 
     [[nodiscard]] bool Empty() const {
-        return num_writes == 0 && !index_buffer && !vertex_buffers && !invalidated &&
-               (binds[0] | binds[1] | binds[2] | binds[3] | binds[4]) == 0;
+        return num_writes == 0 && (binds[0] | binds[1] | binds[2] | binds[3] | binds[4]) == 0;
     }
 };
 
 inline Delta g_delta;
 
-inline void NoteIndexBuffer(u32 method) {
-    if (g_delta_enabled) {
-        g_delta.index_buffer = true;
-    } else {
-        Break(Reason::Register, method);
-    }
-}
-
-/// A vertex stream's address, size or limit (not its stride or enable).
-inline void NoteVertexBuffer(u32 method) {
-    if (g_delta_enabled) {
-        g_delta.vertex_buffers = true;
-    } else {
-        Break(Reason::Register, method);
-    }
-}
-
 inline void NoteBind(size_t stage, u32 slot) {
-    if (g_delta_enabled) {
+    if (Enabled()) {
         g_delta.binds[stage] |= 1U << slot;
-    } else {
-        Break(Reason::Method);
     }
 }
 
 /// Inline constant buffer data written to [begin, end).
 inline void NoteConstantData(GPUVAddr begin, GPUVAddr end) {
-    if (!g_delta_enabled) {
-        Break(Reason::ConstantData);
+    if (!Enabled()) {
         return;
     }
     Delta& delta = g_delta;
@@ -145,16 +114,6 @@ inline void NoteConstantData(GPUVAddr begin, GPUVAddr end) {
     delta.write_begin[delta.num_writes] = begin;
     delta.write_end[delta.num_writes] = end;
     ++delta.num_writes;
-}
-
-/// The pre-draw invalidation of cached writes. Its consumers break for what the delta path
-/// doesn't resolve again (images, shaders, bound vertex buffers).
-inline void NoteInvalidation() {
-    if (g_delta_enabled) {
-        g_delta.invalidated = true;
-    } else {
-        Break(Reason::Invalidation);
-    }
 }
 
 } // namespace VideoCommon::Nx2FastDraw

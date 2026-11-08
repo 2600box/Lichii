@@ -26,7 +26,6 @@
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
 #include "video_core/nx2_perf.h"
-#include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/texture_cache/util.h"
 
@@ -232,16 +231,6 @@ void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu
     }
     memory_tracker.MarkRegionAsCpuModified(device_addr, size);
     MarkVertexBuffersStale(device_addr, size);
-    // EDEN_NX2_FAST_DRAW=2: delta draws don't bind vertex buffers again.
-    if (Nx2FastDraw::g_delta_enabled && channel_state != nullptr) {
-        for (const Binding& binding : channel_state->vertex_buffers) {
-            if (device_addr < binding.device_addr + binding.size &&
-                binding.device_addr < device_addr + size) {
-                Nx2FastDraw::Break(Nx2FastDraw::Reason::Invalidation);
-                break;
-            }
-        }
-    }
 }
 
 template <class P>
@@ -622,46 +611,6 @@ void BufferCache<P>::UpdateComputeBuffers() {
         channel_state->has_deleted_buffers = false;
         DoUpdateComputeBuffers();
     } while (channel_state->has_deleted_buffers);
-}
-
-template <class P>
-bool BufferCache<P>::RebindIndexBuffer() {
-    const size_t buffers = slot_buffers.size();
-    channel_state->has_deleted_buffers = false;
-    UpdateIndexBuffer();
-    if (channel_state->has_deleted_buffers || slot_buffers.size() != buffers) {
-        return false;
-    }
-    BindHostIndexBuffer();
-    return true;
-}
-
-template <class P>
-bool BufferCache<P>::RebindVertexBuffers() {
-    const size_t buffers = slot_buffers.size();
-    channel_state->has_deleted_buffers = false;
-    BufferOperations([&]() { UpdateVertexBuffers(); });
-    if (channel_state->has_deleted_buffers || slot_buffers.size() != buffers) {
-        return false;
-    }
-    BindHostVertexBuffers();
-    return true;
-}
-
-template <class P>
-bool BufferCache<P>::UpdateGraphicsStageBuffers() {
-    const size_t buffers = slot_buffers.size();
-    channel_state->has_deleted_buffers = false;
-    graphics_segments.clear();
-    BufferOperations([&]() {
-        for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
-            UpdateUniformBuffers(stage);
-            UpdateStorageBuffers(stage);
-            UpdateTextureBuffers(stage);
-        }
-        RefreshMultiRangeSegments(graphics_segments);
-    });
-    return !channel_state->has_deleted_buffers && slot_buffers.size() == buffers;
 }
 
 template <class P>

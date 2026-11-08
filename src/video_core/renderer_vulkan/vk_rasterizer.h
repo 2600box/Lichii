@@ -367,11 +367,12 @@ private:
     /// The current submission's arena, after its counter is reset.
     const MeshArena& AcquireMeshArena();
 
-    /// EDEN_NX2_FAST_DRAW: what the last fully resolved draw left bound (nx2_fast_draw.h).
+    /// Fast draw (nx2_fast_draw.h): what the last recorded draw left bound.
     struct ReusableDraw {
         GraphicsPipeline* pipeline{};
         const Tegra::Engines::Maxwell3D* maxwell3d{};
         u64 serial{};
+        u64 map_serial{};
         u64 tick{};
         u64 render_pass{};
         Maxwell::PrimitiveTopology topology{};
@@ -383,14 +384,12 @@ private:
         StateChanged,
         Submitted,
         RenderPass,
-        IndexBuffers,
         DeltaPipeline,
         HandleBind,
         HandleData,
-        DeltaBuffers,
         Count,
     };
-    /// Why a fully resolved draw can't be reused by the next one.
+    /// Why a recorded draw can't be followed by a delta draw.
     enum class Ineligible : u8 {
         Indirect,
         Mesh,
@@ -405,16 +404,15 @@ private:
         OffBackThread,
         Count,
     };
-    enum class DrawPath : u8 { Full, Reused, Delta, Count };
+    enum class DrawPath : u8 { Full, Delta, Count };
     struct FastDrawStats {
-        u64 reused{};
         u64 delta{};
         std::array<u64, static_cast<size_t>(FullDraw::Count)> full{};
         std::array<u64, static_cast<size_t>(Ineligible::Count)> ineligible{};
         /// PrepareDraw time and draws per path.
         std::array<u64, static_cast<size_t>(DrawPath::Count)> prepare_ns{};
         std::array<u64, static_cast<size_t>(DrawPath::Count)> prepare_draws{};
-        /// EDEN_NX2_FAST_DRAW_VERIFY
+        /// Nx2Experiment::FastDrawVerify
         u64 verified{};
         u64 pipeline_mismatches{};
         u64 view_mismatches{};
@@ -426,17 +424,16 @@ private:
         std::array<u32, Maxwell::NUM_REGS> break_methods{};
         u64 window_start{};
     };
-    struct ReusableTake {
-        GraphicsPipeline* pipeline{}; ///< null: resolve the draw in full
-        bool delta{};                 ///< light changes since: ConfigureDelta
-        bool vertex_buffers{};        ///< a delta draw binds the vertex buffers again
-    };
-    /// The pipeline the draw can reuse with what the previous draw bound, if any.
-    ReusableTake TakeReusableDraw(bool is_indexed, bool is_indirect);
+    /// The pipeline the draw can take the delta path with, or null for a full resolve. Clears
+    /// the remembered draw either way: only a recorded draw remembers one again.
+    GraphicsPipeline* TakeReusableDraw(bool is_indexed, bool is_indirect);
     void NoteResolvedDraw(GraphicsPipeline* pipeline, bool is_indexed, bool is_indirect);
     void ReportFastDraws();
     ReusableDraw reusable_draw;
     FastDrawStats fast_draw_stats;
+    /// Nx2Experiment::FastDraw and FastDrawVerify as the drawing thread last read them.
+    bool fast_draw_on{};
+    bool fast_draw_verify{};
 
     struct IndirectTrace {
         vk::Buffer readback;

@@ -21,11 +21,15 @@ namespace VideoCommon::Nx2Experiment {
 enum Switch : u32 {
     BackPicksOff = 1,  ///< back-perf-off: no empty-draw skip, no clean-word early-out
     EntryWaitSkip = 2, ///< entry-wait-skip: entries on pages read before skip the writer wait
+    FastDraw = 4,      ///< fast-draw: delta draws after light state changes (nx2_fast_draw.h)
+    FastDrawVerify = 8, ///< fast-draw-verify: resolve those draws in full and count mismatches
 };
 
-inline constexpr std::array<std::pair<Switch, const char*>, 2> switch_files{{
+inline constexpr std::array<std::pair<Switch, const char*>, 4> switch_files{{
     {BackPicksOff, "back-perf-off"},
     {EntryWaitSkip, "entry-wait-skip"},
+    {FastDraw, "fast-draw"},
+    {FastDrawVerify, "fast-draw-verify"},
 }};
 
 inline std::atomic<u32> g_on{0};
