@@ -211,7 +211,8 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
                                  const PipelineBuildQueue& build_queue,
                                  PipelineStatistics* pipeline_statistics,
                                  VideoCore::ShaderNotify* shader_notify, const Shader::Info& info_,
-                                 vk::ShaderModule spv_module_, u64 shader_hash_)
+                                 vk::ShaderModule spv_module_, u64 shader_hash_,
+                                 std::function<vk::ShaderModule()> emit)
     : device{device_},
       pipeline_cache(pipeline_cache_), binaries{binaries_}, binary_key{binary_key_},
       guest_descriptor_queue{guest_descriptor_queue_},
@@ -346,11 +347,43 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
     build_task = std::move(func);
     if (build_queue.jobs) {
         jobs = build_queue.jobs;
-        job = jobs->Submit({
+        VideoCommon::ShaderJob build_job{
             .priority = VideoCommon::ShaderJobPriority::Soon,
+            .cpu_bytes = build_queue.cpu_bytes,
             .driver_bytes = build_queue.driver_bytes,
-            .driver = [this] { RunBuild(); },
-        });
+        };
+        if (emit) {
+            // The SPIR-V is emitted first, in the job's CPU stage (shader cache v2)
+            build_job.cpu = [this, shader_notify, emit = std::move(emit)](
+                                VideoCommon::ShaderJobContext&) -> VideoCommon::ShaderDriverStage {
+                // A pipeline that fails here is built without a VkPipeline: its dispatches are
+                // skipped, as for one the driver rejects
+                const auto fail = [&](const char* what) {
+                    LOG_ERROR(Render_Vulkan,
+                              "Compute pipeline compilation failed shader={:#016x}: {}",
+                              shader_hash, what);
+                    std::scoped_lock lock{build_mutex};
+                    is_built = true;
+                    build_condvar.notify_one();
+                    if (shader_notify) {
+                        shader_notify->MarkShaderComplete();
+                    }
+                };
+                try {
+                    spv_module = emit();
+                } catch (const std::exception& exception) {
+                    fail(exception.what());
+                    return {};
+                } catch (...) {
+                    fail("unknown exception");
+                    return {};
+                }
+                return [this] { RunBuild(); };
+            };
+        } else {
+            build_job.driver = [this] { RunBuild(); };
+        }
+        job = jobs->Submit(std::move(build_job));
     } else if (build_queue.workers) {
         build_task_done = false;
         build_queue.workers->QueueWork([this] {

@@ -515,8 +515,10 @@ void ParallelFor(ShaderJobScheduler& scheduler, size_t count,
             },
         }));
     }
-    for (const ShaderJobHandle& handle : handles) {
-        scheduler.RunOrWait(handle);
+    // Workers take NeedNow jobs oldest first, so the calling thread runs from the newest: it waits
+    // only for calls already running.
+    for (auto it = handles.rbegin(); it != handles.rend(); ++it) {
+        scheduler.RunOrWait(*it);
     }
 }
 

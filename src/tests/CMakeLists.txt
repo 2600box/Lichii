@@ -260,6 +260,20 @@ if (SHADER_JOBS_SANITIZER)
 endif()
 add_test(NAME shader_jobs_tests COMMAND shader_jobs_tests)
 
+# Stage translation on shader job workers over the tools/shader-sweep fixtures. For
+# ThreadSanitizer the shader recompiler needs instrumenting too: configure a separate build with
+# -DCMAKE_C_FLAGS=-fsanitize=thread -DCMAKE_CXX_FLAGS=-fsanitize=thread, then build and run
+# shader_translation_tests.
+add_executable(shader_translation_tests
+    video_core/stage_translation.cpp
+    ../video_core/shader_jobs.cpp
+    ../video_core/shader_stage_translation.cpp)
+target_link_libraries(shader_translation_tests PRIVATE common shader_recompiler
+    Catch2::Catch2WithMain Threads::Threads)
+target_compile_definitions(shader_translation_tests PRIVATE
+    SHADER_SWEEP_FIXTURES="${PROJECT_SOURCE_DIR}/tools/shader-sweep/fixtures")
+add_test(NAME shader_translation_tests COMMAND shader_translation_tests)
+
 if (NOT ANDROID)
     target_sources(tests PRIVATE input_common/joycon_subcommand_response.cpp)
     target_link_libraries(tests PRIVATE SDL3::SDL3)
