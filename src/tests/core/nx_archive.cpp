@@ -214,6 +214,10 @@ TEST_CASE("NX: upstream conformance fixtures", "[core][nx]") {
         std::string title;
         loader.ReadIcon(icon);
         loader.ReadTitle(title);
+        FileSys::VirtualFile romfs;
+        loader.ReadRomFS(romfs);
+        Loader::AppLoader::Modules modules;
+        loader.ReadNSOModules(modules);
         CHECK(loader.VerifyIntegrity({}) == Loader::ResultStatus::Success);
     }
     Loader::AppLoader_NX corrupted{system, OpenFixture("corrupted_block_payload.nx")};
