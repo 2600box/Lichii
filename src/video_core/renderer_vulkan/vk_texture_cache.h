@@ -574,6 +574,9 @@ public:
 
     friend class BlockLinearUnswizzle3DPass;
 
+    /// Records a clear of the whole image to zero.
+    void ClearTiles();
+
 private:
     bool BlitScaleHelper(bool scale_up);
 
@@ -666,9 +669,6 @@ private:
 
     /// Binds one zeroed block to every block of a SparseTiles image (and memory to its mip tail).
     bool BindZeroBlock();
-
-    /// Records a clear of the whole image to zero.
-    void ClearTiles();
 
     vk::Image original_image;
     vk::Image scaled_image;

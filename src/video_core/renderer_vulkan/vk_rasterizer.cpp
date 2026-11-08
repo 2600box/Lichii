@@ -1509,6 +1509,53 @@ void RasterizerVulkan::DrawTexture() {
                          sampler->Handle(), dst_region, src_region, src_size);
 }
 
+// A 1-layer depth target bound with a 3D color target limits the framebuffer to one layer, so
+// vkCmdClearAttachments can't reach the target's other slices. Games clear volumes one slice at
+// a time, so the zero clear of the first slice clears the whole image and the rest do nothing.
+bool RasterizerVulkan::ClearVolumeSlice(const Framebuffer* framebuffer, u32 slice) {
+    const auto& regs = maxwell3d->regs;
+    const u32 target_index = regs.clear_surface.RT;
+    const auto& color_buffer_ids = texture_cache.GetRenderTargets().color_buffer_ids;
+    // Depth and stencil clears take the normal path, so only a colour-only clear qualifies.
+    if (target_index >= color_buffer_ids.size() || regs.clear_surface.Z || regs.clear_surface.S) {
+        return false;
+    }
+    const auto view_id = color_buffer_ids[target_index];
+    if (!view_id || regs.rt[target_index].depth <= framebuffer->Layers()) {
+        return false;
+    }
+    const auto& view = texture_cache.GetImageView(view_id);
+    const bool is_volume = True(view.flags & VideoCommon::ImageViewFlagBits::Slice);
+    const bool clears_all_channels = regs.clear_surface.R && regs.clear_surface.G &&
+                                     regs.clear_surface.B && regs.clear_surface.A;
+    const bool clears_to_zero =
+        std::ranges::all_of(regs.clear_color, [](f32 value) { return value == 0.0f; });
+    const bool clears_whole_slice = texture_cache.ClearCovers(view.size.width, view.size.height);
+    if (!is_volume || !clears_all_channels || !clears_to_zero || !clears_whole_slice) {
+        return false;
+    }
+    if (slice != 0) {
+        return true;
+    }
+    const VkImage image = view.ImageHandle();
+    const u32 level = view.range.base.level;
+    scheduler.RequestOutsideRenderPassOperationContext();
+    scheduler.Record([image, level](vk::CommandBuffer cmdbuf) {
+        const VkImageSubresourceRange whole_image{VK_IMAGE_ASPECT_COLOR_BIT, level, 1, 0, 1};
+        constexpr VkClearColorValue zero{};
+        cmdbuf.ClearColorImage(image, VK_IMAGE_LAYOUT_GENERAL, zero, whole_image);
+        constexpr VkMemoryBarrier clear_finished{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .pNext = nullptr,
+            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+        };
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                               0, clear_finished);
+    });
+    return true;
+}
+
 void RasterizerVulkan::Clear(u32 layer_count) {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Clear};
     if (Tegra::Engines::g_nx2_trace_draws_after_upscale > 0) {
@@ -1545,6 +1592,24 @@ void RasterizerVulkan::Clear(u32 layer_count) {
         LOG_DEBUG(Render_Vulkan,
                   "Framebuffer clear layers: base={}, requested={}, clipped={}, framebuffer={}",
                   base_array_layer, layer_count, clear_layers.count, framebuffer->Layers());
+    }
+    if (const u32 rt = regs.clear_surface.RT; rt < Maxwell::NumRenderTargets &&
+                                              regs.rt[rt].depth > framebuffer->Layers() &&
+                                              std::getenv("EDEN_NX2_VOLUME_TRACE") != nullptr) {
+        LOG_INFO(Render_Vulkan,
+                 "volume clear rt{} {:#x} {}x{}x{} slice {} layers {} fb_layers {} surface {:#x} "
+                 "colour {} {} {} {}",
+                 rt, regs.rt[rt].Address(), regs.rt[rt].width, regs.rt[rt].height,
+                 regs.rt[rt].depth, base_array_layer, layer_count, framebuffer->Layers(),
+                 regs.clear_surface.raw, regs.clear_color[0], regs.clear_color[1],
+                 regs.clear_color[2], regs.clear_color[3]);
+    }
+    static const bool exp_volume_clear = [] {
+        const char* value = std::getenv("EDEN_NX2_EXP_VOLUME_CLEAR");
+        return value != nullptr && *value != '\0' && *value != '0';
+    }();
+    if (exp_volume_clear && ClearVolumeSlice(framebuffer, base_array_layer)) {
+        return;
     }
     if (clear_layers.count == 0) {
         return;

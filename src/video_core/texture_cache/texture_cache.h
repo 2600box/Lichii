@@ -48,6 +48,33 @@ namespace VideoCommon {
     return enabled;
 }
 
+/// EDEN_NX2_VOLUME_TRACE=1: logs how 3D images are made, filled and dropped (OoT fog volumes).
+[[nodiscard]] inline bool VolumeTrace() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_VOLUME_TRACE");
+        return value != nullptr && *value != '\0' && *value != '0';
+    }();
+    return enabled;
+}
+
+/// EDEN_NX2_EXP_ZERO_VOLUMES=1 (experiment): new float 3D images start zeroed instead of
+/// taking guest memory or undefined contents.
+[[nodiscard]] inline bool ExpZeroVolumes() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_EXP_ZERO_VOLUMES");
+        return value != nullptr && *value != '\0' && *value != '0';
+    }();
+    return enabled;
+}
+
+[[nodiscard]] inline bool IsFloatVolume(const ImageInfo& info) {
+    return info.type == ImageType::e3D &&
+           (info.format == VideoCore::Surface::PixelFormat::B10G11R11_FLOAT ||
+            info.format == VideoCore::Surface::PixelFormat::R16_FLOAT ||
+            info.format == VideoCore::Surface::PixelFormat::R16G16B16A16_FLOAT ||
+            info.format == VideoCore::Surface::PixelFormat::R32G32B32A32_FLOAT);
+}
+
 using Tegra::Texture::TICEntry;
 using Tegra::Texture::TSCEntry;
 using VideoCore::Surface::GetFormatType;
@@ -171,6 +198,12 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
         if ((!aggressive_mode && !evict_old_costly && True(image.flags & ImageFlagBits::CostlyLoad)) ||
             (!high_priority_mode && must_download)) {
             return false;
+        }
+        if (image.info.type == ImageType::e3D && VolumeTrace()) {
+            LOG_INFO(HW_GPU, "volume collect {:#x} {}x{}x{} format {} download {} gpu_modified {}",
+                     image.gpu_addr, image.info.size.width, image.info.size.height,
+                     image.info.size.depth, static_cast<u32>(image.info.format), must_download,
+                     True(image.flags & ImageFlagBits::GpuModified));
         }
         if (must_download) {
             auto map = runtime.DownloadStagingBuffer(image.unswizzled_size_bytes);
@@ -1876,6 +1909,23 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
         TrackImage(image, image_id);
     }
 
+    if (image.info.type == ImageType::e3D && VolumeTrace()) {
+        LOG_INFO(HW_GPU,
+                 "volume fill {:#x} {}x{}x{} format {} flags {:#x} stale_all {} gpu_written {} zero {}",
+                 image.gpu_addr, image.info.size.width, image.info.size.height,
+                 image.info.size.depth, static_cast<u32>(image.info.format),
+                 static_cast<u32>(image.flags),
+                 stale_pages.IsAll(image.cpu_addr, image.guest_size_bytes),
+                 Tegra::Nx2MayBeGpuWritten(image.cpu_addr, image.guest_size_bytes),
+                 ExpZeroVolumes() && IsFloatVolume(image.info));
+    }
+    if constexpr (requires { image.ClearTiles(); }) {
+        if (ExpZeroVolumes() && IsFloatVolume(image.info) && image.dirty_layers.empty()) {
+            image.ClearTiles();
+            return;
+        }
+    }
+
     // Made where a dropped GPU-written image left stale bytes (MarkStale): nothing to upload.
     // Pages the buffer cache wrote on the GPU may hold data written back since: upload those.
     if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed) && image.dirty_layers.empty() &&
@@ -2716,6 +2766,10 @@ ImageId TextureCache<P>::InsertImage(const ImageInfo& info, GPUVAddr gpu_addr,
     ASSERT_MSG(cpu_addr, "Tried to insert an image to an invalid gpu_addr={:#x}", gpu_addr);
     ImageInfo storage_info = info;
     storage_info.native_tiling = gpu_memory->UsesNativeTiling();
+    if (storage_info.native_tiling && info.type == ImageType::e3D && VolumeTrace()) {
+        LOG_INFO(HW_GPU, "volume insert {:#x} {}x{}x{} format {}", gpu_addr, info.size.width,
+                 info.size.height, info.size.depth, static_cast<u32>(info.format));
+    }
     if (storage_info.native_tiling && info.type == ImageType::e3D) {
         // Switch 2 3D images (lighting/fog volumes) are rare: log each one's shape.
         LOG_DEBUG(HW_GPU, "3D image at {:#x}: {}x{}x{} levels {} format {} block {}x{}x{}",
@@ -3735,6 +3789,11 @@ void TextureCache<P>::UntrackImage(ImageBase& image, ImageId image_id) {
 template <class P>
 void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
     ImageBase& image = slot_images[image_id];
+    if (image.info.type == ImageType::e3D && VolumeTrace()) {
+        LOG_INFO(HW_GPU, "volume delete {:#x} {}x{}x{} format {} flags {:#x}", image.gpu_addr,
+                 image.info.size.width, image.info.size.height, image.info.size.depth,
+                 static_cast<u32>(image.info.format), static_cast<u32>(image.flags));
+    }
     ++images_deleted;
     // Drop every decode still queued for it, whatever IsDecoding says: an image re-decoded while
     // a decode was in flight has two, and the first to finish clears the flag. A decode left
