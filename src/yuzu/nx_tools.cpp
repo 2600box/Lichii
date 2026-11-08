@@ -53,6 +53,7 @@
 #include "core/file_sys/vfs/vfs.h"
 #include "core/loader/loader.h"
 #include "core/loader/nx.h"
+#include "frontend_common/nx_archive.h"
 #include "qt_common/qt_common.h"
 #include "yuzu/nx_tools.h"
 
@@ -401,12 +402,13 @@ void NxTools::ConvertToNx(const std::string& game_path) {
         suggested = source;
         suggested.replace_extension(".nx");
     }
-    const QString chosen = QFileDialog::getSaveFileName(
+    QString chosen = QFileDialog::getSaveFileName(
         parent_widget, title, ToQString(suggested), tr("NX archive (*.nx)"));
     if (chosen.isEmpty()) {
         return;
     }
-    const auto output = ToUtf8(chosen);
+    const auto output = FrontendCommon::NxArchive::WithNxExtension(ToUtf8(chosen));
+    chosen = QString::fromStdString(output);
     if (std::filesystem::exists(ToPath(output))) {
         QMessageBox::warning(parent_widget, title,
                              tr("The archive already exists:\n%1").arg(chosen));
