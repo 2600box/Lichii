@@ -202,12 +202,15 @@ public:
             return 0;
         }
         length = static_cast<std::size_t>(std::min<u64>(length, info.size - offset));
+        const u64 chunk_size = u64{1} << info.chunk_log2;
         std::size_t done = 0;
         while (done < length) {
-            const auto part =
-                static_cast<std::size_t>(std::min<u64>(length - done, session->max_read_bytes()));
-            if (part == 0 ||
-                !session->read(info.id, offset + done, part, output + done, part, cursor)) {
+            // One block per call: a read spanning blocks is first staged in a buffer of its
+            // whole length, then copied again.
+            const u64 position = offset + done;
+            const auto part = static_cast<std::size_t>(std::min<u64>(
+                {length - done, chunk_size - position % chunk_size, session->max_read_bytes()}));
+            if (part == 0 || !session->read(info.id, position, part, output + done, part, cursor)) {
                 break;
             }
             done += part;
