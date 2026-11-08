@@ -36,9 +36,10 @@ enum Switch : u32 {
     FlushCoalesce = 16384,  ///< flush-coalesce: adjacent device pages flush in one call (9bd828ce55)
     AliasSkip = 32768,      ///< alias-skip: no alias walk while no alias is newer (e368878151)
     AcquireMetSkip = 262144, ///< acquire-met-skip: met GEQUAL acquires skip the drain (fb4d4e47a7)
+    DmaReadKnown = 524288,   ///< dma-read-known: macro reads of report memory skip the drain (#243)
 };
 
-inline constexpr std::array<std::pair<Switch, const char*>, 17> switch_files{{
+inline constexpr std::array<std::pair<Switch, const char*>, 18> switch_files{{
     {BackPicksOff, "back-perf-off"},
     {EntryWaitSkip, "entry-wait-skip"},
     {UboInPlace, "ubo-inplace"},
@@ -56,6 +57,7 @@ inline constexpr std::array<std::pair<Switch, const char*>, 17> switch_files{{
     {FlushCoalesce, "flush-coalesce"},
     {AliasSkip, "alias-skip"},
     {AcquireMetSkip, "acquire-met-skip"},
+    {DmaReadKnown, "dma-read-known"},
 }};
 
 inline std::atomic<u32> g_on{0};
@@ -72,6 +74,11 @@ inline std::atomic<u64> g_dynamic_updates{0};
 inline std::atomic<u64> g_acquire_skips{0};
 inline std::atomic<u64> g_acquire_drains{0};
 inline std::atomic<u64> g_acquire_polls{0};
+inline std::atomic<u64> g_dma_known_reads{0};
+inline std::atomic<u64> g_dma_known_drains{0};
+inline std::atomic<u64> g_dma_known_checked{0};
+inline std::atomic<u64> g_dma_known_unverified{0};
+inline std::atomic<u64> g_dma_known_differ{0};
 
 /// For counters one thread writes: a plain load and store, not a locked add.
 inline void Count(std::atomic<u64>& counter) {
@@ -146,6 +153,16 @@ inline void Refresh() {
                      "EXPERIMENT acquire-met-skip: {} acquires passed without a drain, {} drained "
                      "in 10 s; {} polls of waiting acquires without a drain",
                      acquire_skips, acquire_drains, acquire_polls);
+        }
+        const u64 known_reads = g_dma_known_reads.exchange(0, std::memory_order_relaxed);
+        const u64 known_drains = g_dma_known_drains.exchange(0, std::memory_order_relaxed);
+        if (known_reads != 0 || known_drains != 0) {
+            LOG_INFO(HW_GPU,
+                     "EXPERIMENT dma-read-known: {} reads without a drain, {} drained in 10 s; in "
+                     "total {} checked, {} not checkable, {} differ",
+                     known_reads, known_drains, g_dma_known_checked.load(std::memory_order_relaxed),
+                     g_dma_known_unverified.load(std::memory_order_relaxed),
+                     g_dma_known_differ.load(std::memory_order_relaxed));
         }
     }
 }

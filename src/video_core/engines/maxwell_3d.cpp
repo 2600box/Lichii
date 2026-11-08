@@ -1740,7 +1740,9 @@ bool Maxwell3D::FrontDmaReadQueued(VideoCommon::GpuSplit& split, FrontState& fs,
         std::vector<u32> exact(words);
         memory_manager.ReadBlockUnsafe(source, exact.data(), read_bytes);
         ++checks;
+        VideoCommon::Nx2Experiment::g_dma_known_checked.fetch_add(1, std::memory_order_relaxed);
         if (exact != fast) {
+            VideoCommon::Nx2Experiment::g_dma_known_differ.fetch_add(1, std::memory_order_relaxed);
             if (differences++ < 16) {
                 LOG_WARNING(HW_GPU,
                             "DMA read check: macro {:#x} read of {} words at {:#x} differs from "
@@ -1752,6 +1754,28 @@ bool Maxwell3D::FrontDmaReadQueued(VideoCommon::GpuSplit& split, FrontState& fs,
         if ((checks & 0xffff) == 0) {
             LOG_INFO(HW_GPU, "DMA read check: {} reads, {} differed", checks, differences);
         }
+    } else {
+        // EXPERIMENT (dma-read-known): the back reads the words again where the drain would have.
+        namespace Experiment = VideoCommon::Nx2Experiment;
+        split.DeferFunction([this, source, read_bytes, read = fast] {
+            if (memory_manager.IsMemoryDirty(source, read_bytes,
+                                             VideoCommon::CacheType::BufferCache) ||
+                VideoCommon::QueryDma::HasPendingQueries(memory_manager, *rasterizer, source,
+                                                         read_bytes)) {
+                Experiment::g_dma_known_unverified.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            std::vector<u32> drained(read.size());
+            memory_manager.ReadBlockUnsafe(source, drained.data(), read_bytes);
+            Experiment::g_dma_known_checked.fetch_add(1, std::memory_order_relaxed);
+            if (drained != read &&
+                Experiment::g_dma_known_differ.fetch_add(1, std::memory_order_relaxed) < 16) {
+                LOG_WARNING(HW_GPU,
+                            "EXPERIMENT dma-read-known: read of {} words at {:#x} differs from "
+                            "the drained read",
+                            read.size(), source);
+            }
+        });
     }
     const u32 ram = fs.regs[0x156];
     for (u32 i = 0; i < words; ++i) {
@@ -1778,14 +1802,21 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
         memory_manager.ReadBlockUnsafe(source, diag_before.data(), read_bytes);
     }
     VideoCommon::Nx2Profile::CountDmaRead(macro);
-    if (diag_before.empty() && FrontDmaReadQueued(split, fs, macro, method, source, words)) {
-        return;
+    // EXPERIMENT (dma-read-known, 70353793e9): reads of report memory without draining the back;
+    // the others drain as before. It takes the place of macro-dma-narrow when both are on.
+    namespace Experiment = VideoCommon::Nx2Experiment;
+    const bool known = Experiment::On(Experiment::DmaReadKnown);
+    if (known && diag_before.empty()) {
+        if (FrontDmaReadQueued(split, fs, macro, method, source, words)) {
+            Experiment::Count(Experiment::g_dma_known_reads);
+            return;
+        }
+        Experiment::Count(Experiment::g_dma_known_drains);
     }
     // EXPERIMENT (macro-dma-narrow): wait only for what can have written the words in command
     // order (gpu_split.h WaitForMemoryWriters); the back re-reads them where the drain would have
     // and counts the reads that differ.
-    namespace Experiment = VideoCommon::Nx2Experiment;
-    const bool narrow = Experiment::On(Experiment::MacroDmaNarrow) &&
+    const bool narrow = !known && Experiment::On(Experiment::MacroDmaNarrow) &&
                         !Tegra::Nx2CmdPageDiag::g_enabled && !VideoCommon::QueryDma::TraceEnabled();
     if (narrow) {
         split.WaitForMemoryWriters(VideoCommon::DrainSite::MacroDmaRead);
