@@ -142,8 +142,14 @@ void GpuSplit::Stop() {
     ring.reset();
     write_position = 0;
     last_writer_position = 0;
+    pending_write_count = 0;
+    async_writes.clear();
+    fence_writes.clear();
+    report_pages.clear();
     last_sync_position = 0;
     last_memory_write_position = 0;
+    semaphore_writes.clear();
+    semaphore_writes_limit = 1024;
     published_local = 0;
     consumed_cache = 0;
     publish_every = PublishEvery;
@@ -204,25 +210,104 @@ void GpuSplit::Publish() {
 
 void GpuSplit::Drain(DrainSite site) {
     consumed_cache = consumed.load(std::memory_order_acquire);
-    if (consumed_cache == write_position) {
+    if (consumed_cache == write_position && BackQuiet()) {
         return;
     }
     Publish();
     Nx2Profile::Scope scope{Nx2Profile::Zone::SplitDrain};
     const u64 start = Nx2Profile::Enabled() ? Nx2Profile::Ticks() : 0;
+    // Everything consumed is not enough: the back submits deferred work (Scheduler::DeferFlush)
+    // from its idle hook afterwards, and the caller may use the scheduler once this returns.
+    bool hook_asked = false;
     for (u32 spins = 0;; ++spins) {
         consumed_cache = consumed.load(std::memory_order_acquire);
         if (consumed_cache == write_position) {
-            publish_every = 8;
-            Nx2Profile::AddDrain(site, start);
-            return;
+            if (BackQuiet()) {
+                publish_every = 8;
+                Nx2Profile::AddDrain(site, start);
+                return;
+            }
+            if (!hook_asked) {
+                RequestIdleHook();
+                hook_asked = true;
+            }
+            // Backoff sleeps only while entries are unconsumed: spin until the hook is done.
+            if (spins < 16384) {
+                Pause();
+            } else {
+                std::this_thread::yield();
+            }
+            continue;
         }
         Backoff(spins, write_position);
     }
 }
 
-bool GpuSplit::WaitForWriters() {
-    return WaitFor(std::min(last_writer_position, write_position), DrainSite::ListWriters);
+bool GpuSplit::WaitForWriters(DrainSite site) {
+    return WaitFor(std::min(last_writer_position, write_position), site);
+}
+
+bool GpuSplit::WaitForWritesTo(u64 begin, u64 size) {
+    consumed_cache = consumed.load(std::memory_order_acquire);
+    const u64 end = begin + size;
+    const u64 remembered = (std::min<u64>)(pending_write_count, pending_writes.size());
+    u64 target = 0;
+    u64 scanned = 0;
+    for (; scanned < remembered; ++scanned) {
+        const PendingWrite& write =
+            pending_writes[(pending_write_count - 1 - scanned) % pending_writes.size()];
+        if (write.position <= consumed_cache) {
+            break;
+        }
+        if (write.begin < end && begin < write.end) {
+            target = (std::max)(target, write.position);
+        }
+    }
+    if (scanned == pending_writes.size()) {
+        return false;
+    }
+    if (target != 0) {
+        WaitFor(target, DrainSite::MacroDmaRead);
+    }
+    return true;
+}
+
+bool GpuSplit::OverlayQueuedWrites(u64 since, u64 begin, u32* out, u32 words) {
+    if ((begin & 3) != 0) {
+        return false;
+    }
+    const u64 end = begin + u64{words} * sizeof(u32);
+    const u64 remembered = (std::min<u64>)(pending_write_count, pending_writes.size());
+    // Newest first, back to what the back had consumed before guest memory was read.
+    std::array<u32, 64> overlapping;
+    u32 found = 0;
+    u64 scanned = 0;
+    for (; scanned < remembered; ++scanned) {
+        const u64 index = (pending_write_count - 1 - scanned) % pending_writes.size();
+        const PendingWrite& write = pending_writes[index];
+        if (write.position <= since) {
+            break;
+        }
+        if (write.begin < end && begin < write.end) {
+            if (write.words == 0 || (write.begin & 3) != 0 || found == overlapping.size()) {
+                return false;
+            }
+            overlapping[found++] = static_cast<u32>(index);
+        }
+    }
+    if (scanned == pending_writes.size()) {
+        return false;
+    }
+    for (u32 i = found; i-- > 0;) {
+        const PendingWrite& write = pending_writes[overlapping[i]];
+        for (u32 w = 0; w < write.words; ++w) {
+            const u64 address = write.begin + u64{w} * sizeof(u32);
+            if (address >= begin && address < end) {
+                out[(address - begin) / sizeof(u32)] = write.data[w];
+            }
+        }
+    }
+    return true;
 }
 
 bool GpuSplit::WaitForSync() {
@@ -233,6 +318,33 @@ bool GpuSplit::WaitForMemoryWriters(DrainSite site) {
     const u64 target =
         std::max({last_writer_position, last_sync_position, last_memory_write_position});
     return WaitFor(std::min(target, write_position), site);
+}
+
+void GpuSplit::NoteSemaphoreWrite(u64 device_address, u32 payload, bool known) {
+    if (semaphore_writes.size() >= semaphore_writes_limit) {
+        // The words of releases the back ran hold their values in memory.
+        const u64 done = consumed.load(std::memory_order_acquire);
+        std::erase_if(semaphore_writes,
+                      [done](const auto& entry) { return entry.second.position <= done; });
+        semaphore_writes_limit = std::max<size_t>(1024, semaphore_writes.size() * 2);
+    }
+    semaphore_writes.insert_or_assign(device_address & ~u64{3},
+                                      SemaphoreWrite{write_position, payload, known});
+}
+
+std::optional<GpuSplit::QueuedSemaphoreWrite> GpuSplit::QueuedSemaphoreWriteAt(
+    u64 device_address) const {
+    const auto it = semaphore_writes.find(device_address & ~u64{3});
+    if (it == semaphore_writes.end() ||
+        it->second.position <= consumed.load(std::memory_order_acquire)) {
+        return std::nullopt;
+    }
+    return QueuedSemaphoreWrite{it->second.payload, it->second.known};
+}
+
+bool GpuSplit::WaitForSyncedWriters() {
+    return WaitFor(std::min({last_writer_position, last_sync_position, write_position}),
+                   DrainSite::ListWriters);
 }
 
 bool GpuSplit::WaitFor(u64 target, DrainSite site) {
@@ -453,9 +565,16 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 Pause();
                 available = published.load(std::memory_order_acquire);
             }
-            if (available == read_position && idle_hook != nullptr) {
+            if (available == read_position) {
                 hook_requested.store(false, std::memory_order_seq_cst);
-                idle_hook(idle_argument);
+                // The front may already see everything consumed: Drain() waits for back_quiet
+                // too, so the deferred submit can't overlap whatever the front does next.
+                if (!back_quiet.load(std::memory_order_relaxed)) {
+                    if (idle_hook != nullptr) {
+                        idle_hook(idle_argument);
+                    }
+                    back_quiet.store(true, std::memory_order_release);
+                }
                 available = published.load(std::memory_order_acquire);
             }
             if (available == read_position) {
@@ -474,6 +593,8 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             }
         }
         u64 last_store = read_position;
+        // Before any entry runs, so a front that sees these entries consumed also sees this.
+        back_quiet.store(false, std::memory_order_seq_cst);
         while (read_position != available) {
             const size_t index = read_position & RingMask;
             const size_t size =

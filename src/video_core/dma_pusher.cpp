@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cstdlib>
 #include <cstdio>
 #include <span>
@@ -22,6 +23,7 @@
 #include "video_core/control/channel_state.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/engines/maxwell_dma.h"
 #include "video_core/gpu.h"
 #include "video_core/gpu_split.h"
 #include "video_core/guest_memory.h"
@@ -242,8 +244,24 @@ bool DmaPusher::Step() {
                     }
                 });
         }
+        // Pages no GPU work has written yet may still get the list from compute or copy work
+        // queued before it. The GPU fetches the list after that work only past a host-level wait
+        // (NoteSync): later work is not ordered before the fetch, and the list does not wait for
+        // it (nor for draws, which write memory too; draw-written lists wait for the last sync).
+        // EXPERIMENT (writer-wait-synced): off, the list waits for every writer sent so far.
+        const auto wait_for_writers = [] {
+            namespace Experiment = VideoCommon::Nx2Experiment;
+            auto& split = VideoCommon::GpuSplit::Get();
+            if (!Experiment::On(Experiment::WriterWaitSynced)) {
+                return split.WaitForWriters();
+            }
+            if (split.SyncedWritersWaitShorter()) {
+                Experiment::Count(Experiment::g_writer_waits_shortened);
+            }
+            return split.WaitForSyncedWriters();
+        };
         if (!gpu_written && !skip_writer_wait && VideoCommon::GpuSplit::Get().Active() &&
-            VideoCommon::GpuSplit::Get().WaitForWriters()) {
+            wait_for_writers()) {
             gpu_written =
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
         }
@@ -516,9 +534,16 @@ void DmaPusher::CallMethod(u32 argument) {
         const auto engine_type = subchannel_type[dma_state.subchannel];
         const bool writer = split.Active() &&
                             IsMemoryWriter(*subchannel, engine_type, dma_state.method);
+        // 2D blits and I2M uploads write guest memory at addresses the front doesn't track: macro
+        // DMA reads wait for them (Maxwell3D::FrontDmaRead).
+        const bool other_writer = split.Active() &&
+                                  (engine_type == Engines::EngineTypes::KeplerMemory ||
+                                   engine_type == Engines::EngineTypes::Fermi2D);
         SCOPE_EXIT {
             if (writer) {
                 split.NoteWriter();
+            } else if (other_writer) {
+                split.NoteMemoryWrite(0, ~u64{0}, "2D or I2M");
             }
         };
         if (split.Active()) {
@@ -543,6 +568,9 @@ void DmaPusher::CallMethod(u32 argument) {
             }
             split.Method(subchannel, dma_state.method, argument, dma_state.is_last_call,
                          WantsSegment() ? &segment : nullptr);
+            if (engine_type == Engines::EngineTypes::MaxwellDMA) {
+                NoteDmaSemaphore(dma_state.method, argument);
+            }
             return;
         }
         if (!subchannel->execution_mask[dma_state.method]) {
@@ -574,9 +602,16 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
         const auto engine_type = subchannel_type[dma_state.subchannel];
         const bool writer = split.Active() &&
                             IsMemoryWriter(*subchannel, engine_type, dma_state.method);
+        // 2D blits and I2M uploads write guest memory at addresses the front doesn't track: macro
+        // DMA reads wait for them (Maxwell3D::FrontDmaRead).
+        const bool other_writer = split.Active() &&
+                                  (engine_type == Engines::EngineTypes::KeplerMemory ||
+                                   engine_type == Engines::EngineTypes::Fermi2D);
         SCOPE_EXIT {
             if (writer) {
                 split.NoteWriter();
+            } else if (other_writer) {
+                split.NoteMemoryWrite(0, ~u64{0}, "2D or I2M");
             }
         };
         if (split.Active()) {
@@ -601,12 +636,46 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
             }
             split.MultiMethod(subchannel, dma_state.method, base_start, num_methods,
                               dma_state.method_count, WantsSegment() ? &segment : nullptr);
+            if (engine_type == Engines::EngineTypes::MaxwellDMA) {
+                for (u32 i = 0; i < num_methods; ++i) {
+                    NoteDmaSemaphore(dma_state.method, base_start[i]);
+                }
+            }
             return;
         }
         VideoCommon::Nx2Profile::Scope method_scope{VideoCommon::Nx2Profile::Zone::Method};
         subchannel->ConsumeSink(system);
         subchannel->current_dma_segment = dma_state.dma_get + dma_state.dma_word_offset;
         subchannel->CallMultiMethod(system, dma_state.method, base_start, num_methods, dma_state.method_count);
+    }
+}
+
+void DmaPusher::NoteDmaSemaphore(u32 method, u32 argument) {
+    using Engines::MaxwellDMA;
+    if (method >= MaxwellDMA::SemaphoreMethod && method < MaxwellDMA::SemaphoreMethod + 3) {
+        dma_semaphore[method - MaxwellDMA::SemaphoreMethod] = argument;
+        return;
+    }
+    if (method != MaxwellDMA::LaunchDmaMethod) {
+        return;
+    }
+    // As MaxwellDMA::ReleaseSemaphore writes it.
+    using SemaphoreType = MaxwellDMA::LaunchDMA::SemaphoreType;
+    const auto type = std::bit_cast<MaxwellDMA::LaunchDMA>(argument).semaphore_type.Value();
+    if (type != SemaphoreType::RELEASE_ONE_WORD_SEMAPHORE &&
+        type != SemaphoreType::RELEASE_FOUR_WORD_SEMAPHORE) {
+        return;
+    }
+    const GPUVAddr address = MaxwellDMA::PackedGPUVAddr{dma_semaphore[0], dma_semaphore[1]};
+    const auto device = memory_manager.GpuToCpuAddress(address);
+    if (!device) {
+        return;
+    }
+    auto& split = VideoCommon::GpuSplit::Get();
+    split.NoteSemaphoreWrite(*device, dma_semaphore[2], true);
+    if (type == SemaphoreType::RELEASE_FOUR_WORD_SEMAPHORE) {
+        // The payload as 64 bits (a timestamp follows).
+        split.NoteSemaphoreWrite(*device + 4, 0, true);
     }
 }
 

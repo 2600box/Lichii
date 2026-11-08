@@ -36,9 +36,12 @@ enum Switch : u32 {
     FlushCoalesce = 16384,  ///< flush-coalesce: adjacent device pages flush in one call (9bd828ce55)
     AliasSkip = 32768,      ///< alias-skip: no alias walk while no alias is newer (e368878151)
     ResetBatch = 65536,     ///< reset-batch: indirect reset records written in merged runs (b33ef6014b)
+    AcquireMetSkip = 262144, ///< acquire-met-skip: met GEQUAL acquires skip the drain (fb4d4e47a7)
+    DmaReadKnown = 524288,   ///< dma-read-known: macro reads of report memory skip the drain (#243)
+    WriterWaitSynced = 1048576, ///< writer-wait-synced: lists wait for writers up to the last sync
 };
 
-inline constexpr std::array<std::pair<Switch, const char*>, 17> switch_files{{
+inline constexpr std::array<std::pair<Switch, const char*>, 20> switch_files{{
     {BackPicksOff, "back-perf-off"},
     {EntryWaitSkip, "entry-wait-skip"},
     {UboInPlace, "ubo-inplace"},
@@ -56,6 +59,9 @@ inline constexpr std::array<std::pair<Switch, const char*>, 17> switch_files{{
     {FlushCoalesce, "flush-coalesce"},
     {AliasSkip, "alias-skip"},
     {ResetBatch, "reset-batch"},
+    {AcquireMetSkip, "acquire-met-skip"},
+    {DmaReadKnown, "dma-read-known"},
+    {WriterWaitSynced, "writer-wait-synced"},
 }};
 
 inline std::atomic<u32> g_on{0};
@@ -74,6 +80,15 @@ inline std::atomic<u64> g_reset_records{0};
 inline std::atomic<u64> g_reset_ns{0};
 inline std::atomic<u64> g_reset_runs{0};
 inline std::atomic<u64> g_reset_unbatched{0};
+inline std::atomic<u64> g_acquire_skips{0};
+inline std::atomic<u64> g_acquire_drains{0};
+inline std::atomic<u64> g_acquire_polls{0};
+inline std::atomic<u64> g_dma_known_reads{0};
+inline std::atomic<u64> g_dma_known_drains{0};
+inline std::atomic<u64> g_dma_known_checked{0};
+inline std::atomic<u64> g_dma_known_unverified{0};
+inline std::atomic<u64> g_dma_known_differ{0};
+inline std::atomic<u64> g_writer_waits_shortened{0};
 
 /// For counters one thread writes: a plain load and store, not a locked add.
 inline void Count(std::atomic<u64>& counter) {
@@ -151,6 +166,29 @@ inline void Refresh() {
                      "{} batched runs, {} batched calls written per record (overlap or no device "
                      "address)",
                      reset_calls, reset_records, reset_ns / 1000, reset_runs, reset_unbatched);
+        }
+        const u64 acquire_skips = g_acquire_skips.exchange(0, std::memory_order_relaxed);
+        const u64 acquire_drains = g_acquire_drains.exchange(0, std::memory_order_relaxed);
+        const u64 acquire_polls = g_acquire_polls.exchange(0, std::memory_order_relaxed);
+        if (acquire_skips != 0 || acquire_drains != 0 || acquire_polls != 0) {
+            LOG_INFO(HW_GPU,
+                     "EXPERIMENT acquire-met-skip: {} acquires passed without a drain, {} drained "
+                     "in 10 s; {} polls of waiting acquires without a drain",
+                     acquire_skips, acquire_drains, acquire_polls);
+        }
+        const u64 known_reads = g_dma_known_reads.exchange(0, std::memory_order_relaxed);
+        const u64 known_drains = g_dma_known_drains.exchange(0, std::memory_order_relaxed);
+        if (known_reads != 0 || known_drains != 0) {
+            LOG_INFO(HW_GPU,
+                     "EXPERIMENT dma-read-known: {} reads without a drain, {} drained in 10 s; in "
+                     "total {} checked, {} not checkable, {} differ",
+                     known_reads, known_drains, g_dma_known_checked.load(std::memory_order_relaxed),
+                     g_dma_known_unverified.load(std::memory_order_relaxed),
+                     g_dma_known_differ.load(std::memory_order_relaxed));
+        }
+        if (const u64 shortened = g_writer_waits_shortened.exchange(0, std::memory_order_relaxed);
+            shortened != 0) {
+            LOG_INFO(HW_GPU, "EXPERIMENT writer-wait-synced: {} waits shortened in 10 s", shortened);
         }
     }
 }
