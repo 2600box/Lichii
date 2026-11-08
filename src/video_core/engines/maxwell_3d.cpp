@@ -359,7 +359,7 @@ void Maxwell3D::ProcessDirtyRegisters(u32 method, u32 argument) {
         draw_manager.DrawDeferred(*this, true);
     }
     if (VideoCommon::Nx2FastDraw::Enabled() && regs.reg_array[method] != argument &&
-        !IsFastDrawParameter(method)) [[unlikely]] {
+        !IsFastDrawParameter(method)) {
         VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Register, method);
     }
     regs.reg_array[method] = argument;

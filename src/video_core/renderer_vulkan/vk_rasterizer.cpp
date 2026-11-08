@@ -751,7 +751,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     namespace FastDraw = VideoCommon::Nx2FastDraw;
     // Latched here, on the thread that draws: turning fast draws on starts with a full resolve,
     // and with them off nothing below runs.
-    if (const bool on = FastDraw::Enabled(); on != fast_draw_on) [[unlikely]] {
+    if (const bool on = FastDraw::Enabled(); on != fast_draw_on) {
         fast_draw_on = on;
         reusable_draw = {};
         FastDraw::g_delta = {};
