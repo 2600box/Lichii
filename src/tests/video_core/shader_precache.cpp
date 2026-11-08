@@ -146,7 +146,7 @@ TEST_CASE("ShaderPrecache: a compute entry reads back like a pipeline cache entr
     in.read(reinterpret_cast<char*>(&num_envs), sizeof(num_envs));
     REQUIRE(num_envs == 1);
     VideoCommon::FileEnvironment env;
-    env.Deserialize(in);
+    env.Deserialize(in, static_cast<std::streamoff>(entry.size()));
     Vulkan::ComputePipelineCacheKey key{};
     static_assert(sizeof(key) == sizeof(key_bytes));
     in.read(reinterpret_cast<char*>(&key), sizeof(key));

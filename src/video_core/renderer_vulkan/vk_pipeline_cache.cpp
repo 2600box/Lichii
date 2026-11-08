@@ -1337,7 +1337,7 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
                 u32 num_envs{};
                 file.read(reinterpret_cast<char*>(&num_envs), sizeof(num_envs));
                 FileEnvironment env;
-                env.Deserialize(file);
+                env.Deserialize(file, end);
                 if (num_envs != 1 || env.ShaderStage() != Shader::Stage::Compute) {
                     LOG_WARNING(Render_Vulkan, "Shader precache: unexpected entry in {}", path);
                     throw std::runtime_error("unexpected entry");
