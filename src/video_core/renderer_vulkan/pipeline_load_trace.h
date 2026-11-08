@@ -32,6 +32,11 @@ size_t Workers();
 size_t QueueLimit();
 /// EDEN_NX2_WARM_LIMIT_S=S: the precache stops itself after S seconds as if skipped (0 when unset)
 size_t WarmLimit();
+/// Translation memory a compute build holds: `peak` before the driver compile (max is logged), and
+/// `held` added to the in-flight sum while the driver compiles
+void Ours(s64 peak, s64 held);
+/// EDEN_NX2_FREE_IR_EARLY=1: compute builds free their IR and SPIR-V before the driver compile
+bool FreeIrEarly();
 void WaitForRoom(size_t limit, const std::stop_token& stop);
 
 } // namespace Vulkan::LoadTrace

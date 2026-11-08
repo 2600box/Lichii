@@ -2430,9 +2430,12 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
                     max_shared_memory / 1024);
         program.shared_memory_size = max_shared_memory;
     }
-    const std::vector<u32> code{EmitSPIRV(profile, program)};
+    std::vector<u32> code{EmitSPIRV(profile, program)};
     device.SaveShader(code);
     vk::ShaderModule spv_module{BuildShader(device, code)};
+    const s64 trace_ours = static_cast<s64>(pools.inst.CapacityBytes() + pools.block.CapacityBytes() +
+                                            pools.flow_block.CapacityBytes() +
+                                            code.size() * sizeof(u32));
 
     // Text log + .spv dump. Same split as the graphics path.
     const bool should_log = GPU::Logging::IsActive();
@@ -2455,10 +2458,23 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
         spv_module.SetObjectNameEXT(name.c_str());
     }
     Common::ThreadWorker* const thread_worker{build_in_parallel ? &workers : nullptr};
-    return {.pipeline = std::make_unique<ComputePipeline>(
-                device, scheduler, vulkan_pipeline_cache, descriptor_pool, guest_descriptor_queue,
-                descriptor_buffer_ring, thread_worker, statistics, &shader_notify, program.info,
-                std::move(spv_module), key.unique_hash),
+    const Shader::Info info{program.info};
+    s64 trace_held = trace_ours;
+    if (LoadTrace::FreeIrEarly()) {
+        program = {};
+        pools.block.Free();
+        pools.inst.Free();
+        code = {};
+        trace_held = static_cast<s64>(pools.inst.CapacityBytes() + pools.block.CapacityBytes() +
+                                      pools.flow_block.CapacityBytes());
+    }
+    LoadTrace::Ours(trace_ours, trace_held);
+    auto compute_pipeline = std::make_unique<ComputePipeline>(
+        device, scheduler, vulkan_pipeline_cache, descriptor_pool, guest_descriptor_queue,
+        descriptor_buffer_ring, thread_worker, statistics, &shader_notify, info,
+        std::move(spv_module), key.unique_hash);
+    LoadTrace::Ours(0, -trace_held);
+    return {.pipeline = std::move(compute_pipeline),
             .null_pointer_slots = env.IsNativeProgram() ? env.NullStoragePointerSlots()
                                                         : std::vector<std::pair<u32, u32>>{},
             .mapped_pointers =

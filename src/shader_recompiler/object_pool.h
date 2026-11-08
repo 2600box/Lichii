@@ -23,6 +23,22 @@ public:
         return std::construct_at(Memory(), std::forward<Args>(args)...);
     }
 
+    // TEST ONLY (EGLA-80)
+    [[nodiscard]] size_t CapacityBytes() const {
+        size_t objects{};
+        for (const Chunk& chunk : chunks) {
+            objects += chunk.num_objects;
+        }
+        return objects * sizeof(Storage);
+    }
+
+    // TEST ONLY (EGLA-80): destroys the objects and frees their memory
+    void Free() {
+        chunks.clear();
+        chunks.shrink_to_fit();
+        node = &chunks.emplace_back(new_chunk_size);
+    }
+
     void ReleaseContents() {
         if (chunks.empty()) {
             return;

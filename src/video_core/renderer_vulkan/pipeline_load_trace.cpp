@@ -94,6 +94,8 @@ struct State {
     std::atomic<s64> in_flight{};
     std::atomic<s64> in_flight_code{};
     std::atomic<s64> done{};
+    std::atomic<s64> ours_held{};
+    std::atomic<s64> ours_max{};
     std::atomic<Phase> phase{Phase::Idle};
     std::chrono::steady_clock::time_point phase_begin{std::chrono::steady_clock::now()};
     u64 phase_peak_commit{};
@@ -131,10 +133,11 @@ void Sample(State& state, bool summary) {
     }
     LOG_INFO(Render_Vulkan,
              "Load trace: {} +{:.1f} s commit {} MiB ws {} MiB queued {} MiB in_flight {} "
-             "(code {} KiB) done {}",
+             "(code {} KiB) done {} ours_held {} MiB ours_max_job {} KiB",
              PhaseName(phase), seconds, memory.commit / MiB, memory.working_set / MiB,
              state.queued_bytes.load() / static_cast<s64>(MiB), state.in_flight.load(),
-             state.in_flight_code.load() >> 10, state.done.load());
+             state.in_flight_code.load() >> 10, state.done.load(),
+             state.ours_held.load() / static_cast<s64>(MiB), state.ours_max.load() >> 10);
 }
 
 } // Anonymous namespace
@@ -212,6 +215,19 @@ size_t Workers() {
 size_t QueueLimit() {
     static const size_t limit = EnvSize("EDEN_NX2_LOAD_QUEUE_MB") * MiB;
     return limit;
+}
+
+void Ours(s64 peak, s64 held) {
+    State& state = Get();
+    state.ours_held += held;
+    s64 max = state.ours_max.load();
+    while (peak > max && !state.ours_max.compare_exchange_weak(max, peak)) {
+    }
+}
+
+bool FreeIrEarly() {
+    static const bool enabled = EnvSize("EDEN_NX2_FREE_IR_EARLY") != 0;
+    return enabled;
 }
 
 size_t WarmLimit() {
