@@ -279,7 +279,7 @@ void ConfigureGraphics::Setup(const ConfigurationShared::Builder& builder) {
             connect(nvidia_dlss_checkbox, &QCheckBox::toggled, widget, &QWidget::setVisible);
         }
 
-        if (setting->Id() == Settings::values.hdr.Id() ||
+        if (setting->Id() == Settings::values.hdr_mode.Id() ||
             setting->Id() == Settings::values.hdr_reference_white.Id() ||
             setting->Id() == Settings::values.hdr_peak_luminance.Id()) {
             hdr_widgets.push_back(widget);
