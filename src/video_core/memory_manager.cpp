@@ -644,7 +644,13 @@ void MemoryManager::FlushRegion(GPUVAddr gpu_addr, size_t size,
     // Each flush can stop and wait for the host GPU, so adjacent device pages go in one flush.
     DAddr run_start{};
     std::size_t run_size{};
+    const bool coalesce =
+        VideoCommon::Nx2Experiment::On(VideoCommon::Nx2Experiment::FlushCoalesce);
     const auto add_range = [&](DAddr dev_addr, std::size_t copy_amount) {
+        if (!coalesce) {
+            rasterizer->FlushRegion(dev_addr, copy_amount, which);
+            return;
+        }
         if (run_size != 0 && run_start + run_size == dev_addr) {
             run_size += copy_amount;
             return;

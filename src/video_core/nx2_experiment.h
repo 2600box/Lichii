@@ -32,9 +32,12 @@ enum Switch : u32 {
     FastDraw = 1024,        ///< fast-draw: delta draws after light state changes (nx2_fast_draw.h)
     FastDrawVerify = 2048,  ///< fast-draw-verify: resolve those draws in full and count mismatches
     MacroDmaNarrow = 4096,  ///< macro-dma-narrow: macro memory reads wait for memory writers only
+    PipelineClean = 8192,   ///< pipeline-clean: no pipeline key refresh while its inputs hold (1c8772da73)
+    FlushCoalesce = 16384,  ///< flush-coalesce: adjacent device pages flush in one call (9bd828ce55)
+    AliasSkip = 32768,      ///< alias-skip: no alias walk while no alias is newer (e368878151)
 };
 
-inline constexpr std::array<std::pair<Switch, const char*>, 13> switch_files{{
+inline constexpr std::array<std::pair<Switch, const char*>, 16> switch_files{{
     {BackPicksOff, "back-perf-off"},
     {EntryWaitSkip, "entry-wait-skip"},
     {UboInPlace, "ubo-inplace"},
@@ -48,6 +51,9 @@ inline constexpr std::array<std::pair<Switch, const char*>, 13> switch_files{{
     {FastDraw, "fast-draw"},
     {FastDrawVerify, "fast-draw-verify"},
     {MacroDmaNarrow, "macro-dma-narrow"},
+    {PipelineClean, "pipeline-clean"},
+    {FlushCoalesce, "flush-coalesce"},
+    {AliasSkip, "alias-skip"},
 }};
 
 inline std::atomic<u32> g_on{0};

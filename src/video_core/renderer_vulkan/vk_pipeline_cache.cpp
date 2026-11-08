@@ -36,6 +36,7 @@
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_experiment.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/pipeline_cache_files.h"
 #include "video_core/renderer_vulkan/async_draw_policy.h"
@@ -988,13 +989,16 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
         clean.pipeline = nullptr;
         return nullptr;
     }
-    if (!clean.built) {
+    // EXPERIMENT (pipeline-clean): off, every lookup refreshes the key as before.
+    const bool use_clean =
+        VideoCommon::Nx2Experiment::On(VideoCommon::Nx2Experiment::PipelineClean);
+    if (use_clean && !clean.built) {
         BuildCleanWatch();
     }
     const auto& flags = maxwell3d->dirty.flags;
     const bool blending_dirty =
         !dynamic_features.has_extended_dynamic_state_3_blend && flags[Dirty::Blending];
-    if (clean.pipeline != nullptr && clean.pipeline == current_pipeline &&
+    if (use_clean && clean.pipeline != nullptr && clean.pipeline == current_pipeline &&
         clean.maxwell3d == maxwell3d && !flags[Dirty::VertexInput] &&
         !flags[Dirty::ViewportSwizzles] && !blending_dirty &&
         clean.hashes == graphics_key.unique_hashes &&
@@ -1005,14 +1009,16 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
     }
     clean.pipeline = nullptr;
 
-    TakeCleanSnapshot();
+    if (use_clean) {
+        TakeCleanSnapshot();
+    }
     graphics_key.state.Refresh(*maxwell3d, dynamic_features);
 
     if (current_pipeline) {
         GraphicsPipeline* const next{current_pipeline->Next(graphics_key)};
         if (next) {
             current_pipeline = next;
-            clean.pipeline = next;
+            clean.pipeline = use_clean ? next : nullptr;
             current_pipeline->MarkUsed(frame_count);
             return BuiltPipeline(current_pipeline);
         }
@@ -1020,7 +1026,7 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
     // The slow path makes graphics_cache[graphics_key] current, unless it has no pipeline.
     GraphicsPipeline* const previous = current_pipeline;
     GraphicsPipeline* const result = CurrentGraphicsPipelineSlowPath();
-    if (current_pipeline != previous) {
+    if (use_clean && current_pipeline != previous) {
         clean.pipeline = current_pipeline;
     }
     return result;
