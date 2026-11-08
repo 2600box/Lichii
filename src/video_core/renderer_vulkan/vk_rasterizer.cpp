@@ -765,6 +765,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     {
         Profile::Scope scope{Profile::Zone::FlushWork};
         FlushWork();
+    }
+    {
+        Profile::Scope scope{Profile::Zone::FlushCaching};
         gpu_memory->FlushCaching();
     }
     if (frame_dump.Capturing()) {
@@ -3377,13 +3380,17 @@ void RasterizerVulkan::FlushWork() {
     switch (SubmissionPolicy::Advance(draw_counter, native, android, budget, legacy_budget)) {
     case SubmissionPolicy::Action::None:
         break;
-    case SubmissionPolicy::Action::Dispatch:
+    case SubmissionPolicy::Action::Dispatch: {
+        VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::DispatchWork};
         scheduler.DispatchWork();
         break;
-    case SubmissionPolicy::Action::Flush:
+    }
+    case SubmissionPolicy::Action::Flush: {
+        VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::SchedulerFlush};
         scheduler.Flush();
         pending_native_work = false;
         break;
+    }
     }
     if (native && !android) {
         pending_native_work = true;

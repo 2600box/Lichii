@@ -62,6 +62,9 @@ enum class Zone : u32 {
     WriterWait,
     ListSubmitWait,
     ListGpuWait,
+    FlushCaching,   ///< Pre-draw invalidation of ranges written since the last draw
+    DispatchWork,   ///< Scheduler chunks handed to the worker every 32 draws
+    SchedulerFlush, ///< Scheduler flushes at the draw budget (4096 draws, or the native budget)
     Count,
 };
 
@@ -73,7 +76,8 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "descriptor acquire", "bind stage buffers", "push descriptors", "render targets",
     "configure draw", "dynamic state", "draw record", "texture upload", "fence",
     "fence skipped", "method", "split drain", "split wait",
-    "writer wait", "list submit wait", "list GPU wait",
+    "writer wait", "list submit wait", "list GPU wait", "flush caching", "dispatch work",
+    "scheduler flush",
 };
 
 // A plain flag: Enabled() runs several times per method write (no guard to check).
@@ -109,13 +113,17 @@ inline u64 Ticks() {
 struct ThreadData {
     std::array<u64, static_cast<size_t>(Zone::Count)> exclusive_ns{};
     std::array<u64, static_cast<size_t>(Zone::Count)> count{};
-    std::array<u64, 8> counters{}; ///< See Counter
+    std::array<u64, 18> counters{}; ///< See Counter
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_ns{};
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_count{};
     u64 child_ns{};    ///< Time of the zones nested in the current one
     u64 window_start{};
     u64 window_start_ticks{};
     std::optional<u64> cpu_start_ns;
+    u32 depth{};          ///< Zones open (Scope, timed SampledScope)
+    u32 samples_left{1};  ///< SampledScope: entries until the next timed one
+    u32 sample_weight{1}; ///< SampledScope: the entries the next timed one stands for
+    u32 sample_seed{0x2545F491};
 };
 
 inline thread_local ThreadData t_data;
@@ -126,8 +134,10 @@ public:
         if (!enabled) {
             return;
         }
-        parent_child_ns = t_data.child_ns;
-        t_data.child_ns = 0;
+        auto& data = t_data;
+        ++data.depth;
+        parent_child_ns = data.child_ns;
+        data.child_ns = 0;
         start = Ticks();
     }
 
@@ -141,6 +151,7 @@ public:
         data.exclusive_ns[index] += elapsed - data.child_ns;
         ++data.count[index];
         data.child_ns = parent_child_ns + elapsed;
+        --data.depth;
     }
 
     Scope(const Scope&) = delete;
@@ -149,6 +160,89 @@ public:
 private:
     Zone zone;
     bool enabled;
+    u64 start{};
+    u64 parent_child_ns{};
+};
+
+/// The ticks two time stamp reads in a row take: what a timed entry measures on top of its own
+/// time (the least of a few tries).
+inline u64 TimingOverheadTicks() {
+    static const u64 overhead = [] {
+        u64 least = ~u64{0};
+        for (int i = 0; i < 64; ++i) {
+            const u64 first = Ticks();
+            const u64 second = Ticks();
+            least = (std::min)(least, second - first);
+        }
+        return least;
+    }();
+    return overhead;
+}
+
+/// A zone entered millions of times a second, such as the split's back's 3D register writes
+/// (Maxwell3D::CallMethod): timing every entry took two time stamp reads each, which cost more
+/// than most entries and slowed the very runs it measured. Entered outside every other zone, one
+/// entry in about SampleEvery is timed and stands for the entries since the last timed one; all
+/// are counted. Entered inside another zone it does nothing: the entry is that zone's time.
+class SampledScope {
+public:
+    static constexpr u32 SampleEvery = 32;
+    /// About 25 us at 4 GHz (time stamp ticks): far longer than these entries take.
+    static constexpr u64 LongTicks = 100'000;
+
+    /// `entries`: what this entry counts as (a run of constant buffer words counts each word).
+    explicit SampledScope(Zone zone, u32 entries = 1) {
+        if (!Enabled()) {
+            return;
+        }
+        auto& data = t_data;
+        if (data.depth != 0) {
+            return;
+        }
+        index = static_cast<size_t>(zone);
+        data.count[index] += entries;
+        if (--data.samples_left != 0) {
+            return;
+        }
+        weight = data.sample_weight;
+        // The next interval: 1 to 2 * SampleEvery - 1 entries, so that no fixed period lines up
+        // with a repeating pattern of entries (xorshift32).
+        u32 seed = data.sample_seed;
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        data.sample_seed = seed;
+        data.sample_weight = 1 + seed % (2 * SampleEvery - 1);
+        data.samples_left = data.sample_weight;
+        ++data.depth;
+        parent_child_ns = data.child_ns;
+        data.child_ns = 0;
+        start = Ticks();
+    }
+
+    ~SampledScope() {
+        if (weight == 0) {
+            return;
+        }
+        const u64 elapsed = Ticks() - start;
+        auto& data = t_data;
+        // Less the reads' own cost, which the untimed entries did not pay.
+        const u64 overhead = TimingOverheadTicks();
+        const u64 own = elapsed - data.child_ns;
+        const u64 measured = own > overhead ? own - overhead : 0;
+        // An entry this long was most likely interrupted or preempted: it counts once, not for
+        // the untimed entries too.
+        data.exclusive_ns[index] += measured > LongTicks ? measured : measured * weight;
+        data.child_ns = parent_child_ns + elapsed;
+        --data.depth;
+    }
+
+    SampledScope(const SampledScope&) = delete;
+    SampledScope& operator=(const SampledScope&) = delete;
+
+private:
+    size_t index{};
+    u64 weight{}; ///< 0: not timed
     u64 start{};
     u64 parent_child_ns{};
 };
@@ -163,7 +257,22 @@ enum class Counter : u32 {
     SameValueWrites, ///< Of MethodWrites: the register already held the value
     AcquireChecks,  ///< Semaphore acquires evaluated
     AcquireWaits,   ///< Of AcquireChecks: not met yet (the channel waits)
+    UniformBinds,   ///< Graphics uniform buffers bound (BindHostGraphicsUniformBuffer; root table
+                    ///< banks left out)
+    UniformNewAddress,     ///< Of UniformBinds: the slot's last bind was at another address
+    UniformClassicScans,   ///< Of UniformBinds: classic path, the range scanned for uploads
+    UniformClassicUploads, ///< Of UniformClassicScans: the scan uploaded something
+    StorageBinds,      ///< Graphics storage buffers bound (BindHostGraphicsStorageBuffers)
+    StorageScans,      ///< Of StorageBinds: the range scanned for uploads (SynchronizeBuffer)
+    StorageUploads,    ///< Of StorageScans: the scan uploaded something
+    RingLeadSum,       ///< Split front: write_position - consumed at each Publish, summed
+    RingLeadPublishes, ///< Split front: the publishes RingLeadSum adds up
+    RingLeadMax,       ///< Split front: the largest lead at a Publish
+    Count,
 };
+
+static_assert(static_cast<size_t>(Counter::Count) ==
+              sizeof(ThreadData::counters) / sizeof(u64));
 
 /// Method calls on this thread by method (3D registers on the back, macros on the front), and
 /// same-value writes among them; MME DMA reads by the macro that made them. The most frequent
@@ -177,6 +286,18 @@ inline void CountMethod(u32 method, bool same) {
         ++t_method_count[method];
         t_method_same[method] += same ? 1 : 0;
     }
+}
+
+/// A 3D register write (Maxwell3D::CallMethod below the macro range), `same` if the register
+/// held the value already: the write counters and the per-method counts.
+inline void CountRegisterWrite(u32 method, bool same) {
+    if (!Enabled()) {
+        return;
+    }
+    auto& counters = t_data.counters;
+    ++counters[static_cast<size_t>(Counter::MethodWrites)];
+    counters[static_cast<size_t>(Counter::SameValueWrites)] += same ? 1 : 0;
+    CountMethod(method, same);
 }
 
 inline void CountDmaRead(u32 macro) {
@@ -221,6 +342,35 @@ inline void Add(Counter counter, u64 amount) {
     if (Enabled()) {
         t_data.counters[static_cast<size_t>(counter)] += amount;
     }
+}
+
+/// The address each graphics uniform buffer slot (stage, index) was last bound at.
+inline thread_local std::array<std::array<u64, 18>, 5> t_uniform_addresses{};
+
+/// A graphics uniform buffer bound at device_addr for (stage, index): counted, and counted as at
+/// a new address when the slot's last bind was elsewhere.
+inline void CountUniformBind(size_t stage, u32 index, u64 device_addr) {
+    if (!Enabled() || stage >= t_uniform_addresses.size() ||
+        index >= t_uniform_addresses[stage].size()) {
+        return;
+    }
+    auto& counters = t_data.counters;
+    ++counters[static_cast<size_t>(Counter::UniformBinds)];
+    u64& last = t_uniform_addresses[stage][index];
+    counters[static_cast<size_t>(Counter::UniformNewAddress)] += last != device_addr ? 1 : 0;
+    last = device_addr;
+}
+
+/// The split's front published with the back lead words behind it.
+inline void CountRingLead(u64 lead) {
+    if (!Enabled()) {
+        return;
+    }
+    auto& counters = t_data.counters;
+    counters[static_cast<size_t>(Counter::RingLeadSum)] += lead;
+    ++counters[static_cast<size_t>(Counter::RingLeadPublishes)];
+    u64& largest = counters[static_cast<size_t>(Counter::RingLeadMax)];
+    largest = (std::max)(largest, lead);
 }
 
 /// The front waited for the back since `start` (Ticks) for `site`.
@@ -303,6 +453,32 @@ inline void Report(const char* thread_name = "GPU thread") {
                             static_cast<double>(window) / 1e6);
     }
     LOG_INFO(HW_GPU, "{} per second:{}", thread_name, line);
+    const auto counter = [&](Counter which) { return data.counters[static_cast<size_t>(which)]; };
+    const auto per_second = [&](u64 amount) { return static_cast<double>(amount) * 1e9 / window; };
+    if (counter(Counter::UniformBinds) != 0 || counter(Counter::StorageBinds) != 0) {
+        const u64 uniform_binds = counter(Counter::UniformBinds);
+        const u64 new_address = counter(Counter::UniformNewAddress);
+        LOG_INFO(HW_GPU,
+                 "{} buffer binds per second: uniform {:.0f} ({:.0f} at a new address, {:.0f} at "
+                 "the same address; {:.0f} classic scans, {:.0f} uploaded) | storage {:.0f} "
+                 "({:.0f} scans, {:.0f} uploaded)",
+                 thread_name, per_second(uniform_binds), per_second(new_address),
+                 per_second(uniform_binds - new_address),
+                 per_second(counter(Counter::UniformClassicScans)),
+                 per_second(counter(Counter::UniformClassicUploads)),
+                 per_second(counter(Counter::StorageBinds)),
+                 per_second(counter(Counter::StorageScans)),
+                 per_second(counter(Counter::StorageUploads)));
+    }
+    if (const u64 publishes = counter(Counter::RingLeadPublishes); publishes != 0) {
+        LOG_INFO(HW_GPU,
+                 "{} ring lead at publish (write_position - consumed): average {:.0f} words, "
+                 "max {} words over {} publishes in {:.1f} s",
+                 thread_name,
+                 static_cast<double>(counter(Counter::RingLeadSum)) /
+                     static_cast<double>(publishes),
+                 counter(Counter::RingLeadMax), publishes, static_cast<double>(window) / 1e9);
+    }
     if (const std::string methods = TopMethods(t_method_count, &t_method_same, window); !methods.empty()) {
         LOG_INFO(HW_GPU, "{} methods per second:{}", thread_name, methods);
     }
@@ -312,7 +488,9 @@ inline void Report(const char* thread_name = "GPU thread") {
     t_method_count = {};
     t_method_same = {};
     t_dma_reads = {};
+    const u32 depth = data.depth;
     data = {};
+    data.depth = depth;
     data.window_start = now;
     data.window_start_ticks = now_ticks;
     data.cpu_start_ns = cpu_now;

@@ -10,6 +10,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "video_core/buffer_cache/uniform_stream_reuse.h"
+#include "video_core/nx2_egla66_sweep3.h"
 
 namespace {
 void Check(bool condition, const char* message) {
@@ -113,4 +114,55 @@ TEST_CASE("Uniform stream reuse preserves data through mutation and session rese
         bind(stage, slot, address, size);
         bind(stage, slot, address, size);
     }
+}
+
+TEST_CASE("Uniform stream reuse compares only binds at the same address (EGLA66 ubo-newaddr)",
+          "[video_core]") {
+    using VideoCommon::BindSmallUniformReusing;
+    VideoCommon::Nx2Egla66Sweep3::ubo_newaddr = true;
+    Memory memory;
+    Runtime runtime;
+    VideoCommon::ResetUniformStreamReuse<Runtime>();
+    auto bind = [&](size_t stage, u32 slot, u64 address, u32 size) {
+        Check(BindSmallUniformReusing(runtime, memory, stage, slot, slot, address, size),
+              "valid small uniform rejected");
+        CheckBound(runtime, memory, address, size);
+    };
+    // As Quixomatic's ed4efcbc76 test: the first bind of an address keeps no CPU copy, the second
+    // makes it, the third can reuse.
+    bind(0, 0, 0, 64);
+    bind(0, 0, 0, 64);
+    Check(runtime.allocations.size() == 2, "an address's second bind has nothing to compare with");
+    bind(0, 0, 0, 64);
+    Check(runtime.allocations.size() == 2, "identical bytes were copied again");
+    memory.bytes[7] = 23;
+    bind(0, 0, 0, 64);
+    Check(runtime.allocations.size() == 3, "changed bytes reused stale data");
+    bind(0, 0, 64, 64);
+    Check(runtime.allocations.size() == 4, "another address reused the slot's allocation");
+    bind(0, 0, 0, 64);
+    bind(0, 0, 0, 64);
+    Check(runtime.allocations.size() == 6, "a returning address reused bytes from before it left");
+    runtime.NextTick();
+    bind(0, 0, 0, 64);
+    Check(runtime.allocations.size() == 1, "a new command buffer reused an old allocation");
+
+    u32 random = 23;
+    for (u32 index = 0; index < 10000; ++index) {
+        random = random * 1664525U + 1013904223U;
+        if (index % 37 == 0)
+            runtime.NextTick();
+        if (index % 503 == 0)
+            VideoCommon::ResetUniformStreamReuse<Runtime>();
+        const u32 size = 1 + random % 4096;
+        const u64 address = ((random >> 12) % 4) * 1024;
+        if (index % 3 == 0)
+            memory.bytes[address + random % size] ^= u8{0x5a};
+        const size_t stage = (random >> 20) % 5;
+        const u32 slot = (random >> 24) % 18;
+        bind(stage, slot, address, size);
+        bind(stage, slot, address, size);
+        bind(stage, slot, address, size);
+    }
+    VideoCommon::Nx2Egla66Sweep3::ubo_newaddr = false;
 }

@@ -12,6 +12,7 @@
 #include <type_traits>
 
 #include "common/common_types.h"
+#include "video_core/nx2_egla66_sweep3.h"
 
 namespace VideoCommon {
 
@@ -50,8 +51,9 @@ public:
     struct Slot {
         Ref ref{};
         u64 tick{};
-        u64 device_addr{}; ///< Where `bytes` were last read
+        u64 device_addr{}; ///< Where bytes were last read (ubo-newaddr: the previous bind's)
         u32 size{};        // 0: nothing streamed yet
+        bool bytes_valid{}; // EGLA-66 ubo-newaddr: bytes holds that address's bytes
         std::array<u8, MaxBytes> bytes{};
     };
 
@@ -60,6 +62,7 @@ public:
             for (Slot& slot : stage) {
                 slot.size = 0;
                 slot.tick = 0;
+                slot.bytes_valid = false;
             }
         }
     }
@@ -101,9 +104,21 @@ template <class Runtime, class DeviceMemory>
     u8* const scratch = reuse.scratch.data();
     device_memory.ReadBlockUnsafe(device_addr, scratch, size);
 
-    const bool same_bytes =
-        slot.size == size && std::memcmp(slot.bytes.data(), scratch, size) == 0;
-    slot.device_addr = device_addr;
+    // EGLA-66 ubo-newaddr (Quixomatic ed4efcbc76): a slot rebound to another address almost never
+    // has the same bytes (per-object data). Compare only against the same address, and keep the
+    // CPU copy only once an address comes back, so those binds copy their bytes once, not twice.
+    const bool new_address_mode = Nx2Egla66Sweep3::ubo_newaddr;
+    const bool same_address =
+        !new_address_mode || (slot.device_addr == device_addr && slot.size == size);
+    const bool same_bytes = new_address_mode
+                                ? same_address && slot.bytes_valid &&
+                                      std::memcmp(slot.bytes.data(), scratch, size) == 0
+                                : slot.size == size &&
+                                      std::memcmp(slot.bytes.data(), scratch, size) == 0;
+    if (!new_address_mode) {
+        // EGLA-66 ubo-keep (RebindKeptUniform): the range this bind read.
+        slot.device_addr = device_addr;
+    }
     if (same_bytes && slot.tick == runtime.CurrentTick()) {
         runtime.RebindStreamUniform(slot.ref, size);
         return true;
@@ -113,9 +128,15 @@ template <class Runtime, class DeviceMemory>
     slot.ref = runtime.LastStreamUniformRef();
     // After the allocation: the tick the stream region is tagged with is the one current now.
     slot.tick = runtime.CurrentTick();
-    if (!same_bytes) {
+    if (!same_address) {
+        slot.device_addr = device_addr;
+        slot.size = size;
+        slot.bytes_valid = false;
+        Nx2Egla66Sweep3::Count(Nx2Egla66Sweep3::g_ubo_newaddr_uncopied);
+    } else if (!same_bytes) {
         slot.size = size;
         std::memcpy(slot.bytes.data(), scratch, size);
+        slot.bytes_valid = true;
     }
     return true;
 }
@@ -156,6 +177,10 @@ template <class Runtime, class DeviceMemory>
     const typename Reuse::Slot& slot = reuse.slots[stage][index];
     if (slot.size != size || slot.device_addr != device_addr) {
         return false;
+    }
+    // EGLA-66 ubo-newaddr keeps no copy of an address bound once: nothing to compare against.
+    if (!slot.bytes_valid) {
+        return true;
     }
     device_memory.ReadBlockUnsafe(device_addr, reuse.scratch.data(), size);
     return std::memcmp(slot.bytes.data(), reuse.scratch.data(), size) == 0;

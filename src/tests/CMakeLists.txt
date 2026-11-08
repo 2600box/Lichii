@@ -17,6 +17,7 @@ add_executable(tests
     core/nx2_streamplay.cpp
     core/nx2_video_ready.cpp
     core/nx2_debug_server.cpp
+    core/gpu_dirty_memory_manager.cpp
     core/nx2_present_pacer.cpp
     common/dkb_cpu_trace.cpp
     common/dkb_frame_trace.cpp

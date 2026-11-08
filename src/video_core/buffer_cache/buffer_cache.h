@@ -26,6 +26,7 @@
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
+#include "video_core/nx2_egla66_sweep3.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/texture_cache/util.h"
@@ -1546,6 +1547,7 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
     }
     const Binding& binding = channel_state->uniform_buffers[stage][index];
     const DAddr device_addr = binding.device_addr;
+    Nx2Profile::CountUniformBind(stage, index, device_addr);
     const u32 size = (std::min)(binding.size, (*channel_state->uniform_buffer_sizes)[stage][index]);
     Buffer& buffer = slot_buffers[binding.buffer_id];
     TouchBuffer(buffer, binding.buffer_id);
@@ -1660,8 +1662,11 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
                   "EGLA66 ubo-keep verify: stage {} slot {} at {:#x}+{:#x} is no longer streamed",
                   stage, index, device_addr, size);
     }
-    if (SynchronizeBuffer(buffer, device_addr, size)) {
+    Nx2Profile::Add(Nx2Profile::Counter::UniformClassicScans, 1);
+    if (SynchronizeBindingBuffer(binding.buffer_id, device_addr, size, false)) {
         ++channel_state->uniform_cache_hits[0];
+    } else {
+        Nx2Profile::Add(Nx2Profile::Counter::UniformClassicUploads, 1);
     }
     // Skip binding if it's not needed and if the bound buffer is not the fast version
     // This exists to avoid instances where the fast buffer is bound and a GPU write happens
@@ -1787,13 +1792,17 @@ void BufferCache<P>::BindHostGraphicsStorageBuffers(size_t stage) {
     ForEachEnabledBit(channel_state->enabled_storage_buffers[stage], [&](u32 index) {
         const Binding& binding = channel_state->storage_buffers[stage][index];
         const bool is_written = ((channel_state->written_storage_buffers[stage] >> index) & 1) != 0;
+        Nx2Profile::Add(Nx2Profile::Counter::StorageBinds, 1);
         if (BindMultiRangeStorage(binding, is_written, graphics_segments)) {
             return;
         }
         Buffer& buffer = slot_buffers[binding.buffer_id];
         TouchBuffer(buffer, binding.buffer_id);
         const u32 size = binding.size;
-        SynchronizeBuffer(buffer, binding.device_addr, size);
+        Nx2Profile::Add(Nx2Profile::Counter::StorageScans, 1);
+        if (!SynchronizeBindingBuffer(binding.buffer_id, binding.device_addr, size, true)) {
+            Nx2Profile::Add(Nx2Profile::Counter::StorageUploads, 1);
+        }
 
         const u32 offset = buffer.Offset(binding.device_addr);
         buffer.MarkUsage(offset, size);
@@ -2095,6 +2104,15 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
         return;
     }
     const auto& array = maxwell3d->regs.vertex_streams[index];
+    if (Nx2Egla66Sweep3::vstream && array.enable == 0) {
+        // Binds nothing, so no address to translate: writes to the stream registers mark streams
+        // dirty draw after draw, and these translations were a third of the back's in Mario Kart
+        // World races.
+        Nx2Egla66Sweep3::Count(Nx2Egla66Sweep3::g_vstream_skipped);
+        channel_state->vertex_buffers[index] = NULL_BINDING;
+        UpdateVertexBufferSlot(index, NULL_BINDING);
+        return;
+    }
     const auto& limit = maxwell3d->regs.vertex_stream_limits[index];
     const GPUVAddr gpu_addr_begin = array.Address();
     const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
@@ -2868,6 +2886,52 @@ void BufferCache<P>::SynchronizeGeometryBuffer(u32 slot, BufferId buffer_id, DAd
         .deletions = buffer_deletions,
     };
     memory_tracker.WatchSynchronized(slot, device_addr, size);
+}
+
+template <class P>
+bool BufferCache<P>::SynchronizeBindingBuffer(BufferId buffer_id, DAddr device_addr, u32 size,
+                                              bool storage) {
+    static_assert(NUM_VERTEX_BUFFERS + 1 <= FIRST_BINDING_SYNC_SLOT);
+    static_assert(FIRST_BINDING_SYNC_SLOT + NUM_BINDING_SYNCS <=
+                  MemoryTracker::NUM_SYNCHRONIZED_SLOTS);
+    static_assert(NUM_BINDING_SYNCS == 256);
+    namespace Egla66 = Nx2Egla66Sweep3;
+    Buffer& buffer = slot_buffers[buffer_id];
+    if (!Egla66::storage_sync_skip || buffer_id == NULL_BUFFER_ID) {
+        return SynchronizeBuffer(buffer, device_addr, size);
+    }
+    Egla66::Count(storage ? Egla66::g_storage_scans : Egla66::g_uniform_scans);
+    // The same invariant as SynchronizeGeometryBuffer, for a range rather than a slot: the
+    // buffer, range and buffer set (buffer_deletions) of the entry's last scan, with the tracker
+    // still reporting the range synchronized. A collision only evicts the entry.
+    const u64 key = (device_addr ^ (u64{size} << 44)) * 0x9E3779B97F4A7C15ULL;
+    const u32 index = static_cast<u32>(key >> 56);
+    GeometrySync& sync = binding_syncs[index];
+    const u32 slot = FIRST_BINDING_SYNC_SLOT + index;
+    if (memory_tracker.IsSynchronized(slot) && sync.buffer_id == buffer_id &&
+        sync.device_addr == device_addr && sync.size == size &&
+        sync.deletions == buffer_deletions) {
+        Egla66::Count(storage ? Egla66::g_storage_scans_skipped : Egla66::g_uniform_scans_skipped);
+        if (Egla66::storage_sync_skip_verify && !SynchronizeBuffer(buffer, device_addr, size)) {
+            Egla66::Count(Egla66::g_sync_skip_mismatches);
+            static u32 logged{};
+            if (logged++ < 16) {
+                LOG_ERROR(HW_GPU,
+                          "EGLA66 storage-sync-skip: a skipped {} scan uploaded at {:#x}+{:#x}",
+                          storage ? "storage" : "uniform", device_addr, size);
+            }
+        }
+        return true;
+    }
+    const bool clean = SynchronizeBuffer(buffer, device_addr, size);
+    sync = GeometrySync{
+        .buffer_id = buffer_id,
+        .device_addr = device_addr,
+        .size = size,
+        .deletions = buffer_deletions,
+    };
+    memory_tracker.WatchSynchronized(slot, device_addr, size);
+    return clean;
 }
 
 template <class P>

@@ -16,6 +16,7 @@
 #include "video_core/nx2_cmdpage_diag.h"
 #include "video_core/nx2_download_trace.h"
 #include "video_core/nx2_egla66.h"
+#include "video_core/nx2_egla66_sweep3.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/renderer_base.h"
 #include "video_core/renderer_null/renderer_null.h"
@@ -52,6 +53,7 @@ namespace VideoCore {
 /// @brief Creates an emulated GPU instance using the given system context.
 void CreateGPU(std::optional<Tegra::GPU>& gpu, Core::Frontend::EmuWindow& emu_window, Core::System& system) {
     Settings::UpdateRescalingInfo();
+    VideoCommon::Nx2Egla66Sweep3::ReadSwitches();
     VideoCommon::Nx2Profile::ReadSwitch();
     Tegra::Nx2CmdPageDiag::ReadSwitch();
     VideoCommon::Nx2DownloadTrace::ReadSwitch();

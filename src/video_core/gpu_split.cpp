@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstdlib>
+#include <string_view>
 #include <thread>
 
 #ifdef _MSC_VER
@@ -28,6 +30,7 @@
 #include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_egla66_sweep3.h"
 #include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
@@ -46,6 +49,40 @@ void Pause() {
 #else
     std::this_thread::yield();
 #endif
+}
+
+/// Test-only spin budgets for the split-wait A/B (upstream 007a132f6f, Djihads80): the PAUSE
+/// spins before the front sleeps in a wait for the back, and before the idle back sleeps. Read
+/// once, at the first wait; unset keeps 16384 and 8192.
+u32 ReadSpinBudget(const char* name, u32 default_value) {
+    constexpr u64 max_spin_budget = 65536;
+    const char* const value = std::getenv(name);
+    if (value == nullptr) {
+        return default_value;
+    }
+    const std::string_view text{value};
+    u64 parsed{};
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), parsed);
+    if (error != std::errc{} || end != text.data() + text.size()) {
+        LOG_WARNING(HW_GPU, "Invalid {} value '{}'; using {}", name, value, default_value);
+        return default_value;
+    }
+    if (parsed > max_spin_budget) {
+        LOG_INFO(HW_GPU, "{} value {} capped at {}", name, parsed, max_spin_budget);
+        parsed = max_spin_budget;
+    }
+    LOG_INFO(HW_GPU, "{}: {} spins (default {})", name, parsed, default_value);
+    return static_cast<u32>(parsed);
+}
+
+u32 FrontSpinBudget() {
+    static const u32 budget = ReadSpinBudget("EDEN_NX2_SPLIT_FRONT_SPINS", 16384);
+    return budget;
+}
+
+u32 BackSpinBudget() {
+    static const u32 budget = ReadSpinBudget("EDEN_NX2_SPLIT_BACK_SPINS", 8192);
+    return budget;
 }
 
 [[maybe_unused]] std::atomic<u32> g_back_thread_id{};
@@ -207,6 +244,9 @@ void GpuSplit::Publish() {
     if (published_local == write_position) {
         return;
     }
+    if (Nx2Profile::Enabled()) {
+        Nx2Profile::CountRingLead(write_position - consumed.load(std::memory_order_relaxed));
+    }
     published_local = write_position;
     publish_every = std::min<size_t>(publish_every * 2, PublishEvery);
     published.store(write_position, std::memory_order_seq_cst);
@@ -305,7 +345,7 @@ bool GpuSplit::WaitFor(u64 target, DrainSite site) {
 }
 
 void GpuSplit::Backoff(u32 spins, u64 target) {
-    if (spins < 16384) {
+    if (spins < FrontSpinBudget()) {
         Pause();
         return;
     }
@@ -377,8 +417,8 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
         const u32 argument = static_cast<u32>(head >> 32);
         auto* const engine = back_engine;
         if (engine->fast_maxwell3d) {
-            // Nx2Perf: as below without the profile zones (off with fast_maxwell3d) and the
-            // virtual call.
+            // Nx2Perf: as below without the virtual call; Maxwell3D counts and samples its own
+            // calls when profiling (SampledScope).
             using Tegra::Engines::Maxwell3D;
             auto* const maxwell3d = static_cast<Maxwell3D*>(engine);
             constexpr u32 cb_data = MAXWELL3D_REG_INDEX(const_buffer.buffer);
@@ -550,8 +590,10 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
     g_back_thread_id.store(GetCurrentThreadId(), std::memory_order_relaxed);
 #endif
     const bool skip = acquire_skip;
+    const u32 spin_budget = BackSpinBudget();
     u64 read_position = 0;
     while (!stop_token.stop_requested()) {
+        Nx2Egla66Sweep3::Report();
         Nx2Profile::Report("GPU back thread");
         Nx2Egla66::Report();
         u64 available = published.load(std::memory_order_acquire);
@@ -567,7 +609,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 spin_start = std::chrono::steady_clock::now();
             }
             // The front usually sends more within microseconds: spin briefly before sleeping.
-            for (u32 spins = 0; spins < 8192 && available == read_position &&
+            for (u32 spins = 0; spins < spin_budget && available == read_position &&
                                 !hook_requested.load(std::memory_order_relaxed);
                  ++spins) {
                 Pause();
