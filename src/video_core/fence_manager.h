@@ -89,7 +89,7 @@ public:
             TryReleasePendingFences<false>();
         }
         auto [should_flush, committed_flushes] = CommitCacheFlushes();
-        if (Nx2Profile::Enabled()) [[unlikely]] {
+        if (Nx2Profile::Enabled()) {
             NoteFenceDecision(delay_fence, committed_flushes);
         }
         if (!delay_fence && committed_flushes == 0 && SkipEmptyFence()) {
