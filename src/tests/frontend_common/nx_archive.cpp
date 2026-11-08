@@ -49,3 +49,10 @@ TEST_CASE("NX tools: listing a folder never throws", "[frontend][nx]") {
     std::filesystem::permissions(dir.path, std::filesystem::perms::none);
     CHECK_NOTHROW(RegularFiles(dir.path));
 }
+
+TEST_CASE("NX tools: an untouched file-name title is not written", "[frontend][nx]") {
+    // An archive without a title shows its file name; keeping it must not store it as the title.
+    CHECK_FALSE(IsTitleEdit("My Game", "My Game"));
+    CHECK_FALSE(IsTitleEdit("", "My Game"));
+    CHECK(IsTitleEdit("My Game (EU)", "My Game"));
+}

@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace FrontendCommon::NxArchive {
@@ -14,5 +15,9 @@ std::string WithNxExtension(std::string path);
 
 /// The regular files in `directory`, empty when it cannot be read. Never throws.
 std::vector<std::filesystem::path> RegularFiles(const std::filesystem::path& directory);
+
+/// Whether the metadata editor should write `edited` as the title. `shown` is what the editor
+/// started from: the archive's title, or its file name when it has none.
+bool IsTitleEdit(std::string_view edited, std::string_view shown);
 
 } // namespace FrontendCommon::NxArchive

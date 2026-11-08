@@ -33,4 +33,8 @@ std::vector<std::filesystem::path> RegularFiles(const std::filesystem::path& dir
     return files;
 }
 
+bool IsTitleEdit(std::string_view edited, std::string_view shown) {
+    return !edited.empty() && edited != shown;
+}
+
 } // namespace FrontendCommon::NxArchive

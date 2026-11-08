@@ -748,7 +748,7 @@ void NxTools::EditNxMetadata(const std::string& archive_path) {
     job->title = tr("Editing NX metadata");
     job->args = {"set-metadata", archive_path, ToUtf8(application_id)};
     const auto name = name_edit->text().trimmed();
-    if (!name.isEmpty() && name.toStdString() != current_title) {
+    if (FrontendCommon::NxArchive::IsTitleEdit(ToUtf8(name), ToUtf8(shown_title.trimmed()))) {
         job->args.push_back("title=" + name.toStdString());
     }
     const auto publisher = publisher_edit->text().trimmed();
