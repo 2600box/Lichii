@@ -38,7 +38,7 @@
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "common/settings.h"
 #include "shader_recompiler/exception.h"
-#include "video_core/egla66.h"
+#include "video_core/nx2_egla66.h"
 #include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_profile.h"
 
@@ -299,11 +299,6 @@ bool TextureMemoVerify() {
     return verify;
 }
 
-const bool egla66_delta_descriptors =
-    VideoCommon::Egla66::Env("EDEN_NX2_EGLA66_DELTA_DESCRIPTORS");
-const bool egla66_delta_descriptors_verify =
-    VideoCommon::Egla66::Env("EDEN_NX2_EGLA66_DELTA_DESCRIPTORS_VERIFY");
-
 // Delta draws on the drawing thread, logged every 10 s with either switch.
 struct DeltaDescriptorStats {
     u64 replayed{};
@@ -316,7 +311,7 @@ struct DeltaDescriptorStats {
 void ReportDeltaDescriptors() {
     DeltaDescriptorStats& stats = delta_descriptor_stats;
     if (((stats.replayed + stats.pushed) & 1023) != 0 ||
-        !VideoCommon::Egla66::WindowEnded(stats.window)) {
+        !VideoCommon::Nx2Egla66::WindowEnded(stats.window)) {
         return;
     }
     LOG_INFO(Render_Vulkan,
@@ -876,7 +871,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         kept_images_valid = false;
     }
     const bool keep_images =
-        captured_delta && (egla66_delta_descriptors || egla66_delta_descriptors_verify);
+        captured_delta && (VideoCommon::Nx2Egla66::delta_descriptors || VideoCommon::Nx2Egla66::delta_descriptors_verify);
     if (keep_images) {
         kept_image_entries.clear();
     }
@@ -1096,10 +1091,10 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
     const VideoCommon::ImageViewInOut* views_it{delta_views.data()};
     // EDEN_NX2_EGLA66_DELTA_DESCRIPTORS: push the entries kept for delta_views instead of
     // resolving every view and sampler again; with _VERIFY resolve them and compare.
-    const bool keep_images = egla66_delta_descriptors || egla66_delta_descriptors_verify;
+    const bool keep_images = VideoCommon::Nx2Egla66::delta_descriptors || VideoCommon::Nx2Egla66::delta_descriptors_verify;
     const bool kept_usable = keep_images && kept_images_valid &&
                              kept_scale_epoch == texture_cache.ScaleEpoch();
-    const bool replay_images = kept_usable && !egla66_delta_descriptors_verify;
+    const bool replay_images = kept_usable && !VideoCommon::Nx2Egla66::delta_descriptors_verify;
     struct Kept {
         std::vector<DescriptorUpdateEntry> entries;
         std::array<std::pair<u32, u32>, NUM_STAGES> ranges;

@@ -44,7 +44,6 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
-#include "video_core/egla66.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_download_trace.h"
 #include "video_core/nx2_egla66.h"
@@ -733,10 +732,10 @@ private:
         }
         keep.gpu_writes.emplace_back(device_addr, device_addr + size);
     }
-    const bool egla66_ubo_keep = Egla66::Env("EDEN_NX2_EGLA66_UBO_KEEP");
-    const bool egla66_ubo_keep_verify = Egla66::Env("EDEN_NX2_EGLA66_UBO_KEEP_VERIFY");
-    const bool egla66_ubo_keep_full = Egla66::Env("EDEN_NX2_EGLA66_UBO_KEEP_FULL");
-    const bool egla66_ubo_keep_full_verify = Egla66::Env("EDEN_NX2_EGLA66_UBO_KEEP_FULL_VERIFY");
+    const bool egla66_ubo_keep = Nx2Egla66::ubo_keep;
+    const bool egla66_ubo_keep_verify = Nx2Egla66::ubo_keep_verify;
+    const bool egla66_ubo_keep_full = Nx2Egla66::ubo_keep_full;
+    const bool egla66_ubo_keep_full_verify = Nx2Egla66::ubo_keep_full_verify;
     struct UniformKeep {
         std::array<u32, NUM_STAGES> candidates{}; ///< Streamed by the previous draw, not rebound
         std::array<u32, NUM_STAGES> streamed{};   ///< Streamed by this draw

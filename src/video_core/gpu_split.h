@@ -105,12 +105,10 @@ public:
         return front_macros;
     }
 
-    /// EGLA-66 test gate, EDEN_NX2_EGLA66_ACQUIRE=1, read once (any thread). Greater-or-equal
-    /// acquires and the polls of suspended ones are checked without draining the split
-    /// (puller.cpp), Drain waits for the back's idle hook (#639) and the front keeps feeding a
-    /// back that ran out of work (Commit, SettleIdleBack).
-    [[nodiscard]] static bool AcquireSkipWanted();
-    /// The gate as of the last start (front and back).
+    /// EGLA-66 test gate Nx2Egla66::acquire (EDEN_NX2_EGLA66_ACQUIRE=1) as of the last start
+    /// (front and back). Greater-or-equal acquires and the polls of suspended ones are checked
+    /// without draining the split (puller.cpp), Drain waits for the back's idle hook (#639) and
+    /// the front keeps feeding a back that ran out of work (Commit, SettleIdleBack).
     [[nodiscard]] bool AcquireSkip() const {
         return acquire_skip;
     }

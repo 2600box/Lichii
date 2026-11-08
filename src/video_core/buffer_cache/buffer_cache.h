@@ -125,7 +125,7 @@ void BufferCache<P>::TickFrame() {
         }
         geometry_stats = {};
     }
-    if (UniformKeepActive() && Egla66::WindowEnded(uniform_keep.window)) {
+    if (UniformKeepActive() && Nx2Egla66::WindowEnded(uniform_keep.window)) {
         UniformKeep& keep = uniform_keep;
         LOG_INFO(HW_GPU,
                  "EGLA66 ubo-keep in 10 s: {} kept on delta draws, {} kept on full draws, {} "
@@ -237,7 +237,7 @@ void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu
     const DAddr page_begin = Common::AlignDown(device_addr, DEVICE_PAGESIZE);
     const DAddr page_end = Common::AlignUp(device_addr + size, DEVICE_PAGESIZE);
     if (keep_page_gpu_data &&
-        (!VideoCommon::GpuSplit::AcquireSkipWanted() || VideoCommon::GpuSplit::OwnsScheduler()) &&
+        (!Nx2Egla66::acquire || VideoCommon::GpuSplit::OwnsScheduler()) &&
         gpu_modified_ranges.Intersects(page_begin, page_end - page_begin)) {
         // Switch 2 titles: upload the CPU's bytes into the buffer instead, as CachedWriteMemory
         // does, so the page stays GPU-owned and nothing waits for the host GPU.

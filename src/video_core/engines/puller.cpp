@@ -24,6 +24,7 @@
 #include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_egla66.h"
 #include "video_core/nx2_fast_draw.h"
 #include "video_core/rasterizer_interface.h"
 
@@ -133,11 +134,7 @@ AcquireCheck CheckWithoutDrain(DmaPusher& dma_pusher, const Puller::PendingAcqui
 // disagrees with what CheckWithoutDrain decided.
 void VerifyWithoutDrain(DmaPusher& dma_pusher, const Puller::PendingAcquire& acquire,
                         AcquireCheck decided) {
-    static const bool verify = [] {
-        const char* value = std::getenv("EDEN_NX2_EGLA66_ACQUIRE_VERIFY");
-        return value != nullptr && value[0] == '1';
-    }();
-    if (!verify) {
+    if (!VideoCommon::Nx2Egla66::acquire_verify) {
         return;
     }
     DrainBack();

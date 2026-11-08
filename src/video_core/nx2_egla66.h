@@ -12,9 +12,12 @@
 
 /// EGLA-66 test-only candidates for the split GPU back thread's CPU cost (never merge as gates:
 /// a proven candidate ships unconditional, a disproven one is dropped). Each is off unless
-/// EDEN_NX2_EGLA66_<NAME>=1. ReadSwitches reads them once per GPU creation, before the split
-/// starts (after nx2_switches.txt is loaded); off keeps the previous behaviour. Tests set the
-/// flags directly. Report() logs each enabled candidate's counters every 10 s.
+/// EDEN_NX2_EGLA66_<NAME>=1, and each works alone; <NAME>_VERIFY=1 runs the original path and
+/// counts where the candidate's result would differ. ReadSwitches reads them all once per GPU
+/// creation, before the renderer and the split start (after nx2_switches.txt is loaded), and logs
+/// them in one line; off keeps the previous behaviour. Tests set the flags directly. Report() logs
+/// the ring-run, publish, state-run, ubo-mask and ubo-rebind counters every 10 s; the acquire,
+/// ubo-keep and delta-descriptors owners log their own.
 namespace VideoCommon::Nx2Egla66 {
 
 /// Consecutive macro writes to one engine share one split ring Run entry (ab22f858eb).
@@ -55,6 +58,31 @@ inline std::atomic<u64> g_ubo_rebind_kept{0};
 inline std::atomic<u64> g_ubo_rebind_bound{0};
 inline std::atomic<u64> g_ubo_rebind_mismatches{0};
 
+/// The front passes greater-or-equal semaphore acquires it can decide without draining the
+/// split, polls waiting ones without a drain (at most one per 1 ms), and feeds and settles the
+/// back while channels wait (GpuSplit::acquire_skip and acquire_feed; jpkto fb4d4e47a7, rdenno
+/// #639, PantACRO4life's valve). _PERF4 keeps perf-4's version, which does not feed the back.
+/// With publish on too, publish already sends each entry to an idle back, so the feed's early
+/// publish rarely fires (GpuSplit::Commit); the settling still runs.
+inline bool acquire{};
+inline bool acquire_perf4{};
+inline bool acquire_verify{};
+
+/// A draw binds a small uniform buffer from the stream allocation the previous draw made for it,
+/// without reading guest memory, when nothing between the two wrote its range: delta draws
+/// (ubo_keep), and full draws only register writes separate (ubo_keep_full). BufferCache's
+/// UniformKeep. _VERIFY alone runs the original path and compares.
+inline bool ubo_keep{};
+inline bool ubo_keep_verify{};
+inline bool ubo_keep_full{};
+inline bool ubo_keep_full_verify{};
+
+/// Delta draws push the image descriptor entries kept from the previous draw instead of resolving
+/// every view and sampler again (GraphicsPipeline's kept images). _VERIFY alone resolves them and
+/// compares.
+inline bool delta_descriptors{};
+inline bool delta_descriptors_verify{};
+
 inline void ReadSwitches() {
     const auto read = [](const char* name) {
         const char* const value = std::getenv(name);
@@ -67,11 +95,35 @@ inline void ReadSwitches() {
     ubo_mask_verify = ubo_mask && read("EDEN_NX2_EGLA66_UBO_MASK_VERIFY");
     ubo_rebind = read("EDEN_NX2_EGLA66_UBO_REBIND");
     ubo_rebind_verify = ubo_rebind && read("EDEN_NX2_EGLA66_UBO_REBIND_VERIFY");
+    acquire = read("EDEN_NX2_EGLA66_ACQUIRE");
+    acquire_perf4 = acquire && read("EDEN_NX2_EGLA66_ACQUIRE_PERF4");
+    acquire_verify = acquire && read("EDEN_NX2_EGLA66_ACQUIRE_VERIFY");
+    ubo_keep = read("EDEN_NX2_EGLA66_UBO_KEEP");
+    ubo_keep_verify = read("EDEN_NX2_EGLA66_UBO_KEEP_VERIFY");
+    ubo_keep_full = read("EDEN_NX2_EGLA66_UBO_KEEP_FULL");
+    ubo_keep_full_verify = read("EDEN_NX2_EGLA66_UBO_KEEP_FULL_VERIFY");
+    delta_descriptors = read("EDEN_NX2_EGLA66_DELTA_DESCRIPTORS");
+    delta_descriptors_verify = read("EDEN_NX2_EGLA66_DELTA_DESCRIPTORS_VERIFY");
     LOG_INFO(HW_GPU,
-             "EGLA66 gates: ring-run {}, publish {}, state-run {}, ubo-mask {} (verify {}), "
-             "ubo-rebind {} (verify {})",
+             "EGLA66 gates: RING_RUN={:d} PUBLISH={:d} STATE_RUN={:d} UBO_MASK={:d} "
+             "UBO_MASK_VERIFY={:d} UBO_REBIND={:d} UBO_REBIND_VERIFY={:d} ACQUIRE={:d} "
+             "ACQUIRE_PERF4={:d} ACQUIRE_VERIFY={:d} UBO_KEEP={:d} UBO_KEEP_VERIFY={:d} "
+             "UBO_KEEP_FULL={:d} UBO_KEEP_FULL_VERIFY={:d} DELTA_DESCRIPTORS={:d} "
+             "DELTA_DESCRIPTORS_VERIFY={:d}",
              ring_run, publish, state_run, ubo_mask, ubo_mask_verify, ubo_rebind,
-             ubo_rebind_verify);
+             ubo_rebind_verify, acquire, acquire_perf4, acquire_verify, ubo_keep, ubo_keep_verify,
+             ubo_keep_full, ubo_keep_full_verify, delta_descriptors, delta_descriptors_verify);
+}
+
+/// Whether a 10 s counter window ended (and starts the next one).
+[[nodiscard]] inline bool WindowEnded(std::chrono::steady_clock::time_point& window_end) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now < window_end) {
+        return false;
+    }
+    const bool first = window_end == std::chrono::steady_clock::time_point{};
+    window_end = now + std::chrono::seconds{10};
+    return !first;
 }
 
 /// For counters one thread writes: a plain load and store, not a locked add.

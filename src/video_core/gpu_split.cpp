@@ -91,14 +91,6 @@ void GpuSplit::CheckOwner(const char* where) {
 
 GpuSplit GpuSplit::instance;
 
-bool GpuSplit::AcquireSkipWanted() {
-    static const bool wanted = [] {
-        const char* value = std::getenv("EDEN_NX2_EGLA66_ACQUIRE");
-        return value != nullptr && value[0] == '1';
-    }();
-    return wanted;
-}
-
 void GpuSplit::MaybeStart(Core::System& system_) {
     static const char mode = [] {
         const char* value = std::getenv("EDEN_NX2_SPLIT");
@@ -126,9 +118,8 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     }
     system = &system_;
     check_owner = std::getenv("EDEN_NX2_SPLIT_CHECK") != nullptr;
-    acquire_skip = AcquireSkipWanted();
-    const char* perf4 = std::getenv("EDEN_NX2_EGLA66_ACQUIRE_PERF4");
-    acquire_feed = acquire_skip && (perf4 == nullptr || perf4[0] != '1');
+    acquire_skip = Nx2Egla66::acquire;
+    acquire_feed = acquire_skip && !Nx2Egla66::acquire_perf4;
     if (acquire_skip) {
         LOG_INFO(HW_GPU, "EGLA66 acquire: on, {}",
                  acquire_feed ? "the back is fed and settled" : "as perf-4 (the back is not fed)");

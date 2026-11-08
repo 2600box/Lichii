@@ -386,40 +386,30 @@ struct BasicFixture {
 
 using Fixture = BasicFixture<Runtime, Cache>;
 
-void SetEnv(const char* name, const char* value) {
-#ifdef _WIN32
-    _putenv_s(name, value ? value : "");
-#else
-    if (value) {
-        setenv(name, value, 1);
-    } else {
-        unsetenv(name);
-    }
-#endif
-}
-
-struct EnvGate {
-    explicit EnvGate(const char* name_) : name{name_} {
-        if (name != nullptr) {
-            SetEnv(name, "1");
+/// Turns one Nx2Egla66 switch on for its lifetime (none if null).
+struct SwitchGate {
+    explicit SwitchGate(bool* flag_) : flag{flag_}, previous{flag_ != nullptr && *flag_} {
+        if (flag != nullptr) {
+            *flag = true;
         }
     }
-    ~EnvGate() {
-        if (name != nullptr) {
-            SetEnv(name, nullptr);
+    ~SwitchGate() {
+        if (flag != nullptr) {
+            *flag = previous;
         }
     }
-    const char* name;
+    bool* flag;
+    bool previous;
 };
 
 /// A buffer cache built with the switch `gate` set (none if null), drawing with one 0x100-byte
 /// uniform buffer at stage 0 slot 0, device 0x10800 (GPU 0x100800).
-struct KeepFixture : EnvGate, BasicFixture<KeepRuntime, KeepCache> {
+struct KeepFixture : SwitchGate, BasicFixture<KeepRuntime, KeepCache> {
     static constexpr DAddr Ubo = 0x10800;
     static constexpr GPUVAddr UboGpu = 0x100800;
     static constexpr u32 UboSize = 0x100;
 
-    explicit KeepFixture(const char* gate) : EnvGate{gate} {
+    explicit KeepFixture(bool* gate) : SwitchGate{gate} {
         state.memory_manager = &*memory;
         state.payload.emplace(system, *memory, state);
         channel.emplace(state);
@@ -889,7 +879,7 @@ TEST_CASE("Uniform buffer slots resolve to the buffer that holds them with the E
 
 TEST_CASE("EGLA66 ubo-keep binds unwritten uniform buffers of delta draws without reading them",
           "[buffer_ports]") {
-    KeepFixture f{"EDEN_NX2_EGLA66_UBO_KEEP"};
+    KeepFixture f{&VideoCommon::Nx2Egla66::ubo_keep};
     using Delta = VideoCommon::Nx2FastDraw::Delta;
     const Delta unchanged{};
     std::memset(f.UboBytes(), 1, KeepFixture::UboSize);
@@ -931,7 +921,7 @@ TEST_CASE("EGLA66 ubo-keep binds unwritten uniform buffers of delta draws withou
 }
 
 TEST_CASE("EGLA66 ubo-keep never keeps across command buffers or full draws", "[buffer_ports]") {
-    KeepFixture f{"EDEN_NX2_EGLA66_UBO_KEEP"};
+    KeepFixture f{&VideoCommon::Nx2Egla66::ubo_keep};
     const VideoCommon::Nx2FastDraw::Delta unchanged{};
     f.Draw(nullptr);
     ++f.runtime.tick;
@@ -946,7 +936,7 @@ TEST_CASE("EGLA66 ubo-keep never keeps across command buffers or full draws", "[
 }
 
 TEST_CASE("EGLA66 ubo-keep-full keeps on full draws only", "[buffer_ports]") {
-    KeepFixture f{"EDEN_NX2_EGLA66_UBO_KEEP_FULL"};
+    KeepFixture f{&VideoCommon::Nx2Egla66::ubo_keep_full};
     const VideoCommon::Nx2FastDraw::Delta unchanged{};
     REQUIRE(VideoCommon::Nx2FastDraw::g_track_uniforms.load());
     f.Draw(nullptr, true);
@@ -959,7 +949,7 @@ TEST_CASE("EGLA66 ubo-keep-full keeps on full draws only", "[buffer_ports]") {
 
 TEST_CASE("EGLA66 ubo-keep verify counts guest writes the delta did not report",
           "[buffer_ports]") {
-    KeepFixture f{"EDEN_NX2_EGLA66_UBO_KEEP_VERIFY"};
+    KeepFixture f{&VideoCommon::Nx2Egla66::ubo_keep_verify};
     const VideoCommon::Nx2FastDraw::Delta unchanged{};
     f.Draw(nullptr);
     f.Draw(&unchanged);
