@@ -387,7 +387,12 @@ namespace {
 
 constexpr u32 Absent = 0xffffffffu;
 
-enum SnapshotType : u8 { Base = 0, Update = 1, AddOn = 2 };
+// A standalone update (as added from an update folder) depends on no base snapshot.
+enum SnapshotType : u8 { Base = 0, Update = 1, AddOn = 2, StandaloneUpdate = 3 };
+
+bool IsUpdate(u8 type) {
+    return type == Update || type == StandaloneUpdate;
+}
 
 // The Catalog language tag for the configured system language.
 std::string_view PreferredLanguageTag() {
@@ -508,7 +513,7 @@ struct AppLoader_NX::Impl {
             if (s.program_index != pi || s.type == AddOn) {
                 continue;
             }
-            if (s.type == Update && UpdateDisabled(id, s.numeric_version)) {
+            if (IsUpdate(s.type) && UpdateDisabled(id, s.numeric_version)) {
                 continue;
             }
             if (found == Absent || s.numeric_version > snapshots[found].numeric_version ||
@@ -541,6 +546,17 @@ struct AppLoader_NX::Impl {
         return result;
     }
 
+    // The display version of a snapshot. An update added from a bare folder records none:
+    // its version number is shown instead.
+    std::string DisplayVersion(u32 si) const {
+        std::string version{Archive().snapshot_display_version(si)};
+        const auto& s = Archive().snapshots()[si];
+        if (version.empty() && IsUpdate(s.type)) {
+            version = fmt::format("v{}", s.numeric_version);
+        }
+        return version;
+    }
+
     void LoadNacp(u32 si) {
         for (const u32 index :
              {Archive().snapshots()[si].nacp_index, Archive().applications()[app].nacp_index}) {
@@ -561,7 +577,7 @@ struct AppLoader_NX::Impl {
         CopyText(raw.language_entries.language_entries[0].application_name, Archive().title(app));
         CopyText(raw.language_entries.language_entries[0].developer_name,
                  Archive().publisher(app));
-        CopyText(raw.version_string, Archive().snapshot_display_version(si));
+        CopyText(raw.version_string, DisplayVersion(si));
         raw.save_data_owner_id = Archive().applications()[app].id;
         nacp->language_entries.assign(raw.language_entries.language_entries.begin(),
                                       raw.language_entries.language_entries.end());
@@ -949,7 +965,7 @@ ResultStatus AppLoader_NX::ReadDisplayVersion(std::string& version) {
     if (impl->status != ResultStatus::Success) {
         return impl->status;
     }
-    version = impl->Archive().snapshot_display_version(impl->selected);
+    version = impl->DisplayVersion(impl->selected);
     return version.empty() ? AppLoader::ReadDisplayVersion(version) : ResultStatus::Success;
 }
 

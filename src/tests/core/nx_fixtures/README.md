@@ -49,6 +49,18 @@ fn main() {
 }
 ```
 
+## `standalone_update.nx`
+
+SHA-256 `3093e8789a3e208f1725e033fc5b4d42784d2de0acd15ccfbd4b8f68e86741ba`. `lichii_synthetic.nx` with a
+standalone update (snapshot type 3, version 131072, no display version) added from a bare update
+folder. The folder is the synthetic packer's `update(0x0100123456780000, 2, 0)` ExeFS and RomFS,
+written out as `exefs/` and `romfs/` by a small Rust program, and added with nxconvert from the
+nxformat `V1.0.0` release (`c70daf6f`):
+
+```sh
+nxconvert add-tree standalone_update.nx update2 --platform switch2 --update-version 131072 --no-trail
+```
+
 ## Upstream conformance fixtures
 
 Copied unchanged from nxformat `V1.0.0` `tests/fixtures/` (MIT, fab918); each file matches the

@@ -11,6 +11,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "common/settings.h"
 #include "core/core.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/romfs.h"
@@ -236,4 +237,21 @@ TEST_CASE("NX: the program index selects a secondary program", "[core][nx]") {
         REQUIRE(loader.ReadProgramId(program_id) == Loader::ResultStatus::Success);
         CHECK(program_id == expected);
     }
+}
+
+TEST_CASE("NX: a standalone update shows its version and can be disabled", "[core][nx]") {
+    ScopedSystemTestContext environment;
+    Core::System system;
+    const auto display_version = [&] {
+        Loader::AppLoader_NX loader{system, OpenFixture("standalone_update.nx")};
+        std::string version;
+        REQUIRE(loader.ReadDisplayVersion(version) == Loader::ResultStatus::Success);
+        return version;
+    };
+    // Added from a bare update folder: no display version, no base dependency.
+    CHECK(display_version() == "v131072");
+    Settings::values.disabled_addons[ApplicationId] = {"Update@131072"};
+    const auto without = display_version();
+    Settings::values.disabled_addons.erase(ApplicationId);
+    CHECK(without != "v131072");
 }
