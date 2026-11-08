@@ -40,6 +40,7 @@
 #include "video_core/pipeline_cache_files.h"
 #include "video_core/renderer_vulkan/async_draw_policy.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
+#include "video_core/renderer_vulkan/mesh_fallback_limits.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/pipeline_shader_emission.h"
@@ -1747,10 +1748,14 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                     Shader::NumDescriptors(programs[index].info.storage_buffers_descriptors);
             }
         }
-        if (storage_buffers > set_limit) {
+        // The fallback binds its output buffer (and, for task draws, payload,
+        // offsets and indirect arguments) into the same descriptor set.
+        const size_t auxiliary_buffers{
+            mesh_emulation ? (mesh_emulation->has_task ? 4U : 1U) : 0U};
+        if (!FitsStorageBufferSetLimit(storage_buffers, auxiliary_buffers, set_limit)) {
             throw Shader::NotImplementedException(
-                "Binding {} storage buffers to a pipeline whose descriptor set binds {}",
-                storage_buffers, set_limit);
+                "Binding {} storage buffers ({} for mesh fallback) to a descriptor set limited to {}",
+                storage_buffers + auxiliary_buffers, auxiliary_buffers, set_limit);
         }
     }
     std::array<const Shader::Info*, Maxwell::MaxShaderStage> infos{};
