@@ -96,7 +96,7 @@ std::optional<std::map<std::uint32_t, std::uint16_t>> ReadCmap(View cmap) {
             continue;
         }
         const std::size_t length = Be16(cmap, offset + 2);
-        if (offset + length > cmap.size()) {
+        if (length < 14 || offset + length > cmap.size()) {
             return std::nullopt;
         }
         const View sub = cmap.subspan(offset, length);
@@ -309,8 +309,9 @@ Bytes MergeGlyphs(View base_data, View donor_data, std::span<const std::uint32_t
     const View head = base->Table("head");
     const View maxp = base->Table("maxp");
     const View hhea = base->Table("hhea");
-    if (head.size() < 54 || maxp.size() < 32 || hhea.size() < 36 ||
-        Be16(head, 18) != Be16(donor->Table("head"), 18)) {
+    const View donor_head = donor->Table("head");
+    if (head.size() < 54 || donor_head.size() < 54 || maxp.size() < 32 || hhea.size() < 36 ||
+        Be16(head, 18) != Be16(donor_head, 18)) {
         return {};
     }
 

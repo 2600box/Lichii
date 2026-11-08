@@ -48,6 +48,23 @@ std::map<std::string, std::span<const std::uint8_t>> Tables(std::span<const std:
     return tables;
 }
 
+/// Where the table directory of a font gives the length of a table.
+std::size_t TableLengthAt(std::span<const std::uint8_t> font, const char* tag) {
+    const std::size_t count = Be16(font, 4);
+    for (std::size_t i = 0; i < count; ++i) {
+        const std::size_t entry = 12 + i * 16;
+        if (std::equal(tag, tag + 4, font.begin() + entry)) {
+            return entry + 12;
+        }
+    }
+    return 0;
+}
+
+void Set16(std::vector<std::uint8_t>& data, std::size_t offset, std::uint16_t value) {
+    data[offset] = static_cast<std::uint8_t>(value >> 8);
+    data[offset + 1] = static_cast<std::uint8_t>(value);
+}
+
 std::uint16_t NumGlyphs(std::span<const std::uint8_t> font) {
     return Be16(Tables(font).at("maxp"), 4);
 }
@@ -114,4 +131,29 @@ TEST_CASE("MergeGlyphs refuses what it cannot merge", "[core][font]") {
     CHECK(Service::NS::MergeGlyphs(garbage, FONT_STANDARD, BUTTON_GLYPHS).empty());
     CHECK(Service::NS::MergeGlyphs(FONT_KOREAN, garbage, BUTTON_GLYPHS).empty());
     CHECK(Service::NS::MergeGlyphs({}, {}, BUTTON_GLYPHS).empty());
+}
+
+TEST_CASE("MergeGlyphs refuses truncated head and cmap tables", "[core][font]") {
+    // A donor head table too short to hold its units per em.
+    std::vector<std::uint8_t> short_head(FONT_STANDARD.begin(), FONT_STANDARD.end());
+    const std::size_t head_length = TableLengthAt(short_head, "head");
+    REQUIRE(head_length != 0);
+    Set16(short_head, head_length, 0);
+    Set16(short_head, head_length + 2, 16);
+    CHECK(Service::NS::MergeGlyphs(FONT_KOREAN, short_head, BUTTON_GLYPHS).empty());
+
+    // A format 4 character map whose length leaves no room for its segment count.
+    std::vector<std::uint8_t> short_cmap(FONT_STANDARD.begin(), FONT_STANDARD.end());
+    const auto cmap = Tables(short_cmap).at("cmap");
+    const std::size_t cmap_offset = static_cast<std::size_t>(cmap.data() - short_cmap.data());
+    bool truncated = false;
+    for (std::size_t i = 0; i < Be16(cmap, 2); ++i) {
+        const std::size_t sub = Be32(cmap, 4 + i * 8 + 4);
+        if (Be16(cmap, sub) == 4) {
+            Set16(short_cmap, cmap_offset + sub + 2, 6);
+            truncated = true;
+        }
+    }
+    REQUIRE(truncated);
+    CHECK(Service::NS::MergeGlyphs(FONT_KOREAN, short_cmap, BUTTON_GLYPHS).empty());
 }
