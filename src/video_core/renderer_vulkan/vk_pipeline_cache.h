@@ -38,6 +38,7 @@
 #include "video_core/renderer_vulkan/vk_pipeline_cache_prebuild.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/shader_cache.h"
+#include "video_core/shader_cache_v2/cache.h"
 
 namespace Core {
 class System;
@@ -250,6 +251,12 @@ private:
     std::filesystem::path used_pipelines_filename;
     std::chrono::steady_clock::time_point used_pipelines_saved{};
     void SaveUsedPipelines();
+
+    /// The v2 cache (ShaderCacheV2::Enabled) pipeline_cache_filename names, and this session's
+    /// Used record
+    std::unique_ptr<VideoCommon::ShaderCacheV2::Cache> cache_v2;
+    u64 used_session_key{};
+    u64 used_session_time{};
 
     std::filesystem::path vulkan_pipeline_cache_filename;
     vk::PipelineCache vulkan_pipeline_cache;
