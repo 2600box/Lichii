@@ -51,6 +51,7 @@ TEST_CASE("Page filter answers conservatively outside its range", "[video_core][
     CHECK(filter.Any(Limit, Page));
     CHECK_FALSE(filter.Any(0, Page));
 
-    filter.Mark(Limit - Page, 2 * Page);
-    CHECK(filter.Any(0, Page));
+    filter.Mark(Limit, Page);
+    CHECK(filter.Any(Limit, Page));
+    CHECK_FALSE(filter.Any(0, Page));
 }
