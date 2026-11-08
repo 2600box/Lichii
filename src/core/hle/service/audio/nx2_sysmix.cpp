@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -229,7 +230,12 @@ Result SysmixOutput::Open(u32 sample_type, u32 channels, u32 rate, u32 frames, u
     p.host = p.sink.AcquireSinkStream(p.system, channels, "sysmix-" + std::to_string(p.id),
                                       p.input_stream ? AudioCore::Sink::StreamType::In
                                                      : AudioCore::Sink::StreamType::Sysmix);
-    if (p.input_stream && (!p.host || !p.host->IsReady())) {
+    const bool force_fail = p.input_stream && std::getenv("EDEN_NX2_FORCE_MIC_FAIL") != nullptr;
+    if (force_fail) {
+        LOG_INFO(Service_Audio, "sysmix stream {}: EDEN_NX2_FORCE_MIC_FAIL rejects the host stream",
+                 p.id);
+    }
+    if (p.input_stream && (force_fail || !p.host || !p.host->IsReady())) {
         p.UseSilentInput(channels);
     }
     if (!p.host || !p.host->IsReady()) {

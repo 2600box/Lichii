@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: Copyright 2022 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+
 #include "audio_core/audio_core.h"
 #include "audio_core/audio_manager.h"
 #include "audio_core/device/audio_buffer.h"
@@ -54,7 +56,8 @@ Result DeviceSession::Initialize(std::string_view name_, SampleFormat sample_for
         sink = &system.AudioCore().GetOutputSink();
     }
     stream = sink->AcquireSinkStream(system, channel_count, name, type);
-    if (type == Sink::StreamType::In && !stream->IsReady()) {
+    if (type == Sink::StreamType::In &&
+        (std::getenv("EDEN_NX2_FORCE_MIC_FAIL") != nullptr || !stream->IsReady())) {
         UseSilentInput();
     }
     initialized = true;
