@@ -78,7 +78,7 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         while (!stop_token.stop_requested()) {
             Profile::Report();
             split.MaybeStart(system);
-            if (split.AcquireSkip()) {
+            if (VideoCommon::g_acquire_counting) {
                 split.ReportAcquire();
             }
             if (scheduler.HasPendingChannels()) {

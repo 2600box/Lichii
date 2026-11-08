@@ -79,7 +79,7 @@ public:
         u32 operation;
         std::chrono::steady_clock::time_point since;
         std::chrono::steady_clock::time_point last_fences; ///< When it last released fences
-        /// EDEN_NX2_EGLA66_ACQUIRE: when an unmet poll last drained (CanResumeAcquire)
+        /// When an unmet poll last drained (CanResumeAcquire)
         std::chrono::steady_clock::time_point last_drain;
         bool reported; ///< The 2 s warning was logged
 

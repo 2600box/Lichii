@@ -59,16 +59,11 @@ DmaPusher::DmaPusher(Core::System& system_, MemoryManager& memory_manager_, Cont
 DmaPusher::~DmaPusher() = default;
 
 bool DmaPusher::CanResumeAcquire() {
-    const bool count = VideoCommon::GpuSplit::Get().AcquireSkip();
     if (pending_list_tick) {
-        if (count) {
-            VideoCommon::Count(VideoCommon::g_acquire_stats.list_polls);
-        }
+        VideoCommon::Count(VideoCommon::g_acquire_stats.list_polls);
         return rasterizer->IsGpuTickDone(*pending_list_tick);
     }
-    if (count) {
-        VideoCommon::Count(VideoCommon::g_acquire_stats.acquire_polls);
-    }
+    VideoCommon::Count(VideoCommon::g_acquire_stats.acquire_polls);
     return puller.CanResumeAcquire(*this);
 }
 
@@ -602,9 +597,6 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
 }
 
 void DmaPusher::NoteDmaSemaphore(u32 method, u32 argument) {
-    if (!VideoCommon::GpuSplit::Get().AcquireSkip()) {
-        return;
-    }
     using Engines::MaxwellDMA;
     if (method >= MaxwellDMA::SemaphoreMethod && method < MaxwellDMA::SemaphoreMethod + 3) {
         dma_semaphore[method - MaxwellDMA::SemaphoreMethod] = argument;

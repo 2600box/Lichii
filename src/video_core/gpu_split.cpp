@@ -90,14 +90,6 @@ void GpuSplit::CheckOwner(const char* where) {
 
 GpuSplit GpuSplit::instance;
 
-bool GpuSplit::AcquireSkipWanted() {
-    static const bool wanted = [] {
-        const char* value = std::getenv("EDEN_NX2_EGLA66_ACQUIRE");
-        return value != nullptr && value[0] == '1';
-    }();
-    return wanted;
-}
-
 void GpuSplit::MaybeStart(Core::System& system_) {
     static const char mode = [] {
         const char* value = std::getenv("EDEN_NX2_SPLIT");
@@ -125,13 +117,9 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     }
     system = &system_;
     check_owner = std::getenv("EDEN_NX2_SPLIT_CHECK") != nullptr;
-    acquire_skip = AcquireSkipWanted();
-    const char* perf4 = std::getenv("EDEN_NX2_EGLA66_ACQUIRE_PERF4");
-    acquire_feed = acquire_skip && (perf4 == nullptr || perf4[0] != '1');
-    if (acquire_skip) {
-        LOG_INFO(HW_GPU, "EGLA66 acquire: on, {}",
-                 acquire_feed ? "the back is fed and settled" : "as perf-4 (the back is not fed)");
-    }
+    const char* const verify = std::getenv("EDEN_NX2_ACQUIRE_VERIFY");
+    g_acquire_verify = verify != nullptr && verify[0] == '1';
+    g_acquire_counting = g_acquire_verify || Nx2Profile::Enabled();
     ring = std::make_unique<u64[]>(RingWords);
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
     active = true;
@@ -222,7 +210,7 @@ void GpuSplit::Publish() {
 
 void GpuSplit::Drain(DrainSite site) {
     consumed_cache = consumed.load(std::memory_order_acquire);
-    if (consumed_cache == write_position && (!acquire_skip || BackQuiet())) {
+    if (consumed_cache == write_position && BackQuiet()) {
         return;
     }
     Publish();
@@ -234,7 +222,7 @@ void GpuSplit::Drain(DrainSite site) {
     for (u32 spins = 0;; ++spins) {
         consumed_cache = consumed.load(std::memory_order_acquire);
         if (consumed_cache == write_position) {
-            if (!acquire_skip || BackQuiet()) {
+            if (BackQuiet()) {
                 publish_every = 8;
                 Nx2Profile::AddDrain(site, start);
                 return;
@@ -487,19 +475,16 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
 #ifdef _WIN32
     g_back_thread_id.store(GetCurrentThreadId(), std::memory_order_relaxed);
 #endif
-    const bool skip = acquire_skip;
     u64 read_position = 0;
     while (!stop_token.stop_requested()) {
         Nx2Profile::Report("GPU back thread");
         u64 available = published.load(std::memory_order_acquire);
         if (available == read_position) {
             Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
-            std::chrono::steady_clock::time_point spin_start{};
-            if (skip) {
-                // The front publishes what it holds after a few more words from now on.
-                back_idle_at.store(read_position, std::memory_order_relaxed);
-                spin_start = std::chrono::steady_clock::now();
-            }
+            // The front publishes what it holds after a few more words from now on.
+            back_idle_at.store(read_position, std::memory_order_relaxed);
+            const auto spin_start = g_acquire_counting ? std::chrono::steady_clock::now()
+                                                       : std::chrono::steady_clock::time_point{};
             // The front usually sends more within microseconds: spin briefly before sleeping.
             for (u32 spins = 0; spins < 8192 && available == read_position &&
                                 !hook_requested.load(std::memory_order_relaxed);
@@ -507,18 +492,18 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 Pause();
                 available = published.load(std::memory_order_acquire);
             }
-            if (skip) {
+            if (g_acquire_counting) {
                 Count(g_acquire_stats.back_waits);
                 Count(g_acquire_stats.back_spin_ns,
                       static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                            std::chrono::steady_clock::now() - spin_start)
                                            .count()));
             }
-            if (available == read_position && (skip || idle_hook != nullptr)) {
+            if (available == read_position) {
                 hook_requested.store(false, std::memory_order_seq_cst);
                 // The front may already see everything consumed: Drain() waits for back_quiet
                 // too, so the deferred submit can't overlap whatever the front does next.
-                if (!skip || !back_quiet.load(std::memory_order_relaxed)) {
+                if (!back_quiet.load(std::memory_order_relaxed)) {
                     if (idle_hook != nullptr) {
                         idle_hook(idle_argument);
                     }
@@ -535,9 +520,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 // A request made after the hook ran (RequestIdleHook) runs it before sleeping.
                 if (available == read_position && !stop_token.stop_requested() &&
                     !hook_requested.load(std::memory_order_seq_cst)) {
-                    if (skip) {
-                        Count(g_acquire_stats.back_sleeps);
-                    }
+                    Count(g_acquire_stats.back_sleeps);
                     wake.wait(seen, std::memory_order_seq_cst);
                 }
                 back_waiting.store(false, std::memory_order_relaxed);
@@ -545,10 +528,8 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             }
         }
         u64 last_store = read_position;
-        if (skip) {
-            // Before any entry runs, so a front that sees these entries consumed also sees this.
-            back_quiet.store(false, std::memory_order_seq_cst);
-        }
+        // Before any entry runs, so a front that sees these entries consumed also sees this.
+        back_quiet.store(false, std::memory_order_seq_cst);
         while (read_position != available) {
             const size_t index = read_position & RingMask;
             const size_t size =
@@ -596,6 +577,10 @@ void GpuSplit::ReportAcquire() {
     const u64 by_queued = take(stats.by_queued);
     const u64 latched = take(stats.latched);
     const u64 drained = take(stats.drained);
+    const u64 drain_operation = take(stats.drain_operation);
+    const u64 drain_settings = take(stats.drain_settings);
+    const u64 drain_word = take(stats.drain_word);
+    const u64 drain_queued = take(stats.drain_queued);
     const u64 valve_drains = take(stats.valve_drains);
     const u64 polls = take(stats.polls);
     const u64 acquire_polls = take(stats.acquire_polls);
@@ -606,18 +591,21 @@ void GpuSplit::ReportAcquire() {
     const u64 back_sleeps = take(stats.back_sleeps);
     const double spin_ms = static_cast<double>(take(stats.back_spin_ns)) / 1e6;
     LOG_INFO(HW_GPU,
-             "EGLA66 acquire: {} passed without a drain ({} by a queued release), {} resumed by "
-             "a latch, {} drained ({} by the 1 ms valve), {} polls waited without a drain in 10 s; "
-             "polls: {} of acquires, {} of GPU-written list copies; back: {} waits for work, {} "
-             "slept, {:.1f} ms spinning; {} early publishes, {} idle hooks asked by polls",
-             passed, by_queued, latched, drained, valve_drains, polls, acquire_polls, list_polls,
-             back_waits, back_sleeps, spin_ms, early_publishes, settles);
+             "Acquires: {} passed without a drain ({} by a queued release), {} resumed by a "
+             "latch, {} drained ({} by the 1 ms valve; {} equal or mask, {} by the settings, {} "
+             "unmapped or GPU-written word, {} queued release unknown or short), {} polls waited "
+             "without a drain in 10 s; polls: {} of acquires, {} of GPU-written list copies; "
+             "back: {} waits for work, {} slept, {:.1f} ms spinning; {} early publishes, {} idle "
+             "hooks asked by polls",
+             passed, by_queued, latched, drained, valve_drains, drain_operation, drain_settings,
+             drain_word, drain_queued, polls, acquire_polls, list_polls, back_waits, back_sleeps,
+             spin_ms, early_publishes, settles);
     const u64 mismatches = take(stats.mismatches);
     const u64 unlanded = take(stats.unlanded);
     const u64 late = take(stats.late);
     if (mismatches != 0 || unlanded != 0 || late != 0) {
         LOG_WARNING(HW_GPU,
-                    "EGLA66 acquire verify: {} passed but not met after a drain, {} met by a "
+                    "Acquire verify: {} passed but not met after a drain, {} met by a "
                     "queued release not in memory after it, {} polls waited though a drain meets "
                     "them, in 10 s",
                     mismatches, unlanded, late);

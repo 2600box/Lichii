@@ -44,13 +44,17 @@ enum class DrainSite : u32 {
     Count,
 };
 
-/// EGLA-66 acquire test gate (EDEN_NX2_EGLA66_ACQUIRE), counted while it is on and logged every
-/// 10 s (GpuSplit::ReportAcquire). Polls are the checks of suspended acquires.
+/// How semaphore acquires and the polls of suspended ones were decided, counted with
+/// EDEN_NX2_GPU_PROFILE or EDEN_NX2_ACQUIRE_VERIFY and logged every 10 s (GpuSplit::ReportAcquire).
 struct AcquireStats {
     std::atomic<u64> passed{};    ///< Acquires and polls met without a drain
     std::atomic<u64> by_queued{}; ///< Of passed: met by a release the back had not run yet
     std::atomic<u64> latched{};   ///< Polls resumed by a release the back ran (no drain)
     std::atomic<u64> drained{};   ///< Acquires and polls that drained the split
+    std::atomic<u64> drain_operation{}; ///< Of drained: an equal or mask acquire
+    std::atomic<u64> drain_settings{};  ///< ...the split or the accuracy settings ask for it
+    std::atomic<u64> drain_word{};      ///< ...the word is unmapped or on a GPU-written page
+    std::atomic<u64> drain_queued{};    ///< ...a queued release to it is unknown or doesn't meet it
     std::atomic<u64> valve_drains{}; ///< Of drained: polls of an unmet acquire, once per 1 ms
     std::atomic<u64> polls{};     ///< Polls that keep waiting without a drain
     std::atomic<u64> acquire_polls{}; ///< Polls of suspended channels waiting on an acquire
@@ -60,14 +64,21 @@ struct AcquireStats {
     std::atomic<u64> back_waits{};      ///< The back ran out of work
     std::atomic<u64> back_sleeps{};     ///< Of those: it went to sleep
     std::atomic<u64> back_spin_ns{};    ///< How long it spun for more work before that
-    std::atomic<u64> mismatches{}; ///< _VERIFY: passed, yet the word after a drain doesn't meet it
-    std::atomic<u64> unlanded{};   ///< _VERIFY: met by a queued release not in memory after a drain
-    std::atomic<u64> late{};       ///< _VERIFY: a poll kept waiting, yet a drain meets it
+    std::atomic<u64> mismatches{}; ///< VERIFY: passed, yet the word after a drain doesn't meet it
+    std::atomic<u64> unlanded{};   ///< VERIFY: met by a queued release not in memory after a drain
+    std::atomic<u64> late{};       ///< VERIFY: a poll kept waiting, yet a drain meets it
 };
 inline AcquireStats g_acquire_stats;
+/// Whether g_acquire_stats counts (EDEN_NX2_GPU_PROFILE or EDEN_NX2_ACQUIRE_VERIFY), as of the
+/// split's last start.
+inline bool g_acquire_counting{};
+/// EDEN_NX2_ACQUIRE_VERIFY=1: acquires decided without a drain drain anyway and compare.
+inline bool g_acquire_verify{};
 
 inline void Count(std::atomic<u64>& counter, u64 amount = 1) {
-    counter.fetch_add(amount, std::memory_order_relaxed);
+    if (g_acquire_counting) {
+        counter.fetch_add(amount, std::memory_order_relaxed);
+    }
 }
 
 inline constexpr std::array<const char*, static_cast<size_t>(DrainSite::Count)> drain_site_names{
@@ -102,16 +113,6 @@ public:
     /// Whether the front runs the engines' macros (EDEN_NX2_SPLIT=2).
     [[nodiscard]] bool FrontMacros() const {
         return front_macros;
-    }
-
-    /// EGLA-66 test gate, EDEN_NX2_EGLA66_ACQUIRE=1, read once (any thread). Greater-or-equal
-    /// acquires and the polls of suspended ones are checked without draining the split
-    /// (puller.cpp), Drain waits for the back's idle hook (#639) and the front keeps feeding a
-    /// back that ran out of work (Commit, SettleIdleBack).
-    [[nodiscard]] static bool AcquireSkipWanted();
-    /// The gate as of the last start (front and back).
-    [[nodiscard]] bool AcquireSkip() const {
-        return acquire_skip;
     }
 
     /// Whether the calling thread is the back.
@@ -210,18 +211,18 @@ public:
 
     /// Makes what was sent visible to the back.
     void Publish();
-    /// EGLA-66: the front has nothing to send while it polls suspended channels. A back that ran
-    /// everything runs its idle hook (the deferred submit) and sleeps now instead of spinning for
-    /// more, as it did when every poll drained (Drain asks for the hook), but without the wait.
+    /// The front has nothing to send while it polls suspended channels. A back that ran everything
+    /// runs its idle hook (the deferred submit) and sleeps now instead of spinning for more, as it
+    /// did when every poll drained (Drain asks for the hook), but without the wait.
     void SettleIdleBack() {
-        if (!acquire_feed || hook_requested.load(std::memory_order_relaxed) || BackQuiet() ||
+        if (hook_requested.load(std::memory_order_relaxed) || BackQuiet() ||
             consumed.load(std::memory_order_acquire) != write_position) {
             return;
         }
         Count(g_acquire_stats.settles);
         RequestIdleHook();
     }
-    /// EGLA-66: logs g_acquire_stats every 10 s (front, while the gate is on).
+    /// Logs g_acquire_stats every 10 s (front, while they count).
     void ReportAcquire();
     /// Waits until the back executed everything sent so far.
     void Drain(DrainSite site = DrainSite::Other);
@@ -272,7 +273,7 @@ private:
     static constexpr size_t RingMask = RingWords - 1;
     static constexpr u32 MaxMultiWords = 8192;
     static constexpr size_t PublishEvery = 256;
-    /// EGLA-66: words a back waiting for work gets without a publish_every (Commit).
+    /// Words a back waiting for work gets without a publish_every (Commit).
     static constexpr size_t PublishAfterWait = 8;
 
     template <typename Func>
@@ -299,7 +300,7 @@ private:
         }
         // The back waits for work at the last position published (back_idle_at): it gets these
         // words after a few, not after publish_every. A drain used to restart it like that.
-        if (acquire_feed && unpublished >= PublishAfterWait &&
+        if (unpublished >= PublishAfterWait &&
             back_idle_at.load(std::memory_order_relaxed) == published_local) {
             Count(g_acquire_stats.early_publishes);
             Publish();
@@ -332,10 +333,6 @@ private:
     bool active{};
     u32 starts{};
     bool front_macros{};
-    bool acquire_skip{};
-    /// acquire_skip without EDEN_NX2_EGLA66_ACQUIRE_PERF4=1 (perf-4's version, for A/Bs): the
-    /// back is fed and settled (Commit, SettleIdleBack).
-    bool acquire_feed{};
     std::unique_ptr<u64[]> ring;
 
     // Front side.
@@ -386,7 +383,7 @@ private:
     /// The front sleeps in Backoff (#161: instead of yielding).
     alignas(128) std::atomic<bool> front_waiting{};
     std::atomic<u32> front_wake{};
-    /// EGLA-66: the back's position when it last ran out of work, stored before it waits: while
+    /// The back's position when it last ran out of work, stored before it waits: while
     /// it equals published_local, the back waits for the words the front holds (Commit). Port of
     /// the publish part of 62db242b34 (jpkto, PR #805).
     alignas(128) std::atomic<u64> back_idle_at{~u64{0}};

@@ -50,11 +50,6 @@ struct GpuSplitTestAccess {
         split.back_thread = std::jthread([&split](std::stop_token stop) { split.BackLoop(stop); });
     }
 
-    static void SetAcquireSkip(GpuSplit& split, bool feed) {
-        split.acquire_skip = true;
-        split.acquire_feed = feed;
-    }
-
     static u64 Published(const GpuSplit& split) {
         return split.published.load(std::memory_order_acquire);
     }
@@ -828,30 +823,27 @@ TEST_CASE("Split publishes to a back that waits for work after a few words",
     using Access = VideoCommon::GpuSplitTestAccess;
     Fixture f;
     f.system.Initialize();
-    for (const bool feed : {false, true}) {
-        VideoCommon::GpuSplit split;
-        Access::SetAcquireSkip(split, feed);
-        Access::Start(split, f.system);
-        SCOPE_EXIT {
-            split.Stop();
-        };
-        // Publishing raises the interval to 256 words: the words below stay with the front unless
-        // it feeds the waiting back.
-        split.Defer([] {});
-        split.Publish();
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
-        while (Access::BackIdleAt(split) != Access::End(split)) {
-            REQUIRE(std::chrono::steady_clock::now() < deadline);
-            std::this_thread::yield();
-        }
-        const u64 published = Access::Published(split);
-        // An empty call takes 3 words.
-        split.Defer([] {});
-        split.Defer([] {});
-        REQUIRE(Access::Published(split) == published);
-        split.Defer([] {});
-        REQUIRE(Access::Published(split) == (feed ? Access::End(split) : published));
+    VideoCommon::GpuSplit split;
+    Access::Start(split, f.system);
+    SCOPE_EXIT {
+        split.Stop();
+    };
+    // Publishing raises the interval to 256 words: the words below stay with the front unless it
+    // feeds the waiting back.
+    split.Defer([] {});
+    split.Publish();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
+    while (Access::BackIdleAt(split) != Access::End(split)) {
+        REQUIRE(std::chrono::steady_clock::now() < deadline);
+        std::this_thread::yield();
     }
+    const u64 published = Access::Published(split);
+    // An empty call takes 3 words.
+    split.Defer([] {});
+    split.Defer([] {});
+    REQUIRE(Access::Published(split) == published);
+    split.Defer([] {});
+    REQUIRE(Access::Published(split) == Access::End(split));
 }
 
 TEST_CASE("Split asks a back that ran everything for its idle hook while the front polls",
@@ -860,8 +852,11 @@ TEST_CASE("Split asks a back that ran everything for its idle hook while the fro
     Fixture f;
     VideoCommon::GpuSplit split;
     Access::Initialize(split, f.system);
+    const bool counting = VideoCommon::g_acquire_counting;
+    VideoCommon::g_acquire_counting = true;
     SCOPE_EXIT {
         Access::SetBack(split, false, true, 0);
+        VideoCommon::g_acquire_counting = counting;
     };
     const auto settled = [&split] {
         const u64 before = VideoCommon::g_acquire_stats.settles.load();
@@ -870,13 +865,7 @@ TEST_CASE("Split asks a back that ran everything for its idle hook while the fro
         REQUIRE(asked == (VideoCommon::g_acquire_stats.settles.load() == before + 1));
         return asked;
     };
-    // The gate off: nothing.
     Access::SetBack(split, true, false, Access::End(split));
-    REQUIRE_FALSE(settled());
-    // As perf-4: nothing.
-    Access::SetAcquireSkip(split, false);
-    REQUIRE_FALSE(settled());
-    Access::SetAcquireSkip(split, true);
     // Ran everything, hook not run yet: asked once.
     REQUIRE(settled());
     REQUIRE(Access::HookRequested(split));
@@ -892,7 +881,7 @@ TEST_CASE("Split asks a back that ran everything for its idle hook while the fro
     REQUIRE_FALSE(settled());
 }
 
-TEST_CASE("Split drain waits for the back's idle hook with the acquire gate on",
+TEST_CASE("Split drain waits for the back's idle hook",
           "[video_core][gpu_split_dependencies]") {
     using Access = VideoCommon::GpuSplitTestAccess;
     Fixture f;
@@ -907,7 +896,6 @@ TEST_CASE("Split drain waits for the back's idle hook with the acquire gate on",
             hooks.fetch_add(1);
         },
         nullptr);
-    Access::SetAcquireSkip(split, true);
     Access::Start(split, f.system);
     SCOPE_EXIT {
         split.Stop();
