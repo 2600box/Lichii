@@ -3339,11 +3339,19 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
             BuildQueue(build_in_parallel, ir_bytes), statistics,
             &shader_notify, info, vk::ShaderModule{}, key.unique_hash, std::move(emit));
     } else {
+        vk::ShaderModule module{EmitComputeModule(device, profile, program, key.unique_hash)};
+        const Shader::Info info{std::move(program.info)};
+        if (!build_in_parallel) {
+            // The driver compiles on this thread. Precache and boot workers would otherwise hold their
+            // IR through the compile, up to hundreds of MiB for one large shader.
+            program = {};
+            pools.block.Free();
+            pools.inst.Free();
+        }
         pipeline = std::make_unique<ComputePipeline>(
             device, scheduler, vulkan_pipeline_cache, pipeline_binaries.get(), hash,
             descriptor_pool, guest_descriptor_queue, descriptor_buffer_ring,
-            BuildQueue(build_in_parallel), statistics, &shader_notify,
-            program.info, EmitComputeModule(device, profile, program, key.unique_hash),
+            BuildQueue(build_in_parallel), statistics, &shader_notify, info, std::move(module),
             key.unique_hash);
     }
     return {.pipeline = std::move(pipeline),
