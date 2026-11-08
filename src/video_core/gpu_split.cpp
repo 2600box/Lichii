@@ -28,6 +28,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_fast_draw.h"
+#include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
 
 namespace VideoCommon {
@@ -359,6 +360,17 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
                     maxwell3d->CallConstBufferWords(*system, methods.data(), arguments.data(),
                                                     count);
                 }
+                return count;
+            }
+            // EGLA-66 state-run (9b06c4fd38): state writes in a row in one loop, as the sink
+            // would process them, instead of a sink push (or CallMethod for macro writes) each.
+            if (Nx2Egla66::state_run && !maxwell3d->execution_mask[method] &&
+                (head & HasSegment) == 0 && method < Maxwell3D::Regs::NUM_REGS &&
+                !Nx2Perf::Verify()) {
+                maxwell3d->ConsumeSink(*system);
+                const size_t count = maxwell3d->CallStateMethodRun(entry, words);
+                Nx2Egla66::Count(Nx2Egla66::g_state_runs);
+                Nx2Egla66::Count(Nx2Egla66::g_state_run_writes, count);
                 return count;
             }
             if ((head & Direct) != 0) {

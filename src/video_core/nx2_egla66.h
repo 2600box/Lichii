@@ -30,6 +30,13 @@ inline bool publish{};
 inline std::atomic<u64> g_idle_publishes{0};
 inline std::atomic<u64> g_wait_publishes{0};
 
+/// The split's back runs consecutive 3D state writes in one loop (9b06c4fd38's
+/// CallStateMethodRun, AManWithAPlan).
+inline bool state_run{};
+
+inline std::atomic<u64> g_state_runs{0};
+inline std::atomic<u64> g_state_run_writes{0};
+
 inline void ReadSwitches() {
     const auto read = [](const char* name) {
         const char* const value = std::getenv(name);
@@ -37,7 +44,9 @@ inline void ReadSwitches() {
     };
     ring_run = read("EDEN_NX2_EGLA66_RING_RUN");
     publish = read("EDEN_NX2_EGLA66_PUBLISH");
-    LOG_INFO(HW_GPU, "EGLA66 gates: ring-run {}, publish {}", ring_run, publish);
+    state_run = read("EDEN_NX2_EGLA66_STATE_RUN");
+    LOG_INFO(HW_GPU, "EGLA66 gates: ring-run {}, publish {}, state-run {}",
+             ring_run, publish, state_run);
 }
 
 /// For counters one thread writes: a plain load and store, not a locked add.
@@ -47,7 +56,7 @@ inline void Count(std::atomic<u64>& counter, u64 amount = 1) {
 
 /// The split's back thread, once per loop: logs what the enabled candidates did in the last 10 s.
 inline void Report() {
-    if (!ring_run && !publish) {
+    if (!ring_run && !publish && !state_run) {
         return;
     }
     static u32 calls{};
@@ -74,6 +83,14 @@ inline void Report() {
         const u64 new_writes = take(g_ring_run_writes, writes);
         LOG_INFO(HW_GPU, "EGLA66 ring-run: {} run entries carrying {} macro writes in 10 s",
                  new_runs, new_writes);
+    }
+    if (state_run) {
+        static u64 runs{};
+        static u64 writes{};
+        const u64 new_runs = take(g_state_runs, runs);
+        const u64 new_writes = take(g_state_run_writes, writes);
+        LOG_INFO(HW_GPU, "EGLA66 state-run: {} runs carrying {} state writes in 10 s", new_runs,
+                 new_writes);
     }
     if (publish) {
         static u64 idle{};

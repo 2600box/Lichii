@@ -345,6 +345,49 @@ TEST_CASE("Maxwell3D constant buffer word runs match single CallMethod writes",
     }
 }
 
+TEST_CASE("Maxwell3D state method runs match single CallMethod writes",
+          "[video_core][maxwell_fast_method]") {
+    Fixture f;
+    std::mt19937 rng{19};
+    constexpr u64 kind_method = 2;
+    constexpr u64 is_last = 1ULL << 4;
+    constexpr u64 has_segment = 1ULL << 5;
+    constexpr u64 direct = 1ULL << 6;
+    for (u32 step = 0; step < 5000; ++step) {
+        CAPTURE(step);
+        if (rng() % 6 == 0) {
+            f.Call(ShadowControl, rng() % 4, true);
+            f.Compare();
+            continue;
+        }
+        const size_t run_len = 1 + rng() % 32;
+        std::vector<u64> ring(run_len + 1);
+        for (size_t i = 0; i < run_len; ++i) {
+            const u32 method = f.state_methods[rng() % f.state_methods.size()];
+            const u32 arg = RandomArgument(rng, method, f.slow);
+            const u64 flags = (rng() % 2 == 0 ? is_last : 0) | (rng() % 2 == 0 ? direct : 0);
+            ring[i] = kind_method | flags | (u64{method} << 8) | (u64{arg} << 32);
+            f.slow.CallMethod(f.system, method, arg, (flags & is_last) != 0);
+        }
+        // Append a stopper entry (executable method, HasSegment, or non-Method kind).
+        switch (rng() % 3) {
+        case 0:
+            ring[run_len] = kind_method | (u64{DrawBegin} << 8);
+            break;
+        case 1:
+            ring[run_len] =
+                kind_method | has_segment | (u64{f.state_methods[0]} << 8) | (u64{1} << 32);
+            break;
+        default:
+            ring[run_len] = 3; // Kind::Multi
+            break;
+        }
+        const size_t consumed = f.fast.CallStateMethodRun(ring.data(), ring.size());
+        REQUIRE(consumed == run_len);
+        f.Compare();
+    }
+}
+
 TEST_CASE("GpuSplit CB batching respects device remaps within GPU big pages",
           "[video_core][maxwell_fast_method][gpu_split_dispatch]") {
     using Access = VideoCommon::GpuSplitTestAccess;
@@ -565,6 +608,99 @@ TEST_CASE("GpuSplit dispatch preserves mapped uploads and macro boundaries",
             REQUIRE(probe.writes == 1);
         }
         f.Compare();
+    }
+}
+
+TEST_CASE("GpuSplit state method runs match sink and single writes",
+          "[video_core][maxwell_fast_method][gpu_split_dispatch]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    namespace Egla66 = VideoCommon::Nx2Egla66;
+    namespace FastDraw = VideoCommon::Nx2FastDraw;
+    const bool previous = Egla66::state_run;
+    SCOPE_EXIT {
+        Egla66::state_run = previous;
+        FastDraw::g_delta = {};
+    };
+    for (const u64 start : {u64{0}, Access::NearWrap() - 6}) {
+        CAPTURE(start);
+        // The same entries: f.slow's split runs them with the gate off, f.fast's with it on.
+        Fixture f;
+        f.slow.fast_maxwell3d = true;
+        VideoCommon::GpuSplit reference;
+        VideoCommon::GpuSplit runs;
+        Access::Initialize(reference, f.system, start);
+        Access::Initialize(runs, f.system, start);
+        u64 reference_position = start;
+        u64 run_position = start;
+        const u64 runs_before = Egla66::g_state_runs.load();
+        const u64 run_writes_before = Egla66::g_state_run_writes.load();
+        FastDraw::g_delta = {};
+        const auto send = [&](u32 method, u32 argument, bool from_macro) {
+            if (from_macro) {
+                reference.MacroWrite(&f.slow, method, argument);
+                runs.MacroWrite(&f.fast, method, argument);
+            } else {
+                reference.Method(&f.slow, method, argument, true, nullptr);
+                runs.Method(&f.fast, method, argument, true, nullptr);
+            }
+        };
+        const auto flush = [&] {
+            reference.Publish();
+            runs.Publish();
+            const FastDraw::Delta delta = FastDraw::g_delta;
+            const u64 reference_serial = FastDraw::Serial();
+            Egla66::state_run = false;
+            while (reference_position < Access::End(reference)) {
+                reference_position =
+                    Access::Execute(reference, reference_position, Access::End(reference));
+            }
+            // What the sink holds at the end runs before the next executable method: run it now.
+            f.slow.ConsumeSink(f.system);
+            const bool reference_moved = FastDraw::Serial() != reference_serial;
+            const FastDraw::Delta reference_delta = FastDraw::g_delta;
+            FastDraw::g_delta = delta;
+            const u64 run_serial = FastDraw::Serial();
+            Egla66::state_run = true;
+            while (run_position < Access::End(runs)) {
+                run_position = Access::Execute(runs, run_position, Access::End(runs));
+            }
+            f.fast.ConsumeSink(f.system);
+            REQUIRE(run_position == Access::End(runs));
+            REQUIRE((FastDraw::Serial() != run_serial) == reference_moved);
+            REQUIRE(FastDraw::g_delta.binds == reference_delta.binds);
+            REQUIRE(FastDraw::g_delta.num_writes == reference_delta.num_writes);
+            REQUIRE(FastDraw::g_delta.write_begin == reference_delta.write_begin);
+            REQUIRE(FastDraw::g_delta.write_end == reference_delta.write_end);
+            f.Compare();
+        };
+        std::mt19937 rng{23};
+        for (u32 step = 0; step < 6000; ++step) {
+            CAPTURE(step);
+            const u32 kind = rng() % 100;
+            const bool from_macro = rng() % 3 == 0;
+            if (kind < 55) {
+                const u32 method = f.state_methods[rng() % f.state_methods.size()];
+                send(method, RandomArgument(rng, method, f.slow), from_macro);
+            } else if (kind < 75) {
+                const u32 method = executable_methods[rng() % executable_methods.size()];
+                send(method, RandomArgument(rng, method, f.slow), from_macro);
+            } else if (kind < 85) {
+                send(CbData + rng() % 16, rng(), from_macro);
+            } else if (kind < 87) {
+                send(CbOffset, (rng() % 0x4000) * 4, from_macro);
+            } else if (kind < 90) {
+                send(ShadowControl, rng() % 4, from_macro);
+            } else if (kind < 93) {
+                reference.Defer([] {});
+                runs.Defer([] {});
+            } else {
+                flush();
+            }
+        }
+        flush();
+        const u64 made_runs = Egla66::g_state_runs.load() - runs_before;
+        REQUIRE(made_runs != 0);
+        REQUIRE(Egla66::g_state_run_writes.load() - run_writes_before > made_runs);
     }
 }
 
