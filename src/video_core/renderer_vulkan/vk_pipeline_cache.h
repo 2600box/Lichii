@@ -187,6 +187,12 @@ private:
     void StartComputeWarm(u64 title_id);
     std::vector<std::jthread> compute_warm_threads;
     std::atomic<bool> compute_warm_done{true};
+    /// This load runs the warm-up on the loading screen (shader_warm_at_boot): every CPU thread,
+    /// normal priority, and LoadDiskResources waits for them.
+    bool warm_before_start{false};
+
+    void WaitForWarmUps(std::stop_token stop_loading,
+                        const VideoCore::DiskResourceLoadCallback& callback);
 
     /// Set as soon as emulation is asked to stop (the loading stop token): the warm-ups end
     /// after their current build instead of compiling on until the cache is destroyed, which

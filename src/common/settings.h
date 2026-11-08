@@ -643,6 +643,12 @@ struct Values {
                                                          true,
                                                          true};
 
+    // Whether a pending shader warm-up runs on the loading screen, before the game starts (on all
+    // CPU threads), or in the background once it runs. Ask: the desktop app asks at launch; where
+    // nothing asks, as Never.
+    Setting<ShaderWarmAtBoot> shader_warm_at_boot{linkage, ShaderWarmAtBoot::Ask,
+                                                  "shader_warm_at_boot", Category::RendererAdvanced};
+
     SwitchableSetting<bool> enable_compute_pipelines{linkage, false, "enable_compute_pipelines",
                                                      Category::RendererAdvanced};
 

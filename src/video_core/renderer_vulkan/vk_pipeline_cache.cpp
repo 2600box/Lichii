@@ -1191,9 +1191,34 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         warm_cancel = false;
         warm_stop_callback = std::make_unique<std::stop_callback<std::function<void()>>>(
             stop_loading, std::function<void()>{[this] { warm_cancel = true; }});
+        const auto at_boot = Settings::values.shader_warm_at_boot.GetValue();
+        const bool asked = VideoCommon::ShaderWarm::TakeWarmBeforeStart();
+        warm_before_start = at_boot == Settings::ShaderWarmAtBoot::Always ||
+                            (at_boot == Settings::ShaderWarmAtBoot::Ask && asked);
         StartComputeWarm(title_id);
-
+        if (warm_before_start) {
+            WaitForWarmUps(stop_loading, callback);
+        }
+        warm_before_start = false;
     }
+}
+
+/// The warm-up on the loading screen: reports its progress until it has ended (or the load is
+/// stopped, which cancels it), so the game starts after it.
+void PipelineCache::WaitForWarmUps(std::stop_token stop_loading,
+                                   const VideoCore::DiskResourceLoadCallback& callback) {
+    const auto begin = std::chrono::steady_clock::now();
+    while (!stop_loading.stop_requested() && !compute_warm_done) {
+        const auto progress = shader_notify.GetWarmProgress();
+        if (progress.kind != 0 && callback) {
+            callback(VideoCore::LoadCallbackStage::Warm, progress.done,
+                     (std::max)(progress.total, progress.done));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    }
+    LOG_INFO(Render_Vulkan, "Nx2Perf warm-up before the game started: {:.0f} s{}",
+             std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count(),
+             stop_loading.stop_requested() ? " (stopped)" : "");
 }
 
 namespace {
@@ -1209,6 +1234,12 @@ std::filesystem::path WarmFile(const char* variable, const std::filesystem::path
         return title_file;
     }
     return {};
+}
+
+/// Threads of the compute warm-up: every CPU thread before the game starts, else 4. Before the
+/// game starts they run at normal priority, else at low priority.
+size_t WarmThreads(bool before_start) {
+    return before_start ? std::clamp<size_t>(std::thread::hardware_concurrency(), 1, 64) : 4;
 }
 
 /// The "already warmed" marker: warm file size and last-write time, entry count, GPU driver
@@ -1387,17 +1418,19 @@ void PipelineCache::StartComputeWarm(u64 title_id) {
     };
     auto progress = std::make_shared<Progress>();
     static const GuessMissing guess{};
-    constexpr size_t NumThreads = 4;
+    const size_t NumThreads = WarmThreads(warm_before_start);
+    const auto priority =
+        warm_before_start ? Common::ThreadPriority::Normal : Common::ThreadPriority::Low;
     progress->running = NumThreads;
     compute_warm_done = false;
     shader_notify.SetWarmProgress(1, 0, entries->size());
-    LOG_INFO(Render_Vulkan, "Nx2Perf compute_warm: {} programs to build on {} low priority threads",
-             entries->size(), NumThreads);
+    LOG_INFO(Render_Vulkan, "Nx2Perf compute_warm: {} programs to build on {} {} priority threads",
+             entries->size(), NumThreads, warm_before_start ? "normal" : "low");
     for (size_t thread = 0; thread < NumThreads; ++thread) {
         compute_warm_threads.emplace_back([this, entries, progress, warm_file, title_file,
-                                           file_entries, read_ok](std::stop_token stop) {
+                                           file_entries, read_ok, priority](std::stop_token stop) {
             Common::SetCurrentThreadName("VkComputeWarm");
-            Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+            Common::SetCurrentThreadPriority(priority);
             while (!stop.stop_requested() && !warm_cancel) {
                 const size_t index = progress->next.fetch_add(1);
                 if (index >= entries->size()) {
