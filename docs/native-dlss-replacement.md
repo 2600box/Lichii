@@ -85,6 +85,11 @@ the game keeps its own pass whenever DLSS is off, unavailable or fails to start.
   Samplers pick the biased or unbiased variant at each bind, so a console mode switch takes
   effect in-session. Images the GPU wrote (render targets: bloom, blur, reflections, fog) keep
   the game's own bias.
+- FSR 4 (optional): when an FFX API upscaler library loads (`EDEN_NX2_FSR4_LIB`, else
+  `amd_fidelityfx_upscaler_vk.so`/`.dll` in the user folder; e.g. github.com/Astyyyyy/fsr4-vk,
+  built by the user, nothing from AMD ships here), it gets the same inputs, jitter and RCAS
+  setting as FSR 3.1, which stays created and takes over if FSR 4 can't create its context
+  or a dispatch fails. The log names the library and shows `Ocarina FSR 4 evaluated`.
 - #644 (`82494c4820`, `74a2d20c90`, `4352c06bbf`) supplies the effects capture, used by FSR only
   (DLSS gets no bias mask and runs as before). FSR uses its R16F current/history bias as both
   reactive and transparency/composition masks; missing capture uses zero masks, not stale
