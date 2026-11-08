@@ -29,9 +29,11 @@ enum Switch : u32 {
     GeometryMemo = 128,     ///< geometry-memo: index/vertex lookups kept while their inputs hold
     GeometrySyncSkip = 256, ///< geometry-sync-skip: no upload scan of unwritten index/vertex ranges
     NativePreflush = 512,   ///< native-preflush: Switch 2 CPU reads mark pages for fence downloads
+    FastDraw = 1024,        ///< fast-draw: delta draws after light state changes (nx2_fast_draw.h)
+    FastDrawVerify = 2048,  ///< fast-draw-verify: resolve those draws in full and count mismatches
 };
 
-inline constexpr std::array<std::pair<Switch, const char*>, 10> switch_files{{
+inline constexpr std::array<std::pair<Switch, const char*>, 12> switch_files{{
     {BackPicksOff, "back-perf-off"},
     {EntryWaitSkip, "entry-wait-skip"},
     {UboInPlace, "ubo-inplace"},
@@ -42,6 +44,8 @@ inline constexpr std::array<std::pair<Switch, const char*>, 10> switch_files{{
     {GeometryMemo, "geometry-memo"},
     {GeometrySyncSkip, "geometry-sync-skip"},
     {NativePreflush, "native-preflush"},
+    {FastDraw, "fast-draw"},
+    {FastDrawVerify, "fast-draw-verify"},
 }};
 
 inline std::atomic<u32> g_on{0};
