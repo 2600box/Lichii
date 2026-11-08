@@ -66,6 +66,16 @@ enum class Lookup : u8 {
 
 inline constexpr size_t LookupCount = static_cast<size_t>(Lookup::Count);
 
+/// Pipelines created through shader cache v2's driver layer (VK_KHR_pipeline_binary).
+enum class DriverBuild : u8 {
+    Binary,   ///< From the binaries stored for it
+    Compiled, ///< Compiled by the driver, its binaries stored
+    Rejected, ///< Stored binaries that were stale or the driver refused (it is then compiled)
+    Count,
+};
+
+inline constexpr size_t DriverBuildCount = static_cast<size_t>(DriverBuild::Count);
+
 [[nodiscard]] inline bool ReadEnv() {
     const char* const value = std::getenv("EDEN_NX2_STUTTER_TRACE");
     return value != nullptr && value[0] == '1';
@@ -88,6 +98,7 @@ struct Totals {
     std::array<std::array<std::atomic<u64>, CategoryCount>, ThreadCount> counts{};
     std::array<std::atomic<bool>, ThreadCount> running{};
     std::array<std::atomic<u64>, LookupCount> lookups{};
+    std::array<std::atomic<u64>, DriverBuildCount> driver_builds{};
 };
 
 inline Totals g_totals;
@@ -125,6 +136,10 @@ inline void Add(Category category, u64 ticks) {
 
 inline void CountLookup(Lookup lookup) {
     g_totals.lookups[static_cast<size_t>(lookup)].fetch_add(1, std::memory_order_relaxed);
+}
+
+inline void CountDriverBuild(DriverBuild build) {
+    g_totals.driver_builds[static_cast<size_t>(build)].fetch_add(1, std::memory_order_relaxed);
 }
 
 using ThreadTicks = std::array<std::array<u64, CategoryCount>, ThreadCount>;

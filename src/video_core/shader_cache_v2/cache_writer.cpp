@@ -41,9 +41,10 @@ void CacheWriter::Append(RecordKind kind, u64 key, std::span<const u8> payload) 
     work_cv.notify_one();
 }
 
-void CacheWriter::Compact() {
+void CacheWriter::Compact(CompactLimit limit) {
     std::scoped_lock lock{mutex};
     compact = true;
+    compact_limit = std::move(limit);
     ++events;
     work_cv.notify_one();
 }
@@ -54,7 +55,7 @@ bool CacheWriter::Drain(std::chrono::milliseconds deadline) {
     ++events;
     work_cv.notify_one();
     const bool drained = drained_cv.wait_for(
-        lock, deadline, [this] { return queued_records == 0 && !writing; });
+        lock, deadline, [this] { return queued_records == 0 && !writing && !compact; });
     --draining;
     return drained;
 }
@@ -85,8 +86,9 @@ void CacheWriter::Run(std::stop_token stop) {
         if (compact) {
             compact = false;
             writing = true;
+            const CompactLimit limit = std::exchange(compact_limit, {});
             lock.unlock();
-            const WriteResult result = CompactLog(file);
+            const WriteResult result = CompactLog(file, limit);
             lock.lock();
             writing = false;
             if (result == WriteResult::Written) {

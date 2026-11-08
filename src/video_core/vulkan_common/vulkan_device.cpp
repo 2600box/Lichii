@@ -32,6 +32,7 @@
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/gpu_logging/gpu_logging.h"
+#include "video_core/shader_cache_v2/cache.h"
 #ifdef EGLANTINE_STREAMLINE
 #include "video_core/vulkan_common/streamline.h"
 #endif
@@ -1221,6 +1222,12 @@ bool Device::GetSuitability(bool requires_swapchain) {
     FOR_EACH_VK_FEATURE_EXT(FEATURE_EXTENSION);
     FOR_EACH_VK_EXTENSION(EXTENSION);
 
+    // Shader cache v2's driver layer alone uses VK_KHR_pipeline_binary: without it the device is
+    // created as before.
+    if (!VideoCommon::ShaderCacheV2::Enabled()) {
+        RemoveExtension(extensions.pipeline_binary, VK_KHR_PIPELINE_BINARY_EXTENSION_NAME);
+    }
+
     extensions.depth_stencil_resolve =
         extensions.depth_stencil_resolve &&
         (instance_version >= VK_API_VERSION_1_2 || extensions.create_renderpass2);
@@ -1431,6 +1438,11 @@ bool Device::GetSuitability(bool requires_swapchain) {
         properties.maintenance5.sType =
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_PROPERTIES_KHR;
         SetNext(next, properties.maintenance5);
+    }
+    if (extensions.pipeline_binary) {
+        properties.pipeline_binary.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_BINARY_PROPERTIES_KHR;
+        SetNext(next, properties.pipeline_binary);
     }
     if (extensions.custom_border_color) {
         properties.custom_border_color.sType =
@@ -1825,6 +1837,23 @@ void Device::RemoveUnsuitableExtensions() {
     extensions.maintenance5 = features.maintenance5.maintenance5;
     RemoveExtensionFeatureIfUnsuitable(extensions.maintenance5, features.maintenance5,
                                        VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
+
+    // VK_KHR_pipeline_binary (needs maintenance5 for the capture flag), kept to drivers that don't
+    // prefer their own cache: the store would only duplicate it there (PipelineBinaries).
+    if (extensions.pipeline_binary) {
+        LOG_INFO(Render_Vulkan,
+                 "VK_KHR_pipeline_binary: pipelineBinaries {}, internal cache {}, prefers internal "
+                 "cache {}, compressed data {}",
+                 features.pipeline_binary.pipelineBinaries != VK_FALSE,
+                 properties.pipeline_binary.pipelineBinaryInternalCache != VK_FALSE,
+                 properties.pipeline_binary.pipelineBinaryPrefersInternalCache != VK_FALSE,
+                 properties.pipeline_binary.pipelineBinaryCompressedData != VK_FALSE);
+    }
+    extensions.pipeline_binary =
+        features.pipeline_binary.pipelineBinaries && extensions.maintenance5 &&
+        !properties.pipeline_binary.pipelineBinaryPrefersInternalCache;
+    RemoveExtensionFeatureIfUnsuitable(extensions.pipeline_binary, features.pipeline_binary,
+                                       VK_KHR_PIPELINE_BINARY_EXTENSION_NAME);
 
     // VK_KHR_maintenance6
     extensions.maintenance6 = features.maintenance6.maintenance6;

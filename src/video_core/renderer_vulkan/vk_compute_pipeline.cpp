@@ -24,6 +24,7 @@
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_frame_dump.h"
+#include "video_core/renderer_vulkan/vk_pipeline_binaries.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
@@ -203,6 +204,7 @@ void ComputePipeline::TickUpscalerTrace() {
 }
 
 ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk::PipelineCache& pipeline_cache_,
+                                 PipelineBinaries* binaries_, u64 binary_key_,
                                  DescriptorPool& descriptor_pool,
                                  GuestDescriptorQueue& guest_descriptor_queue_,
                                  DescriptorBufferRing& descriptor_buffer_ring_,
@@ -211,7 +213,8 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
                                  VideoCore::ShaderNotify* shader_notify, const Shader::Info& info_,
                                  vk::ShaderModule spv_module_, u64 shader_hash_)
     : device{device_},
-      pipeline_cache(pipeline_cache_), guest_descriptor_queue{guest_descriptor_queue_},
+      pipeline_cache(pipeline_cache_), binaries{binaries_}, binary_key{binary_key_},
+      guest_descriptor_queue{guest_descriptor_queue_},
       descriptor_buffer_ring{descriptor_buffer_ring_}, info{info_},
       shader_hash{shader_hash_}, spv_module(std::move(spv_module_)) {
     if (shader_notify) {
@@ -300,7 +303,10 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
             const bool unoptimized = (flags & VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT) != 0;
             const auto trace_begin = std::chrono::steady_clock::now();
             TracePipelineBuild("BEGIN", "compute", shader_hash, traced, unoptimized);
-            pipeline = device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);
+            pipeline = binaries ? binaries->CreateComputePipeline(compute_ci, *pipeline_cache,
+                                                                  binary_key)
+                                : device.GetLogical().CreateComputePipeline(compute_ci,
+                                                                            *pipeline_cache);
             TracePipelineBuild("END", "compute", shader_hash, traced, unoptimized,
                                std::chrono::duration<double, std::milli>(
                                    std::chrono::steady_clock::now() - trace_begin)

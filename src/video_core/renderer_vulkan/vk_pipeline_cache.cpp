@@ -54,6 +54,7 @@
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_cooperative_hmma_test.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
+#include "video_core/renderer_vulkan/vk_pipeline_binaries.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache_records.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -823,6 +824,10 @@ PipelineCache::~PipelineCache() {
     cache_v2.reset();
     graphics_cache.clear();
     evicted_pipelines.clear();
+    if (pipeline_binaries) {
+        pipeline_binaries->LogCounts("at the end of the session");
+        pipeline_binaries.reset();
+    }
 }
 
 void PipelineCache::SaveUsedPipelines() {
@@ -1035,6 +1040,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         }
         shader_cache_v2 = nullptr;
         cache_v2.reset();
+        pipeline_binaries.reset();
     }
 
     namespace StutterTrace = VideoCommon::StutterTrace;
@@ -1064,6 +1070,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         }
         cache_v2 = std::make_unique<CacheV2::Cache>(pipeline_cache_filename);
         shader_cache_v2 = cache_v2.get();
+        pipeline_binaries = PipelineBinaries::Open(device, base_dir);
         // Without the lock: another emulator's appends are complete records or a cut-off tail.
         // The payload hashes are checked on the shader job workers.
         log_v2 = std::make_shared<CacheV2::LogFile>(CacheV2::ReadLogFile(
@@ -1415,6 +1422,9 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     if (precache && !stop_loading.stop_requested()) {
         PrecacheShaders(title_id, std::move(precache_graphics), std::move(precached_pipelines),
                         stop_loading, callback);
+    }
+    if (pipeline_binaries) {
+        pipeline_binaries->LogCounts("after the boot build");
     }
     if (stop_loading.stop_requested()) {
         background_pipelines.Stop();
@@ -2911,8 +2921,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         };
     }
     return std::make_unique<GraphicsPipeline>(
-        scheduler, buffer_cache, texture_cache, vulkan_pipeline_cache, &shader_notify, device,
-        descriptor_pool, guest_descriptor_queue, descriptor_buffer_ring,
+        scheduler, buffer_cache, texture_cache, vulkan_pipeline_cache, pipeline_binaries.get(),
+        &shader_notify, device, descriptor_pool, guest_descriptor_queue, descriptor_buffer_ring,
         BuildQueue(build_in_parallel, deferred_ir_bytes), statistics,
         render_pass_cache, key, std::move(modules), infos, std::move(emit_stages),
         std::move(mesh_emulation));
@@ -3161,8 +3171,9 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
         spv_module.SetObjectNameEXT(name.c_str());
     }
     return {.pipeline = std::make_unique<ComputePipeline>(
-                device, scheduler, vulkan_pipeline_cache, descriptor_pool, guest_descriptor_queue,
-                descriptor_buffer_ring, BuildQueue(build_in_parallel), statistics, &shader_notify, program.info,
+                device, scheduler, vulkan_pipeline_cache, pipeline_binaries.get(), key.Hash(),
+                descriptor_pool, guest_descriptor_queue, descriptor_buffer_ring,
+                BuildQueue(build_in_parallel), statistics, &shader_notify, program.info,
                 std::move(spv_module), key.unique_hash),
             .null_pointer_slots = env.IsNativeProgram() ? env.NullStoragePointerSlots()
                                                         : std::vector<std::pair<u32, u32>>{},

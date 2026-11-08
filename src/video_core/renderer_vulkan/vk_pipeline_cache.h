@@ -310,6 +310,8 @@ private:
     /// The v2 cache (ShaderCacheV2::Enabled) pipeline_cache_filename names, and this session's
     /// Used record
     std::unique_ptr<VideoCommon::ShaderCacheV2::Cache> cache_v2;
+    /// Its driver layer, where the device has VK_KHR_pipeline_binary
+    std::unique_ptr<PipelineBinaries> pipeline_binaries;
     u64 used_session_key{};
     u64 used_session_time{};
 

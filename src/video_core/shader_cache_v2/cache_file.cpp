@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <system_error>
@@ -147,7 +148,7 @@ WriteResult AppendToLog(const std::filesystem::path& file, std::span<const u8> r
     return WriteResult::Failed;
 }
 
-WriteResult CompactLog(const std::filesystem::path& file) {
+WriteResult CompactLog(const std::filesystem::path& file, const CompactLimit& limit) {
     const Common::FS::FileLock lock{PipelineCacheLockPath(file)};
     if (!lock.Held()) {
         return WriteResult::Busy;
@@ -162,8 +163,36 @@ WriteResult CompactLog(const std::filesystem::path& file) {
     const auto header = EncodeFileHeader(log.parsed.created_unix != 0 ? log.parsed.created_unix
                                                                        : UnixNow());
     std::vector<u8> bytes(header.begin(), header.end());
+    u64 live_bytes{};
     for (const LogRecord& record : log.parsed.live) {
-        EncodeRecord(bytes, record.kind, record.key, record.payload, record.flags);
+        live_bytes += RecordSize(record.payload.size());
+    }
+    std::vector<const LogRecord*> kept;
+    kept.reserve(log.parsed.live.size());
+    for (const LogRecord& record : log.parsed.live) {
+        kept.push_back(&record);
+    }
+    if (live_bytes > limit.max_bytes) {
+        const auto rank = [&](const LogRecord* record) {
+            return limit.rank ? limit.rank(*record) : 0;
+        };
+        std::ranges::stable_sort(kept, [&](const LogRecord* a, const LogRecord* b) {
+            const u32 rank_a = rank(a);
+            const u32 rank_b = rank(b);
+            return rank_a != rank_b ? rank_a < rank_b : a->offset > b->offset;
+        });
+        u64 total{};
+        size_t count{};
+        while (count < kept.size() &&
+               total + RecordSize(kept[count]->payload.size()) <= limit.target_bytes) {
+            total += RecordSize(kept[count]->payload.size());
+            ++count;
+        }
+        kept.resize(count);
+        std::ranges::sort(kept, {}, &LogRecord::offset);
+    }
+    for (const LogRecord* record : kept) {
+        EncodeRecord(bytes, record->kind, record->key, record->payload, record->flags);
     }
     return ReplaceFile(file, bytes);
 }
