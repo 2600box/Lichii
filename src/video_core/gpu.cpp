@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "common/assert.h"
+#include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "core/core.h"
@@ -124,9 +125,13 @@ struct GPU::Impl {
             }
             applying_writes.push_back(&writes);
         }
+        // Also if OnCacheInvalidations throws: ForEachPendingCpuWrite must not reach `writes`
+        // once it is gone.
+        SCOPE_EXIT {
+            std::scoped_lock lock{applying_writes_mutex};
+            std::erase(applying_writes, &writes);
+        };
         renderer->ReadRasterizer()->OnCacheInvalidations(writes);
-        std::scoped_lock lock{applying_writes_mutex};
-        std::erase(applying_writes, &writes);
     }
 
     void ForEachPendingCpuWrite(const std::function<void(DAddr, size_t)>& callback) {
