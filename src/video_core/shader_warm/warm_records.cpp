@@ -114,6 +114,7 @@ std::optional<std::string> LowerProgram(std::span<const u8> program, LoweredCode
     }
     out.code.resize(words.size() * sizeof(u64));
     std::memcpy(out.code.data(), words.data(), out.code.size());
+    out.texture_buffer = lowered.required_texture_buffer;
     return std::nullopt;
 }
 
@@ -140,7 +141,10 @@ std::vector<u8> ComputeEntry(const LoweredCode& lowered, const ComputeControl& c
     std::vector<u8> out;
     out.reserve(4 + EnvHeaderSize + lowered.code.size() + 16 + key.size());
     Put<u32>(out, 1);
-    PutEnvHeader(out, lowered.code.size(), 0, control.local_memory, 0, 80, ComputeStage);
+    // Like InitializeNativeCode: the program's own bank when it names one.
+    const u32 texture_bound = lowered.texture_buffer != ~0U ? lowered.texture_buffer : 0;
+    PutEnvHeader(out, lowered.code.size(), 0, control.local_memory, texture_bound, 80,
+                 ComputeStage);
     PutBytes(out, lowered.code);
     for (const u32 size : control.workgroup) {
         Put<u32>(out, size);

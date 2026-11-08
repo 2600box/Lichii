@@ -112,6 +112,7 @@ TEST_CASE("ShaderPrecache: a compute entry reads back like a pipeline cache entr
     for (size_t i = 0; i < lowered.code.size(); ++i) {
         lowered.code[i] = static_cast<u8>(i * 7 + 1);
     }
+    lowered.texture_buffer = 3;
     const ShaderWarm::ComputeControl control{{64, 2, 1}, 1024, 256};
     ShaderWarm::ComputeKey key_bytes{};
     const auto entry = ShaderWarm::ComputeEntry(lowered, control, key_bytes);
@@ -136,6 +137,7 @@ TEST_CASE("ShaderPrecache: a compute entry reads back like a pipeline cache entr
     REQUIRE(env.WorkgroupSize() == control.workgroup);
     REQUIRE(env.SharedMemorySize() == control.shared_memory);
     REQUIRE(env.LocalMemorySize() == control.local_memory);
+    REQUIRE(env.TextureBoundBuffer() == 3);
     REQUIRE(std::memcmp(&key, key_bytes.data(), sizeof(key)) == 0);
     REQUIRE(key.unique_hash == ShaderWarm::StageHash(lowered.code));
     REQUIRE(key.shared_memory_size == control.shared_memory);
@@ -150,6 +152,17 @@ TEST_CASE("ShaderPrecache: a compute entry reads back like a pipeline cache entr
     REQUIRE(env.ReadTextureType(5) == guess.texture_type);
     REQUIRE(env.IsCbufStorageBufferPointer(0, 0x10) == guess.storage_pointer_bank0);
     REQUIRE(env.IsCbufStorageBufferPointer(1, 0x10) == guess.storage_pointer_other);
+}
+
+TEST_CASE("ShaderPrecache: a program naming no texture bank reads bank 0", "[video_core]") {
+    ShaderWarm::LoweredCode lowered;
+    lowered.code.resize(16 * sizeof(u64));
+    ShaderWarm::ComputeKey key{};
+    const auto entry = ShaderWarm::ComputeEntry(lowered, {{1, 1, 1}, 0, 0}, key);
+    u32 texture_bound{};
+    // num_envs, then six u64 counts and local memory before the texture bank.
+    std::memcpy(&texture_bound, entry.data() + 4 + 6 * 8 + 4, sizeof(texture_bound));
+    REQUIRE(texture_bound == 0);
 }
 
 TEST_CASE("ShaderPrecache: programs that cannot be lowered are refused", "[video_core]") {

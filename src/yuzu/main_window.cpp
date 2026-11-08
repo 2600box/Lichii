@@ -4464,15 +4464,22 @@ void MainWindow::OnGameListPrepareShaderWarm(u64 program_id, const std::string& 
     shader_warm_dialog->Start();
 }
 
-/// With precache_shaders on and a precache the title has never finished: Ask asks whether to
+/// With precache_shaders on: a title precached before is precached again only when the driver or
+/// its precache file changed (the renderer checks). For one never precached, Ask asks whether to
 /// precache before the game starts, and a title without a precache file gets one built from its
 /// game files first. A stopped or failed build starts the game without precaching.
 void MainWindow::PrepareShaderPrecache(u64 title_id, const std::filesystem::path& game_path) {
     namespace ShaderWarm = VideoCommon::ShaderWarm;
     ShaderWarm::RequestWarmBeforeStart(false);
     const auto mode = Settings::values.precache_shaders.GetValue();
+    // The precache runs where the disk shader cache loads.
     if (title_id == 0 || mode == Settings::PrecacheShaders::Off ||
-        !ShaderWarm::WarmPending(title_id)) {
+        !Settings::values.use_disk_shader_cache.GetValue()) {
+        return;
+    }
+    if (!ShaderWarm::WarmPending(title_id)) {
+        // Precached before: the renderer runs it again only when the driver or the file changed.
+        ShaderWarm::RequestWarmBeforeStart(true);
         return;
     }
     if (mode == Settings::PrecacheShaders::Ask) {

@@ -26,6 +26,8 @@ using ComputeKey = std::array<u8, 24>;
 /// A program lowered and laid out like LowerNativeCode (video_core/shader_environment.cpp).
 struct LoweredCode {
     std::vector<u8> code;
+    /// Constant buffer the program's bound textures read, ~0U when it names none.
+    u32 texture_buffer{~0U};
 };
 
 /// Lowers one extracted compute program like `shader-sweep <program> --capture-extent

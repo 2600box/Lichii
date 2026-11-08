@@ -1260,6 +1260,7 @@ void PipelineCache::PrecacheComputeShaders(u64 title_id, std::stop_token stop_lo
     std::atomic<size_t> next{};
     std::atomic<size_t> built{};
     std::atomic<size_t> failed{};
+    std::atomic<bool> cancel{false};
     bool skipped = false;
     LOG_INFO(Render_Vulkan, "Shader precache: {} of {} compute programs to build on {} threads",
              entries.size(), file_entries, num_threads);
@@ -1267,9 +1268,9 @@ void PipelineCache::PrecacheComputeShaders(u64 title_id, std::stop_token stop_lo
         static const GuessMissing guess{};
         std::vector<std::jthread> threads;
         for (size_t thread = 0; thread < num_threads; ++thread) {
-            threads.emplace_back([this, &entries, &next, &built, &failed](std::stop_token stop) {
+            threads.emplace_back([this, &entries, &next, &built, &failed, &cancel] {
                 Common::SetCurrentThreadName("VkShaderPrecache");
-                while (!stop.stop_requested()) {
+                while (!cancel.load(std::memory_order_relaxed)) {
                     const size_t index = next.fetch_add(1);
                     if (index >= entries.size()) {
                         break;
@@ -1291,9 +1292,10 @@ void PipelineCache::PrecacheComputeShaders(u64 title_id, std::stop_token stop_lo
                 }
             });
         }
-        // The threads stop after their current build once this scope ends early.
         while (built + failed < entries.size()) {
             if (stop_loading.stop_requested() || ShaderWarm::TakeSkipWarm()) {
+                // Every thread stops after its current build; the scope end joins them.
+                cancel = true;
                 skipped = true;
                 break;
             }
