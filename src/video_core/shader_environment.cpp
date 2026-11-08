@@ -1453,10 +1453,6 @@ void SerializePipeline(std::span<const char> key, std::span<const GenericEnviron
         // follows complete records.
         file.exceptions(std::ios::goodbit);
         file.close();
-        if (!lock.Held()) {
-            // Another emulator may have appended after it: a load that holds the lock cuts it off.
-            return;
-        }
         std::error_code error;
         std::filesystem::resize_file(filename, static_cast<std::uintmax_t>(size), error);
         if (error) {
