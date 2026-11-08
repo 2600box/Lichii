@@ -214,6 +214,11 @@ size_t QueueLimit() {
     return limit;
 }
 
+size_t WarmLimit() {
+    static const size_t limit = EnvSize("EDEN_NX2_WARM_LIMIT_S");
+    return limit;
+}
+
 void WaitForRoom(size_t limit, const std::stop_token& stop) {
     State& state = Get();
     std::unique_lock lock{state.mutex};

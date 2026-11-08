@@ -30,6 +30,8 @@ void Finished(s64 bytes, s64 code_bytes);
 size_t Workers();
 /// EDEN_NX2_LOAD_QUEUE_MB=M: blocks the reader while queued bytes exceed M MiB (0 when unset)
 size_t QueueLimit();
+/// EDEN_NX2_WARM_LIMIT_S=S: the precache stops itself after S seconds as if skipped (0 when unset)
+size_t WarmLimit();
 void WaitForRoom(size_t limit, const std::stop_token& stop);
 
 } // namespace Vulkan::LoadTrace

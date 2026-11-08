@@ -1470,7 +1470,10 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
             });
         }
         while (done < jobs.size()) {
-            if (stop_loading.stop_requested() || ShaderWarm::TakeSkipWarm()) {
+            if (stop_loading.stop_requested() || ShaderWarm::TakeSkipWarm() ||
+                (LoadTrace::WarmLimit() != 0 &&
+                 std::chrono::steady_clock::now() - begin >
+                     std::chrono::seconds{LoadTrace::WarmLimit()})) {
                 // Every thread stops after its current build; the scope end joins them.
                 cancel = true;
                 skipped = true;
