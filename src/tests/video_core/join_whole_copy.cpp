@@ -49,12 +49,12 @@ TEST_CASE("CopiesWriteWholeImage accepts a 1x copy of every level and layer",
     REQUIRE(CopiesWriteWholeImage(dst, src, copies));
 }
 
-TEST_CASE("CopiesWriteWholeImage counts compressed extents in blocks",
-          "[video_core][texture_cache]") {
+TEST_CASE("CopiesWriteWholeImage rejects compressed formats", "[video_core][texture_cache]") {
     const ImageBase dst(Info(PixelFormat::BC1_RGBA_UNORM, 64, 30), 0, 0);
     const ImageBase src(Info(PixelFormat::BC1_RGBA_UNORM, 64, 30), 0, 0);
-    REQUIRE(CopiesWriteWholeImage(dst, src, std::vector{LevelCopy(0, 16, 8)}));
-    REQUIRE_FALSE(CopiesWriteWholeImage(dst, src, std::vector{LevelCopy(0, 16, 7)}));
+    // AddImageAlias counts the extent in blocks; the backends copy only 16x8 texels of it
+    REQUIRE_FALSE(CopiesWriteWholeImage(dst, src, std::vector{LevelCopy(0, 16, 8)}));
+    REQUIRE_FALSE(CopiesWriteWholeImage(dst, src, std::vector{LevelCopy(0, 64, 30)}));
 }
 
 TEST_CASE("CopiesWriteWholeImage rejects copies that leave texels unwritten",

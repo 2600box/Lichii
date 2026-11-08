@@ -1454,18 +1454,19 @@ bool CopiesWriteWholeImage(const ImageBase& dst, const ImageBase& src,
         True((src.flags | dst.flags) & excluded)) {
         return false;
     }
-    const u32 block_width = DefaultBlockWidth(dst.info.format);
-    const u32 block_height = DefaultBlockHeight(dst.info.format);
+    // Alias copies count a compressed extent in blocks, but the backends copy it as texels, so
+    // such a copy writes only part of the image.
+    if (DefaultBlockWidth(dst.info.format) != 1 || DefaultBlockHeight(dst.info.format) != 1) {
+        return false;
+    }
     for (s32 level = 0; level < dst.info.resources.levels; ++level) {
         const Extent3D size = MipSize(dst.info.size, level);
-        const u32 width = Common::DivCeil(size.width, block_width);
-        const u32 height = Common::DivCeil(size.height, block_height);
         const bool covered = std::ranges::any_of(copies, [&](const ImageCopy& copy) {
             return copy.dst_subresource.base_level == level &&
                    copy.dst_subresource.base_layer == 0 &&
                    copy.dst_subresource.num_layers >= dst.info.resources.layers &&
-                   copy.dst_offset == Offset3D{} && copy.extent.width >= width &&
-                   copy.extent.height >= height;
+                   copy.dst_offset == Offset3D{} && copy.extent.width >= size.width &&
+                   copy.extent.height >= size.height;
         });
         if (!covered) {
             return false;
