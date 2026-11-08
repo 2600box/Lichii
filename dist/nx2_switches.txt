@@ -50,7 +50,8 @@ EDEN_NX2_FENCE_BATCH=1
 # =0 builds the SPIR-V as emitted, as before.
 #EDEN_NX2_COMPUTE_NOINLINE=0
 # Same for graphics stages (vertex, tessellation, geometry, fragment): monolithic pipelines,
-# pipeline libraries and the graphics warm-up. =0 builds the SPIR-V as emitted, as before.
+# pipeline libraries and the graphics precache. =0 builds the SPIR-V as emitted, as before.
 #EDEN_NX2_GRAPHICS_NOINLINE=0
-# Threads for each shader warm-up (compute, then graphics), 1 to 32. They run at low priority.
+# Threads of the shader precache on the loading screen, 1 to 64 (wins over the setting, whose
+# default 0 uses every CPU thread).
 #EDEN_NX2_WARM_THREADS=4

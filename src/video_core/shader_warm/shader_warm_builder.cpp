@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -45,15 +46,11 @@ constexpr std::string_view StageConverting = "Converting";
 constexpr std::string_view StageWriting = "Writing";
 /// Conversions in flight (each holds a copy of its program).
 constexpr size_t MaxPendingJobs = 2048;
+constexpr u32 PrecachedPipelinesMagic = 0x31504750; // "PGP1"
 
 fs::path TitleDir(u64 title_id) {
     return Common::FS::GetEdenPath(Common::FS::EdenPath::ShaderDir) /
            fmt::format("{:016x}", title_id);
-}
-
-/// True when `text` ends with `suffix`.
-bool EndsWith(std::string_view text, std::string_view suffix) {
-    return text.size() >= suffix.size() && text.substr(text.size() - suffix.size()) == suffix;
 }
 
 struct ArchiveFile {
@@ -267,7 +264,7 @@ private:
         try {
             LoweredCode lowered;
             if (const auto error = LowerProgram(job.program, job.graphics, lowered)) {
-                LOG_DEBUG(Render_Vulkan, "Shader warm-up: program not converted: {}", *error);
+                LOG_DEBUG(Render_Vulkan, "Shader precache: program not converted: {}", *error);
                 return result;
             }
             if (job.graphics) {
@@ -278,7 +275,7 @@ private:
             }
             result.ok = true;
         } catch (const std::exception& e) {
-            LOG_DEBUG(Render_Vulkan, "Shader warm-up: conversion failed: {}", e.what());
+            LOG_DEBUG(Render_Vulkan, "Shader precache: conversion failed: {}", e.what());
         }
         return result;
     }
@@ -303,6 +300,20 @@ void Write(std::ofstream& out, const T& value) {
 void WriteHeader(std::ofstream& out) {
     out.write("yuzucach", 8);
     Write(out, WarmCacheVersion);
+}
+
+std::atomic<bool> warm_before_start{false};
+std::atomic<bool> skip_warm{false};
+
+/// Records `entries` for the finished precache file at `warm_file` (see WarmCountPath).
+void WriteWarmCount(const fs::path& warm_file, u64 entries) {
+    std::error_code ec;
+    const auto size = fs::file_size(warm_file, ec);
+    if (ec) {
+        return;
+    }
+    std::ofstream out(WarmCountPath(warm_file), std::ios::trunc);
+    out << entries << ' ' << size << '\n';
 }
 
 } // Anonymous namespace
@@ -339,35 +350,127 @@ u64 ReadWarmCount(const fs::path& warm_file) {
     return !ec && actual == size ? entries : 0;
 }
 
-namespace {
-/// Records `entries` for the finished warm file at `warm_file` (see WarmCountPath).
-void WriteWarmCount(const fs::path& warm_file, u64 entries) {
+std::optional<WarmStamp> CurrentWarmStamp(const fs::path& warm_file, u64 entries, u32 driver,
+                                          u32 device_id, u32 cache_version, u32 no_inline) {
     std::error_code ec;
     const auto size = fs::file_size(warm_file, ec);
     if (ec) {
-        return;
+        return std::nullopt;
     }
-    std::ofstream out(WarmCountPath(warm_file), std::ios::trunc);
-    out << entries << ' ' << size << '\n';
+    const auto time = fs::last_write_time(warm_file, ec);
+    if (ec) {
+        return std::nullopt;
+    }
+    return WarmStamp{size,      static_cast<s64>(time.time_since_epoch().count()),
+                     entries,   driver,
+                     device_id, cache_version,
+                     no_inline};
 }
-} // Anonymous namespace
+
+std::optional<WarmStamp> ReadWarmMarker(const fs::path& warm_file) {
+    std::ifstream in(WarmMarkerPath(warm_file));
+    WarmStamp stamp;
+    if (!(in >> stamp.size >> stamp.write_time >> stamp.entries >> stamp.driver >>
+          stamp.device_id >> stamp.cache_version >> stamp.no_inline)) {
+        return std::nullopt;
+    }
+    return stamp;
+}
+
+bool WriteWarmMarker(const fs::path& warm_file, const WarmStamp& stamp) {
+    std::ofstream out(WarmMarkerPath(warm_file), std::ios::trunc);
+    out << stamp.size << ' ' << stamp.write_time << ' ' << stamp.entries << ' ' << stamp.driver
+        << ' ' << stamp.device_id << ' ' << stamp.cache_version << ' ' << stamp.no_inline << '\n';
+    out.close();
+    return static_cast<bool>(out);
+}
+
+bool WarmPending(u64 title_id) {
+    const auto file = ComputeWarmPath(title_id);
+    std::error_code ec;
+    return !fs::exists(file, ec) || !fs::exists(WarmMarkerPath(file), ec);
+}
+
+void RequestWarmBeforeStart(bool before_start) {
+    skip_warm.store(false, std::memory_order_relaxed);
+    warm_before_start.store(before_start, std::memory_order_relaxed);
+}
+
+bool TakeWarmBeforeStart() {
+    return warm_before_start.exchange(false, std::memory_order_relaxed);
+}
+
+void RequestSkipWarm() {
+    skip_warm.store(true, std::memory_order_relaxed);
+}
+
+bool TakeSkipWarm() {
+    return skip_warm.exchange(false, std::memory_order_relaxed);
+}
+
+fs::path PrecachedPipelinesPath(u64 title_id) {
+    return TitleDir(title_id) / "precache-graphics.bin";
+}
+
+std::unordered_set<u64> ReadPrecachedPipelines(const fs::path& file, const DriverStamp& stamp) {
+    std::unordered_set<u64> hashes;
+    std::ifstream in(file, std::ios::binary);
+    u32 magic{};
+    DriverStamp saved;
+    u64 count{};
+    if (!in.read(reinterpret_cast<char*>(&magic), sizeof(magic)) ||
+        magic != PrecachedPipelinesMagic ||
+        !in.read(reinterpret_cast<char*>(&saved.driver), sizeof(saved.driver)) ||
+        !in.read(reinterpret_cast<char*>(&saved.device_id), sizeof(saved.device_id)) ||
+        !in.read(reinterpret_cast<char*>(&saved.cache_version), sizeof(saved.cache_version)) ||
+        !in.read(reinterpret_cast<char*>(&count), sizeof(count)) || saved != stamp) {
+        return hashes;
+    }
+    for (u64 i = 0; i < count; ++i) {
+        u64 hash{};
+        if (!in.read(reinterpret_cast<char*>(&hash), sizeof(hash))) {
+            break;
+        }
+        hashes.insert(hash);
+    }
+    return hashes;
+}
+
+bool WritePrecachedPipelines(const fs::path& file, const DriverStamp& stamp,
+                             const std::unordered_set<u64>& hashes) {
+    std::ofstream out(file, std::ios::binary | std::ios::trunc);
+    Write(out, PrecachedPipelinesMagic);
+    Write(out, stamp.driver);
+    Write(out, stamp.device_id);
+    Write(out, stamp.cache_version);
+    Write(out, static_cast<u64>(hashes.size()));
+    for (const u64 hash : hashes) {
+        Write(out, hash);
+    }
+    out.close();
+    return static_cast<bool>(out);
+}
 
 bool DeleteWarmFiles(u64 title_id, std::string* error) {
     bool ok = true;
+    const auto remove = [&](const fs::path& path) {
+        std::error_code ec;
+        fs::remove(path, ec);
+        if (ec) {
+            ok = false;
+            if (error != nullptr) {
+                *error = ec.message();
+            }
+        }
+    };
     for (const auto& warm : {ComputeWarmPath(title_id), GraphicsWarmPath(title_id)}) {
         fs::path tmp = warm;
         tmp += ".tmp";
         for (const auto& path : {warm, WarmMarkerPath(warm), WarmCountPath(warm), tmp}) {
-            std::error_code ec;
-            fs::remove(path, ec);
-            if (ec) {
-                ok = false;
-                if (error != nullptr) {
-                    *error = ec.message();
-                }
-            }
+            remove(path);
         }
     }
+    remove(PrecachedPipelinesPath(title_id));
     return ok;
 }
 
@@ -410,7 +513,7 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
         fs::remove(graphics_tmp, ignored);
         result.ok = false;
         result.error = std::move(error);
-        LOG_WARNING(Render_Vulkan, "Shader warm-up build for {:016x} failed: {}", title_id,
+        LOG_WARNING(Render_Vulkan, "Shader precache build for {:016x} failed: {}", title_id,
                     result.error);
         return result;
     };
@@ -444,7 +547,7 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
     const GraphicsKey fragment_template = stats.templates[1] ? *stats.templates[1]
                                                              : DefaultTemplate(false);
     LOG_INFO(Render_Vulkan,
-             "Shader warm-up build for {:016x}: {} runtime stage records from {} cache(s){}",
+             "Shader precache build for {:016x}: {} runtime stage records from {} cache(s){}",
              title_id, stats.occurrences, caches.size(),
              use_stats ? "" : ", built-in draw state defaults");
 
@@ -453,8 +556,8 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
         return fail(*error);
     }
 
-    // Archive list, in the offline pipeline's order: every *.bfsha.zs and *.sarc.zs of each
-    // package, then each package's Effect/*.vsetb.byml.zs, sorted by path inside a package.
+    // Archive list, in the offline pipeline's order: every shader archive of each package, then
+    // each package's effects, sorted by path inside a package (see ClassifyGameFile).
     std::vector<ArchiveFile> archives;
     std::vector<ArchiveFile> effects;
     ZstdDictionaries dictionaries;
@@ -466,14 +569,18 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
                   [](const ArchiveFile& a, const ArchiveFile& b) { return a.path < b.path; });
         std::vector<ArchiveFile> package_effects;
         for (auto& file : files) {
-            if (EndsWith(file.path, ".bfsha.zs") || EndsWith(file.path, ".sarc.zs")) {
+            switch (ClassifyGameFile(file.path)) {
+            case GameFileKind::ShaderArchive:
                 archives.push_back(file);
-            } else if (file.path.starts_with("Effect/") &&
-                       file.path.find('/', 7) == std::string::npos &&
-                       EndsWith(file.path, ".vsetb.byml.zs")) {
+                break;
+            case GameFileKind::Effect:
                 package_effects.push_back(file);
-            } else if (file.path == "Pack/ZsDic.pack.zs") {
+                break;
+            case GameFileKind::ZstdDictionaries:
                 dictionary_pack = file.file; // the newest package wins
+                break;
+            case GameFileKind::Other:
+                break;
             }
         }
         effects.insert(effects.end(), package_effects.begin(), package_effects.end());
@@ -483,13 +590,13 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
         try {
             dictionaries.Load(dictionary_pack->ReadAllBytes());
         } catch (const ArchiveError& e) {
-            LOG_WARNING(Render_Vulkan, "Shader warm-up: zstd dictionary pack: {}", e.what());
+            LOG_WARNING(Render_Vulkan, "Shader precache: zstd dictionary pack: {}", e.what());
         }
     }
-    if (archives.empty()) {
-        return fail("No shader archives found in the game files");
-    }
-    LOG_INFO(Render_Vulkan, "Shader warm-up build: {} archives, {} zstd dictionaries",
+    // Without archives the files are written empty: the precache then has only the pipeline
+    // cache of earlier sessions to build.
+    result.archives = archives.size();
+    LOG_INFO(Render_Vulkan, "Shader precache build: {} archives, {} zstd dictionaries",
              archives.size(), dictionaries.Count());
 
     compute_out.open(compute_tmp, std::ios::binary | std::ios::trunc);
@@ -639,13 +746,13 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
         };
         const auto on_member_error = [&](const std::string& error) {
             ++member_errors;
-            LOG_DEBUG(Render_Vulkan, "Shader warm-up: {}: {}", archive.path, error);
+            LOG_DEBUG(Render_Vulkan, "Shader precache: {}: {}", archive.path, error);
         };
         try {
             WalkArchive(data, name, &dictionaries, on_record, on_member_error);
         } catch (const ArchiveError& e) {
             ++archive_errors;
-            LOG_WARNING(Render_Vulkan, "Shader warm-up: {}: {}", archive.path, e.what());
+            LOG_WARNING(Render_Vulkan, "Shader precache: {}: {}", archive.path, e.what());
         }
         drain(false);
     }
@@ -762,7 +869,7 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
     compute_out.close();
     graphics_out.close();
     if (!compute_out || !graphics_out) {
-        return fail("Writing the warm-up files failed");
+        return fail("Writing the precache files failed");
     }
     {
         std::fstream patch(graphics_tmp, std::ios::binary | std::ios::in | std::ios::out);
@@ -778,7 +885,7 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
             }
         }
         if (!patch) {
-            return fail("Writing the warm-up files failed");
+            return fail("Writing the precache files failed");
         }
     }
     // New files: the markers and counts of the old ones no longer apply. Each is removed right
@@ -801,7 +908,7 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
     report(StageWriting, patches.size(), patches.size());
     result.ok = true;
     LOG_INFO(Render_Vulkan,
-             "Shader warm-up build for {:016x}: {} compute, {} vertex, {} fragment entries, {} "
+             "Shader precache build for {:016x}: {} compute, {} vertex, {} fragment entries, {} "
              "programs skipped, {} archive and {} member errors, {:.1f} s",
              title_id, result.compute_programs, result.vertex_programs, result.fragment_programs,
              result.skipped, archive_errors, member_errors,

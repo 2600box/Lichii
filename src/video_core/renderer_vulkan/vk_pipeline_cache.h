@@ -140,7 +140,7 @@ public:
     /// EDEN_NX2_HEAVY_SKIP: a clear of these targets (0 = none) in the current frame.
     void NoteClear(u64 color_address, u64 depth_address);
 
-    [[nodiscard]] ComputePipeline* CurrentComputePipeline();
+    [[nodiscard]] ComputePipeline* CurrentComputePipeline(u64& native_key);
 
     void LoadDiskResources(u64 title_id, std::stop_token stop_loading,
                            const VideoCore::DiskResourceLoadCallback& callback);
@@ -205,28 +205,41 @@ private:
 
     void QueueVulkanPipelineCacheFlush();
 
-    /// The title's warm-compute.bin (ShaderWarm::ComputeWarmPath, EDEN_NX2_COMPUTE_WARM=<file>
-    /// overrides): compute programs prepared from the game files are converted (missing reads
-    /// guessed) and built in the background, then thrown away. Nothing uses them; they only fill
-    /// the driver's shader cache, so a dispatch that later converts to the same SPIR-V finds the
-    /// driver build ready instead of waiting seconds for it.
-    void StartComputeWarm(u64 title_id);
-    std::vector<std::jthread> compute_warm_threads;
-    std::atomic<bool> compute_warm_done{true};
+    /// Queues one write of the driver pipeline cache file on the serialization thread, with no
+    /// throttle. For the end of a precache: its builds never reach the timed flush, which counts
+    /// only pipelines built during play.
+    void QueueVulkanPipelineCacheSave();
 
-    /// The title's warm-graphics.bin (ShaderWarm::GraphicsWarmPath, EDEN_NX2_GRAPHICS_WARM=<file>
-    /// overrides; needs graphics pipeline libraries): vertex and fragment programs prepared from
-    /// the game files are built as single-stage libraries in the background after the compute
-    /// warm-up, then released; the driver's disk cache keeps them, so a later pipeline with those
-    /// stages costs a link.
-    void StartGraphicsWarm(u64 title_id);
-    std::vector<std::jthread> graphics_warm_threads;
+    /// One build of the shader precache: builds a pipeline and destroys it, true when it built.
+    struct PrecacheJob {
+        u64 graphics_hash{}; ///< The cached graphics pipeline it builds, 0 for a compute program
+        Common::UniqueFunction<bool> build;
+    };
 
-    /// Set as soon as emulation is asked to stop (the loading stop token): the warm-ups end
-    /// after their current build instead of compiling on until the cache is destroyed, which
-    /// kept shutdown waiting on driver compiles.
-    std::atomic<bool> warm_cancel{false};
-    std::unique_ptr<std::stop_callback<std::function<void()>>> warm_stop_callback;
+    /// Shader precache before the game starts (precache_shaders), on every CPU thread unless
+    /// shader_warm_threads or EDEN_NX2_WARM_THREADS say otherwise: the cached
+    /// graphics pipelines this boot skipped (`jobs`; `precached` holds those built by earlier
+    /// precaches) and the compute programs of the title's precache file (made from the game files,
+    /// missing reads guessed) are built, then thrown away. They only fill the driver's shader
+    /// cache, so a later build of the same pipeline finds the driver's work done. Reports progress
+    /// through `callback` and returns when it is done, skipped from the loading screen or the load
+    /// is stopped. The graphics programs of warm-graphics.bin come last (PrecacheGraphicsWarm).
+    void PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
+                         std::unordered_set<u64> precached, std::stop_token stop_loading,
+                         const VideoCore::DiskResourceLoadCallback& callback);
+
+    /// The graphics part of the shader precache, after PrecacheShaders' builds: the vertex and
+    /// fragment programs of the title's warm-graphics.bin (made from the game files, missing
+    /// reads guessed; needs graphics pipeline libraries) are built as single-stage libraries on
+    /// `num_threads` threads, then released, unless a matching marker says they were built. The
+    /// driver's cache keeps them, so a later pipeline with those stages costs a link. The file is
+    /// streamed (it can be 1.5 GB). Reports progress through `callback` after `done_before` of
+    /// `total_before` builds; returns how many it built, and sets `skipped` when it was skipped
+    /// from the loading screen.
+    size_t PrecacheGraphicsWarm(u64 title_id, size_t num_threads, size_t done_before,
+                                size_t total_before, std::stop_token stop_loading,
+                                const VideoCore::DiskResourceLoadCallback& callback,
+                                bool& skipped);
 
     const Device& device;
     Scheduler& scheduler;
@@ -303,6 +316,9 @@ private:
     std::atomic<size_t> last_cache_size{};
     std::atomic_bool flush_in_flight{};
 
+    /// Requested first when the cache is destroyed, to stop a rewrite of the disk cache: Android
+    /// and yuzu_cmd load with a stop token that never stops
+    std::stop_source serialization_stop;
     Common::ThreadWorker workers;
     Common::ThreadWorker serialization_thread;
     DynamicFeatures dynamic_features;
