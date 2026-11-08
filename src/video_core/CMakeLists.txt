@@ -274,6 +274,8 @@ add_library(video_core STATIC
     shader_environment.cpp
     shader_environment.h
     shader_handle_program.h
+    shader_jobs.cpp
+    shader_jobs.h
     shader_notify.cpp
     shader_notify.h
     shader_warm/shader_archives.cpp

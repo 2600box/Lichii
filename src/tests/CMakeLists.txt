@@ -219,6 +219,20 @@ add_executable(update_checker_tests
 target_link_libraries(update_checker_tests PRIVATE common Catch2::Catch2WithMain)
 add_test(NAME update_checker_tests COMMAND update_checker_tests)
 
+# The shader job scheduler on its own, so it can be built with a sanitizer: configure with
+# -DSHADER_JOBS_SANITIZER=thread (or address,undefined), then build and run shader_jobs_tests.
+set(SHADER_JOBS_SANITIZER "" CACHE STRING "Build shader_jobs_tests with -fsanitize=<value>")
+add_executable(shader_jobs_tests
+    video_core/shader_jobs.cpp
+    ../video_core/shader_jobs.cpp)
+target_link_libraries(shader_jobs_tests PRIVATE common Catch2::Catch2WithMain Threads::Threads)
+if (SHADER_JOBS_SANITIZER)
+    target_compile_options(shader_jobs_tests PRIVATE -fsanitize=${SHADER_JOBS_SANITIZER}
+        -fno-omit-frame-pointer -fno-sanitize-recover=all -g)
+    target_link_options(shader_jobs_tests PRIVATE -fsanitize=${SHADER_JOBS_SANITIZER})
+endif()
+add_test(NAME shader_jobs_tests COMMAND shader_jobs_tests)
+
 if (NOT ANDROID)
     target_sources(tests PRIVATE input_common/joycon_subcommand_response.cpp)
     target_link_libraries(tests PRIVATE SDL3::SDL3)
