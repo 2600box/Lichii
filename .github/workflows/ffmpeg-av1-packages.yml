@@ -1,0 +1,329 @@
+name: FFmpeg AV1 packages
+
+on:
+  push:
+    branches: [capy/ffmpeg-av1-arm64-packages]
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: Comma separated list of linux-aarch64, macos-aarch64, linux-amd64
+        default: linux-aarch64,macos-aarch64
+      version:
+        description: Package version suffix
+        default: 9.0.2-av1-arm64-1
+
+env:
+  FFMPEG_COMMIT: 946fcce07b6dcd0331c8cc609192aeff5e1924f8
+  FFMPEG_PATCH_URL: https://git.eden-emu.dev/eden-emu/eden/raw/commit/ac86f96efadeac4cea0b335cffe3324f95051800/.patch/ffmpeg/0001-steamdeck.patch
+  DAV1D_VERSION: 1.5.4
+  NV_CODEC_HEADERS_TAG: n13.0.19.0
+  VULKAN_HEADERS_TAG: v1.4.350
+  PLATFORMS: §{{ inputs.platforms || 'linux-aarch64,macos-aarch64' }}
+  VERSION: §{{ inputs.version || '9.0.2-av1-arm64-1' }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: §{{ steps.plan.outputs.matrix }}
+    steps:
+      - id: plan
+        run: |
+          all='[
+            {"id":"linux-aarch64","runs-on":"ubuntu-24.04-arm","platform":"linux","arch":"aarch64"},
+            {"id":"macos-aarch64","runs-on":"macos-15","platform":"macos","arch":"aarch64"},
+            {"id":"linux-amd64","runs-on":"ubuntu-24.04","platform":"linux","arch":"amd64"}
+          ]'
+          matrix=$(echo "$all" | jq -c --arg p ",$PLATFORMS," '[.[] | select($p | contains("," + .id + ","))]')
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "$matrix"
+
+  build:
+    needs: plan
+    name: ffmpeg-§{{ matrix.id }}
+    runs-on: §{{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: §{{ fromJSON(needs.plan.outputs.matrix) }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      PLATFORM: §{{ matrix.platform }}
+      ARCH: §{{ matrix.arch }}
+    steps:
+      - name: Install tools (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential nasm meson ninja-build cmake pkg-config git curl patch zstd \
+            libva-dev libx11-dev zlib1g-dev aom-tools python3
+
+      - name: Install tools (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          brew install meson ninja pkg-config nasm zstd aom
+          echo "MACOSX_DEPLOYMENT_TARGET=13.0" >> "$GITHUB_ENV"
+
+      - name: Build dependencies
+        run: |
+          set -eux
+          DEPS="$RUNNER_TEMP/deps"
+          mkdir -p "$DEPS" "$RUNNER_TEMP/src"
+          echo "DEPS=$DEPS" >> "$GITHUB_ENV"
+          cd "$RUNNER_TEMP/src"
+
+          if [ "$PLATFORM" = linux ]; then
+            git clone --depth 1 -b "$NV_CODEC_HEADERS_TAG" https://github.com/FFmpeg/nv-codec-headers
+            make -C nv-codec-headers install PREFIX="$DEPS"
+
+            git clone --depth 1 -b "$VULKAN_HEADERS_TAG" https://github.com/KhronosGroup/Vulkan-Headers
+            cmake -S Vulkan-Headers -B Vulkan-Headers/build -DCMAKE_INSTALL_PREFIX="$DEPS"
+            cmake --install Vulkan-Headers/build
+          fi
+
+          curl -fsSL "https://code.videolan.org/videolan/dav1d/-/archive/$DAV1D_VERSION/dav1d-$DAV1D_VERSION.tar.gz" | tar xz
+          meson setup dav1d-build "dav1d-$DAV1D_VERSION" \
+            --prefix="$DEPS" --libdir=lib --buildtype=release \
+            -Ddefault_library=static -Denable_tools=false -Denable_tests=false -Db_pie=true
+          ninja -C dav1d-build install
+          ls -la "$DEPS/lib" "$DEPS/lib/pkgconfig"
+
+      - name: Build FFmpeg
+        run: |
+          set -eux
+          cd "$RUNNER_TEMP/src"
+          curl -fsSL "https://github.com/FFmpeg/FFmpeg/archive/$FFMPEG_COMMIT.tar.gz" | tar xz
+          cd "FFmpeg-$FFMPEG_COMMIT"
+          curl -sSfL "$FFMPEG_PATCH_URL" | patch -Np1
+
+          export PKG_CONFIG_PATH="$DEPS/lib/pkgconfig:$DEPS/share/pkgconfig"
+          export CPATH="$DEPS/include"
+
+          flags=(
+            --prefix="$RUNNER_TEMP/out"
+            --disable-avdevice --disable-avformat --disable-doc --disable-everything
+            --disable-ffmpeg --disable-ffprobe --disable-network
+            --enable-static --enable-filter=yadif,scale --enable-small --enable-pic --enable-swresample
+            --enable-decoder=h264 --enable-decoder=vp8 --enable-decoder=vp9 --enable-decoder=opus
+            --enable-libdav1d --enable-decoder=libdav1d
+          )
+          if [ "$PLATFORM" = linux ]; then
+            flags+=(
+              --cc=gcc --cxx=g++
+              --enable-vulkan --enable-hwaccel=h264_vulkan --enable-hwaccel=vp9_vulkan
+              --enable-cuvid --enable-ffnvcodec --enable-nvdec
+              --enable-hwaccel=h264_nvdec --enable-hwaccel=vp8_nvdec --enable-hwaccel=vp9_nvdec
+              --enable-vaapi --enable-hwaccel=h264_vaapi --enable-hwaccel=vp8_vaapi --enable-hwaccel=vp9_vaapi
+            )
+          else
+            flags+=(
+              --cc=clang --cxx=clang++
+              --enable-videotoolbox --enable-hwaccel=h264_videotoolbox --enable-hwaccel=vp9_videotoolbox
+              --disable-iconv
+              --extra-cflags=-mmacosx-version-min=13.0 --extra-ldflags=-mmacosx-version-min=13.0
+            )
+          fi
+
+          ./configure "§{flags[@]}" || { tail -n 80 ffbuild/config.log; exit 1; }
+          make -j"$(getconf _NPROCESSORS_ONLN)"
+          make install
+          rm -rf "$RUNNER_TEMP/out/share" "$RUNNER_TEMP/out/lib/pkgconfig"
+
+      - name: Merge dav1d into libavcodec
+        run: |
+          set -eux
+          out="$RUNNER_TEMP/out/lib"
+          if [ "$PLATFORM" = linux ]; then
+            printf 'CREATE %s/merged.a\nADDLIB %s/libavcodec.a\nADDLIB %s/lib/libdav1d.a\nSAVE\nEND\n' "$out" "$out" "$DEPS" | ar -M
+            ranlib "$out/merged.a"
+          else
+            libtool -static -o "$out/merged.a" "$out/libavcodec.a" "$DEPS/lib/libdav1d.a"
+          fi
+          mv "$out/merged.a" "$out/libavcodec.a"
+          ls -la "$out"
+
+      - name: Package
+        run: |
+          set -eux
+          out="$RUNNER_TEMP/out"
+          cat > "$out/CMakeLists.txt" <<'EOF'
+          cmake_minimum_required(VERSION 3.10)
+
+          set(FFmpeg_PATH "§{CMAKE_CURRENT_LIST_DIR}" PARENT_SCOPE)
+
+          set(FFMPEG_INCLUDE_DIR §{CMAKE_CURRENT_LIST_DIR}/include)
+          set(FFMPEG_LIB_DIR §{CMAKE_CURRENT_LIST_DIR}/lib)
+
+          set(LIB_TYPE STATIC)
+          set(LIB_SUFFIX a)
+
+          # utility lib that links to everything
+          add_library(ffmpeg INTERFACE)
+          set_target_properties(ffmpeg PROPERTIES
+              INTERFACE_INCLUDE_DIRECTORIES §{FFMPEG_INCLUDE_DIR})
+
+          foreach (LIB swscale avcodec swresample avfilter avutil)
+              add_library(§{LIB} §{LIB_TYPE} IMPORTED GLOBAL)
+              add_library(FFmpeg::§{LIB} ALIAS §{LIB})
+              target_link_libraries(ffmpeg INTERFACE FFmpeg::§{LIB})
+
+              set_target_properties(§{LIB} PROPERTIES
+                  INTERFACE_INCLUDE_DIRECTORIES §{FFMPEG_INCLUDE_DIR})
+
+              if (MSVC)
+                  set(libname §{LIB}.lib)
+              else()
+                  set(libname lib§{LIB}.§{LIB_SUFFIX})
+              endif()
+
+              set_target_properties(§{LIB} PROPERTIES
+                  IMPORTED_LOCATION §{FFMPEG_LIB_DIR}/§{libname})
+
+              if (WIN32)
+                  target_link_libraries(§{LIB} INTERFACE bcrypt)
+              endif()
+          endforeach()
+
+          if (MINGW)
+              find_library(ICONV_LIBRARY iconv REQUIRED)
+              target_link_libraries(ffmpeg INTERFACE §{ICONV_LIBRARY})
+          elseif(ANDROID)
+              find_library(MEDIANDK_LIBRARY mediandk REQUIRED)
+              target_link_libraries(ffmpeg INTERFACE §{MEDIANDK_LIBRARY})
+          elseif(APPLE)
+              find_library(VIDEOTOOLBOX_FRAMEWORK VideoToolbox REQUIRED)
+              find_library(COREMEDIA_FRAMEWORK CoreMedia REQUIRED)
+              target_link_libraries(ffmpeg INTERFACE §{VIDEOTOOLBOX_FRAMEWORK}
+                  §{COREMEDIA_FRAMEWORK})
+          endif()
+
+          add_library(FFmpeg::FFmpeg ALIAS ffmpeg)
+
+          set(FFmpeg_LIBRARY_DIR "§{FFMPEG_LIB_DIR}" PARENT_SCOPE)
+          set(FFmpeg_INCLUDE_DIR "§{FFMPEG_INCLUDE_DIR}" PARENT_SCOPE)
+          EOF
+
+          tarball="ffmpeg-$PLATFORM-$ARCH-$VERSION.tar"
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          (cd "$out" && tar cf "$GITHUB_WORKSPACE/artifacts/$tarball" ./*)
+          cd "$GITHUB_WORKSPACE/artifacts"
+          zstd -10 "$tarball"
+          rm "$tarball"
+          shasum -a 512 "$tarball.zst" | cut -d ' ' -f1 | tr -d '\n' > "$tarball.zst.sha512sum"
+          ls -la
+          cat "$tarball.zst.sha512sum"; echo
+          echo "ARCHIVE=$tarball.zst" >> "$GITHUB_ENV"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-§{{ matrix.id }}-§{{ env.VERSION }}
+          path: artifacts/*
+          if-no-files-found: error
+
+      - name: Verify package (unpack, link, decode AV1)
+        run: |
+          set -eux
+          cd "$GITHUB_WORKSPACE/artifacts"
+          [ "$(cat "$ARCHIVE.sha512sum")" = "$(shasum -a 512 "$ARCHIVE" | cut -d ' ' -f1)" ]
+
+          work="$RUNNER_TEMP/verify"
+          rm -rf "$work"
+          mkdir -p "$work/pkg"
+          zstd -dc "$ARCHIVE" | tar -C "$work/pkg" -xf -
+          ls "$work/pkg" "$work/pkg/lib"
+
+          python3 - "$work/in.y4m" <<'EOF'
+          import sys
+          w = h = 64
+          with open(sys.argv[1], "wb") as f:
+              f.write(b"YUV4MPEG2 W64 H64 F25:1 Ip A1:1 C420jpeg\n")
+              for n in range(5):
+                  f.write(b"FRAME\n")
+                  f.write(bytes(((x * 4 + y * 2 + n * 16) & 255) for y in range(h) for x in range(w)))
+                  f.write(bytes(((x * 8 + n * 8) & 255) for y in range(h // 2) for x in range(w // 2)))
+                  f.write(bytes(((y * 8 + 128 + n * 4) & 255) for y in range(h // 2) for x in range(w // 2)))
+          EOF
+          aomenc "$work/in.y4m" --ivf --limit=5 --cpu-used=8 --end-usage=q --cq-level=30 -o "$work/sample.ivf"
+          ls -la "$work/sample.ivf"
+
+          cat > "$work/probe.c" <<'EOF'
+          #include <stdint.h>
+          #include <stdio.h>
+          #include <string.h>
+          #include <libavcodec/avcodec.h>
+
+          static int drain(AVCodecContext *ctx, AVFrame *fr)
+          {
+              int n = 0;
+              while (avcodec_receive_frame(ctx, fr) == 0) {
+                  printf("frame %d: %dx%d pix_fmt=%d\n", n, fr->width, fr->height, fr->format);
+                  n++;
+              }
+              return n;
+          }
+
+          int main(int argc, char **argv)
+          {
+              const AVCodec *c = avcodec_find_decoder(AV_CODEC_ID_AV1);
+              if (!c) {
+                  puts("no AV1 decoder");
+                  return 1;
+              }
+              printf("AV1 decoder: %s\n", c->name);
+              if (strcmp(c->name, "libdav1d"))
+                  return 1;
+
+              FILE *f = fopen(argv[1], "rb");
+              uint8_t hdr[32];
+              if (!f || fread(hdr, 1, 32, f) != 32)
+                  return 1;
+
+              AVCodecContext *ctx = avcodec_alloc_context3(c);
+              if (avcodec_open2(ctx, c, NULL) < 0)
+                  return 1;
+              AVPacket *pkt = av_packet_alloc();
+              AVFrame *fr = av_frame_alloc();
+              int frames = 0;
+              uint8_t fh[12];
+              while (fread(fh, 1, 12, f) == 12) {
+                  uint32_t size = fh[0] | fh[1] << 8 | fh[2] << 16 | (uint32_t)fh[3] << 24;
+                  if (av_new_packet(pkt, size) < 0 || fread(pkt->data, 1, size, f) != size)
+                      return 1;
+                  if (avcodec_send_packet(ctx, pkt) < 0)
+                      return 1;
+                  av_packet_unref(pkt);
+                  frames += drain(ctx, fr);
+              }
+              avcodec_send_packet(ctx, NULL);
+              frames += drain(ctx, fr);
+              printf("decoded frames: %d\n", frames);
+              return frames == 5 ? 0 : 1;
+          }
+          EOF
+
+          libs="$work/pkg/lib/libavcodec.a $work/pkg/lib/libswresample.a $work/pkg/lib/libavutil.a"
+          if [ "$PLATFORM" = linux ]; then
+            gcc -O1 "$work/probe.c" -I"$work/pkg/include" $libs \
+              -lva -lva-drm -lva-x11 -lX11 -lz -lpthread -lm -ldl -o "$work/probe"
+            echo "max GLIBC symbol version required by probe:"
+            objdump -T "$work/probe" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1
+          else
+            clang -O1 -mmacosx-version-min=13.0 "$work/probe.c" -I"$work/pkg/include" $libs \
+              -framework VideoToolbox -framework CoreFoundation -framework CoreMedia \
+              -framework CoreVideo -framework Security -lz -lpthread -lm -o "$work/probe"
+            vtool -show-build "$work/probe" | grep -E 'minos|platform' || true
+          fi
+          "$work/probe" "$work/sample.ivf" | tee "$work/probe.out"
+
+          {
+            echo "### ffmpeg-$PLATFORM-$ARCH-$VERSION"
+            echo '```'
+            ls -l "$GITHUB_WORKSPACE/artifacts"
+            echo "sha512: $(cat "$GITHUB_WORKSPACE/artifacts/$ARCHIVE.sha512sum")"
+            cat "$work/probe.out"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
