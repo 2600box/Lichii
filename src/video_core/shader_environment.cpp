@@ -1453,6 +1453,10 @@ void SerializePipeline(std::span<const char> key, std::span<const GenericEnviron
         // follows complete records.
         file.exceptions(std::ios::goodbit);
         file.close();
+        if (!lock.Held()) {
+            // Another emulator may have appended after it: a load that holds the lock cuts it off.
+            return;
+        }
         std::error_code error;
         std::filesystem::resize_file(filename, static_cast<std::uintmax_t>(size), error);
         if (error) {
@@ -1463,10 +1467,10 @@ void SerializePipeline(std::span<const char> key, std::span<const GenericEnviron
     }
 }
 
-// LoadPipelines with the cache's lock held
+// LoadPipelines, holding the cache's lock when `locked`
 static void ReadPipelines(
     std::stop_token stop_loading, const std::filesystem::path& filename, u32 expected_cache_version,
-    Common::UniqueFunction<void, std::ifstream&, FileEnvironment> load_compute,
+    bool locked, Common::UniqueFunction<void, std::ifstream&, FileEnvironment> load_compute,
     Common::UniqueFunction<void, std::ifstream&, std::vector<FileEnvironment>> load_graphics) try {
     std::ifstream file(filename, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
@@ -1535,6 +1539,10 @@ static void ReadPipelines(
         // next record is appended after them.
         LOG_ERROR(Common_Filesystem, "{}", e.what());
         file.close();
+        if (!locked) {
+            // Another emulator may be appending it: a load that holds the lock cuts it off.
+            return;
+        }
         const std::streamoff complete{record_begin};
         std::error_code error;
         std::filesystem::resize_file(filename, static_cast<std::uintmax_t>(complete), error);
@@ -1577,8 +1585,8 @@ void LoadPipelines(
     if (lock.Held()) {
         std::filesystem::remove(RewritePath(filename), error); // A rewrite cut off
     }
-    ReadPipelines(stop_loading, filename, expected_cache_version, std::move(load_compute),
-                  std::move(load_graphics));
+    ReadPipelines(stop_loading, filename, expected_cache_version, lock.Held(),
+                  std::move(load_compute), std::move(load_graphics));
 }
 
 PipelineRecord ReadPipelineRecord(std::ifstream& file, u64 begin) {

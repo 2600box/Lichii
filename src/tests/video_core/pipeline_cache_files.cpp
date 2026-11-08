@@ -515,6 +515,29 @@ TEST_CASE("A damaged record drops only itself and the records after it",
     REQUIRE(LoadKeys(path).keys == std::vector<u64>{0, 1, 4});
 }
 
+TEST_CASE("A load without the lock leaves a damaged record for one that holds it",
+          "[pipeline_cache_files][damaged_records][file_lock]") {
+    TempDir temp;
+    const auto path = temp.path / "appending.bin";
+    AppendPipeline(path, 0, Shader::Stage::Fragment);
+    const auto complete = std::filesystem::file_size(path);
+    AppendPipeline(path, 1, Shader::Stage::Fragment);
+    // Another emulator partway through appending the second record
+    const std::string partial = ReadAll(path).substr(0, complete + 40);
+    {
+        std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+        stream.write(partial.data(), static_cast<std::streamsize>(partial.size()));
+    }
+    {
+        const Common::FS::FileLock other{VideoCommon::PipelineCacheLockPath(path)};
+        REQUIRE(other.Held());
+        REQUIRE(LoadKeys(path).keys == std::vector<u64>{0});
+        REQUIRE(ReadAll(path) == partial);
+    }
+    REQUIRE(LoadKeys(path).keys == std::vector<u64>{0});
+    REQUIRE(std::filesystem::file_size(path) == complete);
+}
+
 TEST_CASE("A record whose key is cut short never reaches pipeline creation",
           "[pipeline_cache_files][damaged_records]") {
     TempDir temp;
