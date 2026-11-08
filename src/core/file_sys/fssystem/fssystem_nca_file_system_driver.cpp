@@ -163,7 +163,8 @@ Result NcaFileSystemDriver::OpenStorageImpl(VirtualFile* out, NcaFsHeaderReader*
     }
 
     if (patch_info.HasAesCtrExTable() &&
-        out_header_reader->GetEncryptionType() == NcaFsHeader::EncryptionType::None) {
+        out_header_reader->GetEncryptionType() == NcaFsHeader::EncryptionType::None &&
+        m_reader->GetMagic() == NcaHeader::MagicDecrypted) {
         // Decrypted update content: the counter table describes data that is already plain.
         storage = std::make_shared<OffsetVfsFile>(std::move(storage), patch_info.aes_ctr_ex_offset,
                                                   0);
@@ -1102,7 +1103,8 @@ Result NcaFileSystemDriver::CreatePatchMetaStorage(
 
     // Create the decrypted storage.
     VirtualFile decrypted_storage;
-    if (encryption_type != NcaFsHeader::EncryptionType::None) {
+    if (encryption_type != NcaFsHeader::EncryptionType::None ||
+        m_reader->GetMagic() != NcaHeader::MagicDecrypted) {
         R_TRY(this->CreateAesCtrStorage(std::addressof(decrypted_storage), std::move(enc_storage),
                                         offset + patch_info.indirect_offset, upper_iv,
                                         AlignmentStorageRequirement::None));
