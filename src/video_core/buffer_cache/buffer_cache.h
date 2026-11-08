@@ -39,6 +39,9 @@ BufferCache<P>::BufferCache(Tegra::MaxwellDeviceMemoryManager& device_memory_, R
     // A new runtime has a new scheduler (its ticks restart) and a new stream buffer: whatever the
     // stream uniform reuse remembers refers to the old ones. Before the early return below.
     VideoCommon::ResetUniformStreamReuse<Runtime>();
+    if (egla66_ubo_keep_full || egla66_ubo_keep_full_verify) {
+        Nx2FastDraw::g_track_uniforms.store(true, std::memory_order_relaxed);
+    }
     // Ensure the first slot is used for the null buffer
     void(slot_buffers.insert(runtime, NullBufferParams{}));
     gpu_modified_ranges.Clear();
@@ -124,9 +127,10 @@ void BufferCache<P>::TickFrame() {
     if (UniformKeepActive() && Egla66::WindowEnded(uniform_keep.window)) {
         UniformKeep& keep = uniform_keep;
         LOG_INFO(HW_GPU,
-                 "EGLA66 ubo-keep in 10 s: {} kept, {} streamed, {} verified, {} verify mismatches",
-                 keep.kept, keep.streamed_binds, keep.verified, keep.mismatches);
-        keep.kept = keep.streamed_binds = keep.verified = keep.mismatches = 0;
+                 "EGLA66 ubo-keep in 10 s: {} kept on delta draws, {} kept on full draws, {} "
+                 "streamed, {} verified, {} verify mismatches",
+                 keep.kept, keep.kept_full, keep.streamed_binds, keep.verified, keep.mismatches);
+        keep.kept = keep.kept_full = keep.streamed_binds = keep.verified = keep.mismatches = 0;
     }
     if (frame_tick % 600 == 0 && !uploaded_buffer_ranges.empty()) {
         for (const auto& [address, size] : uploaded_buffer_ranges) {
@@ -726,14 +730,18 @@ void BufferCache<P>::SetUniformBuffersState(const std::array<u32, NUM_STAGES>& m
 }
 
 template <class P>
-void BufferCache<P>::BeginGraphicsUniforms(const Nx2FastDraw::Delta* delta) {
+void BufferCache<P>::BeginGraphicsUniforms(const Nx2FastDraw::Delta* delta, bool full_draw) {
     UniformKeep& keep = uniform_keep;
+    const bool enabled = full_draw ? egla66_ubo_keep_full || egla66_ubo_keep_full_verify
+                                   : egla66_ubo_keep || egla66_ubo_keep_verify;
     const bool unwritten = !keep.gpu_writes_lost && keep.draw_deletions == buffer_deletions;
     keep.draw_deletions = buffer_deletions;
+    keep.verify = full_draw ? egla66_ubo_keep_full_verify : egla66_ubo_keep_verify;
+    keep.full_draw = full_draw;
     keep.candidates = {};
     keep.writes.clear();
     const std::array<u32, NUM_STAGES> streamed = std::exchange(keep.streamed, {});
-    const bool usable = delta != nullptr && unwritten;
+    const bool usable = enabled && delta != nullptr && unwritten;
     if (usable) {
         keep.writes.insert(keep.writes.end(), keep.gpu_writes.begin(), keep.gpu_writes.end());
     }
@@ -1517,7 +1525,7 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
     bool verify_kept = false;
     if constexpr (!IS_OPENGL && VideoCommon::StreamUniformReusable<Runtime>) {
         if (UniformKeepActive() && UniformRangeKept(stage, index, device_addr, size)) {
-            if (egla66_ubo_keep_verify) {
+            if (uniform_keep.verify) {
                 ++uniform_keep.verified;
                 verify_kept = true;
                 if (!VideoCommon::KeptUniformHolds<Runtime>(device_memory, stage, index,
@@ -1533,7 +1541,7 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
                 channel_state->fast_bound_uniform_buffers[stage] |= 1u << binding_index;
                 channel_state->uniform_buffer_binding_sizes[stage][binding_index] = size;
                 uniform_keep.streamed[stage] |= 1u << index;
-                ++uniform_keep.kept;
+                ++(uniform_keep.full_draw ? uniform_keep.kept_full : uniform_keep.kept);
                 return;
             }
         }

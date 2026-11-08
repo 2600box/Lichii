@@ -268,21 +268,21 @@ struct BufferCacheTestAccess {
         return cache.memory_tracker.cpu_marks;
     }
     static void KeepDraw(KeepCache& cache, BufferCacheChannelInfo& channel,
-                         const Nx2FastDraw::Delta* delta, BufferId id, DAddr address,
-                         u32 size) {
+                         const Nx2FastDraw::Delta* delta, bool full_draw, BufferId id,
+                         DAddr address, u32 size) {
         cache.channel_state = &channel;
         cache.maxwell3d = &channel.maxwell3d;
         cache.gpu_memory = &channel.gpu_memory;
-        cache.BeginGraphicsUniforms(delta);
+        cache.BeginGraphicsUniforms(delta, full_draw);
         channel.uniform_buffers[0][0] = {.device_addr = address, .size = size, .buffer_id = id};
         cache.BindHostGraphicsUniformBuffer(0, 0, 0, true);
     }
     struct KeepCounts {
-        u64 kept, streamed, verified, mismatches;
+        u64 kept, kept_full, streamed, verified, mismatches;
     };
     static KeepCounts Counts(const KeepCache& cache) {
         const auto& keep = cache.uniform_keep;
-        return {keep.kept, keep.streamed_binds, keep.verified, keep.mismatches};
+        return {keep.kept, keep.kept_full, keep.streamed_binds, keep.verified, keep.mismatches};
     }
     static void GpuWrite(KeepCache& cache, BufferId id, DAddr address, u32 size) {
         cache.MarkWrittenBuffer(id, address, size);
@@ -398,8 +398,8 @@ struct KeepFixture : EnvGate, BasicFixture<KeepRuntime, KeepCache> {
         return bytes + (Ubo - 0x10000);
     }
     /// Draws and checks that the bound uniform data is what guest memory holds.
-    void Draw(const VideoCommon::Nx2FastDraw::Delta* delta) {
-        Access::KeepDraw(*cache, *channel, delta, id, Ubo, UboSize);
+    void Draw(const VideoCommon::Nx2FastDraw::Delta* delta, bool full_draw = false) {
+        Access::KeepDraw(*cache, *channel, delta, full_draw, id, Ubo, UboSize);
         const auto& data = runtime.allocations.at(runtime.bound.allocation);
         REQUIRE(data.size() == UboSize);
         REQUIRE(std::memcmp(data.data(), UboBytes(), UboSize) == 0);
@@ -787,13 +787,15 @@ TEST_CASE("EGLA66 ubo-keep binds unwritten uniform buffers of delta draws withou
     // A GPU write over the range: the original path binds it from the buffer from now on.
     Access::GpuWrite(*f.cache, f.id, KeepFixture::Ubo + 0x80, 4);
     const size_t allocations = f.runtime.allocations.size();
-    Access::KeepDraw(*f.cache, *f.channel, &unchanged, f.id, KeepFixture::Ubo, KeepFixture::UboSize);
-    Access::KeepDraw(*f.cache, *f.channel, &unchanged, f.id, KeepFixture::Ubo, KeepFixture::UboSize);
+    Access::KeepDraw(*f.cache, *f.channel, &unchanged, false, f.id, KeepFixture::Ubo,
+                     KeepFixture::UboSize);
+    Access::KeepDraw(*f.cache, *f.channel, &unchanged, false, f.id, KeepFixture::Ubo,
+                     KeepFixture::UboSize);
     REQUIRE(f.Counts().kept == 4);
     REQUIRE(f.runtime.allocations.size() == allocations);
 }
 
-TEST_CASE("EGLA66 ubo-keep never keeps across command buffers", "[buffer_ports]") {
+TEST_CASE("EGLA66 ubo-keep never keeps across command buffers or full draws", "[buffer_ports]") {
     KeepFixture f{"EDEN_NX2_EGLA66_UBO_KEEP"};
     const VideoCommon::Nx2FastDraw::Delta unchanged{};
     f.Draw(nullptr);
@@ -801,9 +803,23 @@ TEST_CASE("EGLA66 ubo-keep never keeps across command buffers", "[buffer_ports]"
     f.Draw(&unchanged);
     REQUIRE(f.Counts().kept == 0);
     REQUIRE(f.runtime.allocations.size() == 2);
+    f.Draw(&unchanged, true);
     f.Draw(nullptr);
     f.Draw(&unchanged);
     REQUIRE(f.Counts().kept == 1);
+    REQUIRE(f.Counts().kept_full == 0);
+}
+
+TEST_CASE("EGLA66 ubo-keep-full keeps on full draws only", "[buffer_ports]") {
+    KeepFixture f{"EDEN_NX2_EGLA66_UBO_KEEP_FULL"};
+    const VideoCommon::Nx2FastDraw::Delta unchanged{};
+    REQUIRE(VideoCommon::Nx2FastDraw::g_track_uniforms.load());
+    f.Draw(nullptr, true);
+    f.Draw(&unchanged, true);
+    f.Draw(&unchanged, false);
+    f.Draw(&unchanged, true);
+    REQUIRE(f.Counts().kept_full == 2);
+    REQUIRE(f.Counts().kept == 0);
 }
 
 TEST_CASE("EGLA66 ubo-keep verify counts guest writes the delta did not report",
@@ -827,7 +843,8 @@ TEST_CASE("EGLA66 ubo-keep off binds as before", "[buffer_ports]") {
     REQUIRE_FALSE(f.cache->UniformKeepActive());
     f.Draw(nullptr);
     f.Draw(&unchanged);
+    f.Draw(&unchanged, true);
     const auto counts = f.Counts();
-    REQUIRE(counts.kept + counts.streamed + counts.verified == 0);
+    REQUIRE(counts.kept + counts.kept_full + counts.streamed + counts.verified == 0);
     REQUIRE(f.runtime.allocations.size() == 1);
 }

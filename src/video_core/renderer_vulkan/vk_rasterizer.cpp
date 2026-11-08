@@ -796,8 +796,14 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         fast_draw_stats.pipeline_mismatches += verify_pipeline != pipeline ? 1 : 0;
     }
     if (buffer_cache.UniformKeepActive()) {
+        // Full draws: only register writes since the previous draw (EDEN_NX2_EGLA66_UBO_KEEP_FULL).
         const bool delta_draw = delta_pipeline != nullptr && verify_pipeline == nullptr;
-        buffer_cache.BeginGraphicsUniforms(delta_draw ? &taken_delta : nullptr);
+        const u64 uniform_serial = FastDraw::UniformSerial();
+        const bool held = fast_draw_on && uniform_serial == taken_uniform_serial &&
+                          gpu_memory == taken_uniform_memory;
+        taken_uniform_serial = uniform_serial;
+        taken_uniform_memory = gpu_memory;
+        buffer_cache.BeginGraphicsUniforms(delta_draw || held ? &taken_delta : nullptr, !delta_draw);
     }
     if (!pipeline) {
         report_failure("no pipeline");

@@ -485,13 +485,15 @@ public:
         } while (channel_state->has_deleted_buffers);
     }
 
-    /// EDEN_NX2_EGLA66_UBO_KEEP: called before each graphics draw binds its buffers. `delta`: the
-    /// constant buffer binds and data since the previous draw when it is a fast draw delta draw,
+    /// EDEN_NX2_EGLA66_UBO_KEEP(_FULL): called before each graphics draw binds its buffers.
+    /// `delta`: the constant buffer binds and data since the previous draw, when nothing else that
+    /// can write memory came in between (a delta draw, or a full draw after register writes only);
     /// else nullptr.
-    void BeginGraphicsUniforms(const Nx2FastDraw::Delta* delta);
+    void BeginGraphicsUniforms(const Nx2FastDraw::Delta* delta, bool full_draw);
 
     [[nodiscard]] bool UniformKeepActive() const noexcept {
-        return egla66_ubo_keep || egla66_ubo_keep_verify;
+        return egla66_ubo_keep || egla66_ubo_keep_verify || egla66_ubo_keep_full ||
+               egla66_ubo_keep_full_verify;
     }
 
     Common::SpinRecursiveMutex mutex;
@@ -709,6 +711,8 @@ private:
     /// allocation the previous draw made for it, without reading guest memory, when nothing ordered
     /// between the two draws wrote its range: no inline constant data, no rebind, no GPU write and
     /// no buffer deletion. Anything else in between ends the delta chain.
+    /// EDEN_NX2_EGLA66_UBO_KEEP_FULL does the same for full draws that only register writes
+    /// (Nx2FastDraw::UniformSerial) separate from the previous draw.
     [[nodiscard]] bool UniformRangeKept(size_t stage, u32 index, DAddr device_addr,
                                         u32 size) const noexcept;
     void NoteUniformGpuWrite(DAddr device_addr, u64 size) {
@@ -724,6 +728,8 @@ private:
     }
     const bool egla66_ubo_keep = Egla66::Env("EDEN_NX2_EGLA66_UBO_KEEP");
     const bool egla66_ubo_keep_verify = Egla66::Env("EDEN_NX2_EGLA66_UBO_KEEP_VERIFY");
+    const bool egla66_ubo_keep_full = Egla66::Env("EDEN_NX2_EGLA66_UBO_KEEP_FULL");
+    const bool egla66_ubo_keep_full_verify = Egla66::Env("EDEN_NX2_EGLA66_UBO_KEEP_FULL_VERIFY");
     struct UniformKeep {
         std::array<u32, NUM_STAGES> candidates{}; ///< Streamed by the previous draw, not rebound
         std::array<u32, NUM_STAGES> streamed{};   ///< Streamed by this draw
@@ -733,8 +739,11 @@ private:
             writes;
         boost::container::static_vector<std::pair<DAddr, DAddr>, 8> gpu_writes;
         bool gpu_writes_lost{}; ///< More GPU-modified marks than gpu_writes holds
+        bool verify{};          ///< This draw runs the original path and compares
+        bool full_draw{};
         u64 draw_deletions{}; ///< buffer_deletions when the previous draw began
         u64 kept{};
+        u64 kept_full{};
         u64 streamed_binds{};
         u64 verified{};
         u64 mismatches{};

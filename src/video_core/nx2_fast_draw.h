@@ -79,15 +79,29 @@ inline std::atomic<u64> g_serial{1};
 /// The last break's reason and, for Register and Method, its 3D method (diagnostics).
 inline std::atomic<u32> g_last_break{};
 
+/// EDEN_NX2_EGLA66_UBO_KEEP_FULL: set once by the buffer cache that keeps uniform buffers on full
+/// draws. g_uniform_serial then counts the breaks other than register writes.
+inline std::atomic<bool> g_track_uniforms{};
+inline std::atomic<u64> g_uniform_serial{1};
+
 inline void Break(Reason reason, u32 method = 0) {
     if (Enabled()) {
         g_serial.fetch_add(1, std::memory_order_relaxed);
         g_last_break.store(static_cast<u32>(reason) | (method << 8), std::memory_order_relaxed);
+        if (reason != Reason::Register && g_track_uniforms.load(std::memory_order_relaxed)) {
+            g_uniform_serial.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 }
 
 inline u64 Serial() {
     return g_serial.load(std::memory_order_relaxed);
+}
+
+/// Changes when anything but a 3D register write broke the fast draw chain (with
+/// g_track_uniforms; otherwise it stays put and must not be used).
+inline u64 UniformSerial() {
+    return g_uniform_serial.load(std::memory_order_relaxed);
 }
 
 /// Light changes since the last draw that can reach texture handles. Written and read on the
