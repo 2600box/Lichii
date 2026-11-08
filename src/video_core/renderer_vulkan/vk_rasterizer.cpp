@@ -1112,9 +1112,11 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
                       draw_params.base_instance, mesh_draw);
         }
 
-        if (Common::DkbFrameTrace::Enabled() &&
-            (draw_params.num_vertices == 0 || (!mesh_draw && draw_params.num_instances == 0))) {
-            ++trace_zero_direct;
+        if (Common::DkbFrameTrace::Enabled()) {
+            if (draw_params.num_vertices == 0 || (!mesh_draw && draw_params.num_instances == 0)) {
+                ++trace_zero_direct;
+            }
+            trace_direct_elements += u64{draw_params.num_vertices} * draw_params.num_instances;
         }
 
         if (mesh_draw && mesh_emulation_vertices_per_group != 0) {
@@ -2858,12 +2860,15 @@ void RasterizerVulkan::TickFrame() {
             LOG_INFO(Render_Vulkan,
                      "DKB draws through_frame={} frames={} attempts={} skipped={} indirect={} "
                      "zero_direct={} capture_dropped={} attempts_per_frame={:.1f} "
-                     "zero_direct_per_frame={:.1f} (totals since previous line)",
+                     "zero_direct_per_frame={:.1f} direct_elements_per_frame={:.0f} "
+                     "(totals since previous line)",
                      trace_frame, trace_window_frames, trace_draws, trace_skipped, trace_indirect,
                      trace_zero_direct, trace_capture_dropped,
                      static_cast<double>(trace_draws) / trace_window_frames,
-                     static_cast<double>(trace_zero_direct) / trace_window_frames);
+                     static_cast<double>(trace_zero_direct) / trace_window_frames,
+                     static_cast<double>(trace_direct_elements) / trace_window_frames);
             trace_draws = trace_skipped = trace_indirect = trace_zero_direct = 0;
+            trace_direct_elements = 0;
             trace_window_frames = 0;
             trace_capture_dropped = trace_failure_details = 0;
             trace_rate.next = now + std::chrono::seconds{1};

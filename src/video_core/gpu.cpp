@@ -8,7 +8,11 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <list>
+#include <string>
 #include <memory>
 #include <utility>
 
@@ -170,12 +174,44 @@ struct GPU::Impl {
     }
 
     [[nodiscard]] u64 GetTicks() const {
+        // EXPERIMENT (test package only, never merge): see RendererFrameEndNotify.
+        if (const u64 divisor = experiment_divisor.load(std::memory_order_relaxed);
+            divisor != 0 && g_nx2_ampere.load(std::memory_order_relaxed)) {
+            if (divisor == UpstreamTicks) {
+                return system.CoreTiming().GetGPUTicks() / 256;
+            }
+            const u64 now = static_cast<u64>(system.CoreTiming().GetGlobalTimeNs().count());
+            const u64 present_ns = ampere_anchor.load(std::memory_order_relaxed).PresentNs();
+            if (present_ns == 0 || now <= present_ns) {
+                return now;
+            }
+            return present_ns + (now - present_ns) / divisor;
+        }
         return ReadGpuTimestamp(system.CoreTiming(), g_nx2_ampere.load(std::memory_order_relaxed),
                                 Settings::values.gpu_clock.GetValue(),
                                 ampere_anchor.load(std::memory_order_relaxed));
     }
 
     void RendererFrameEndNotify() {
+        // EXPERIMENT (test package only, never merge): <EDEN_NX2_DEBUG_DIR>/gpu-time-div holds a
+        // divisor for Ampere GPU time since the last present (1 = exact, 4 = Boost, 16 =
+        // Overclock, 417 ~ upstream Boost durations) or "upstream" for upstream's exact Boost
+        // timestamps (614.4 MHz ticks / 256). Without the file the GPU Clocks setting applies.
+        static const char* const dir = std::getenv("EDEN_NX2_DEBUG_DIR");
+        if (dir != nullptr) {
+            u64 divisor = 0;
+            if (std::ifstream file{std::filesystem::path{dir} / "gpu-time-div"}) {
+                std::string text;
+                file >> text;
+                divisor = text == "upstream" ? UpstreamTicks : std::strtoull(text.c_str(), nullptr, 10);
+            }
+            if (divisor != experiment_divisor.exchange(divisor, std::memory_order_relaxed)) {
+                LOG_INFO(HW_GPU, "EXPERIMENT GPU time divisor: {}",
+                         divisor == UpstreamTicks ? std::string{"upstream ticks/256"}
+                         : divisor == 0           ? std::string{"setting"}
+                                                  : std::to_string(divisor));
+            }
+        }
         ampere_anchor.store(
             AmpereAnchor::At(static_cast<u64>(system.CoreTiming().GetGlobalTimeNs().count()),
                              Settings::values.gpu_clock.GetValue()),
@@ -378,6 +414,8 @@ struct GPU::Impl {
     std::list<std::function<void()>> sync_requests;
     std::atomic<u64> current_sync_fence{};
     std::atomic<AmpereAnchor> ampere_anchor{};
+    static constexpr u64 UpstreamTicks = ~u64{0};
+    std::atomic<u64> experiment_divisor{};
     u64 last_sync_fence{};
 
     VideoCommon::PendingMaps pending_maps;

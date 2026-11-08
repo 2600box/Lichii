@@ -392,6 +392,7 @@ private:
     u64 trace_skipped{};
     u64 trace_indirect{};
     u64 trace_zero_direct{};
+    u64 trace_direct_elements{};
     /// Vertex and fragment hashes of the draw being recorded, for GPU timing.
     std::pair<u64, u64> trace_draw_hashes{};
     u32 trace_captures{};
