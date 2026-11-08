@@ -35,9 +35,10 @@ enum Switch : u32 {
     PipelineClean = 8192,   ///< pipeline-clean: no pipeline key refresh while its inputs hold (1c8772da73)
     FlushCoalesce = 16384,  ///< flush-coalesce: adjacent device pages flush in one call (9bd828ce55)
     AliasSkip = 32768,      ///< alias-skip: no alias walk while no alias is newer (e368878151)
+    AcquireMetSkip = 262144, ///< acquire-met-skip: met GEQUAL acquires skip the drain (fb4d4e47a7)
 };
 
-inline constexpr std::array<std::pair<Switch, const char*>, 16> switch_files{{
+inline constexpr std::array<std::pair<Switch, const char*>, 17> switch_files{{
     {BackPicksOff, "back-perf-off"},
     {EntryWaitSkip, "entry-wait-skip"},
     {UboInPlace, "ubo-inplace"},
@@ -54,6 +55,7 @@ inline constexpr std::array<std::pair<Switch, const char*>, 16> switch_files{{
     {PipelineClean, "pipeline-clean"},
     {FlushCoalesce, "flush-coalesce"},
     {AliasSkip, "alias-skip"},
+    {AcquireMetSkip, "acquire-met-skip"},
 }};
 
 inline std::atomic<u32> g_on{0};
@@ -67,6 +69,9 @@ inline std::atomic<u64> g_memo_misses{0};
 inline std::atomic<u64> g_memo_mismatches{0};
 inline std::atomic<u64> g_dynamic_skips{0};
 inline std::atomic<u64> g_dynamic_updates{0};
+inline std::atomic<u64> g_acquire_skips{0};
+inline std::atomic<u64> g_acquire_drains{0};
+inline std::atomic<u64> g_acquire_polls{0};
 
 /// For counters one thread writes: a plain load and store, not a locked add.
 inline void Count(std::atomic<u64>& counter) {
@@ -132,6 +137,15 @@ inline void Refresh() {
                      "{} not checkable, {} differ from the drained read",
                      narrowed, g_dma_unverified.load(std::memory_order_relaxed),
                      g_dma_differ.load(std::memory_order_relaxed));
+        }
+        const u64 acquire_skips = g_acquire_skips.exchange(0, std::memory_order_relaxed);
+        const u64 acquire_drains = g_acquire_drains.exchange(0, std::memory_order_relaxed);
+        const u64 acquire_polls = g_acquire_polls.exchange(0, std::memory_order_relaxed);
+        if (acquire_skips != 0 || acquire_drains != 0 || acquire_polls != 0) {
+            LOG_INFO(HW_GPU,
+                     "EXPERIMENT acquire-met-skip: {} acquires passed without a drain, {} drained "
+                     "in 10 s; {} polls of waiting acquires without a drain",
+                     acquire_skips, acquire_drains, acquire_polls);
         }
     }
 }

@@ -24,6 +24,7 @@
 #include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_experiment.h"
 #include "video_core/nx2_fast_draw.h"
 #include "video_core/rasterizer_interface.h"
 
@@ -111,7 +112,8 @@ enum class AcquireCheck {
 // the front sent to the word decides instead, when the back may not have run it yet.
 AcquireCheck CheckWithoutDrain(DmaPusher& dma_pusher, const Puller::PendingAcquire& acquire) {
     auto& split = VideoCommon::GpuSplit::Get();
-    if (!acquire.WaitsToReach() || !split.Active() || !split.FrontMacros() ||
+    if (!VideoCommon::Nx2Experiment::On(VideoCommon::Nx2Experiment::AcquireMetSkip) ||
+        !acquire.WaitsToReach() || !split.Active() || !split.FrontMacros() ||
         !ReleasesLandAtOnce()) {
         return AcquireCheck::Drain;
     }
@@ -152,27 +154,35 @@ bool Puller::CanResumeAcquire(DmaPusher& dma_pusher) {
     if (!pending_acquire) {
         return true;
     }
+    namespace Experiment = VideoCommon::Nx2Experiment;
     switch (CheckWithoutDrain(dma_pusher, *pending_acquire)) {
     case AcquireCheck::MetByQueued:
         // What the front reads after the acquire waits for the work sent before the release.
         VideoCommon::GpuSplit::Get().NoteSync();
+        Experiment::Count(Experiment::g_acquire_skips);
         return true;
     case AcquireCheck::Met:
+        Experiment::Count(Experiment::g_acquire_skips);
         return true;
     case AcquireCheck::NotMet:
         // A release the back ran latches the waiter. Otherwise poll again later, without waiting
         // for the back: until it runs one, nothing sent to the word meets it. After 2 s, the
         // drain below reports the wait.
         if (Nx2SemaphoreWaiters::Get().Latched(this)) {
+            Experiment::Count(Experiment::g_acquire_skips);
             return true;
         }
         if (pending_acquire->reported ||
             std::chrono::steady_clock::now() - pending_acquire->since <= std::chrono::seconds{2}) {
+            Experiment::Count(Experiment::g_acquire_polls);
             return false;
         }
         break;
     case AcquireCheck::Drain:
         break;
+    }
+    if (Experiment::On(Experiment::AcquireMetSkip)) {
+        Experiment::Count(Experiment::g_acquire_drains);
     }
     // The release may still be queued for the split GPU thread's back half (and the caches
     // ReadSemaphoreWord asks are its state).
@@ -359,6 +369,7 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
             return;
         }
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireChecks, 1);
+        namespace Experiment = VideoCommon::Nx2Experiment;
         if (const AcquireCheck without_drain = CheckWithoutDrain(dma_pusher, acquire);
             without_drain == AcquireCheck::Met || without_drain == AcquireCheck::MetByQueued) {
             if (without_drain == AcquireCheck::MetByQueued) {
@@ -366,7 +377,11 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
                 // release (GpuSplit::NoteSync).
                 VideoCommon::GpuSplit::Get().NoteSync();
             }
+            Experiment::Count(Experiment::g_acquire_skips);
             return;
+        }
+        if (Experiment::On(Experiment::AcquireMetSkip)) {
+            Experiment::Count(Experiment::g_acquire_drains);
         }
         DrainBack();
         if (acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address))) {
