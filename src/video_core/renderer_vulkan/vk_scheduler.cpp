@@ -438,7 +438,8 @@ void Scheduler::RequestRenderpass(const Framebuffer* framebuffer, std::source_lo
     // clear restart the pass and re-LOAD what was just CLEARed (~118 MB of attachment traffic per
     // world-target turn). The framebuffer handle already fixes the attachment structure and key,
     // so it is the correct identity to compare.
-    if (framebuffer_handle == state.framebuffer && render_area.width == state.render_area.width &&
+    if (state.renderpass && framebuffer_handle == state.framebuffer &&
+        render_area.width == state.render_area.width &&
         render_area.height == state.render_area.height) {
         return;
     }
