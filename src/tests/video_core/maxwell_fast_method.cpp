@@ -26,6 +26,8 @@
 #include "video_core/gpu.h"
 #include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_egla66.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/renderer_null/null_rasterizer.h"
 
 namespace VideoCommon {
@@ -539,6 +541,125 @@ TEST_CASE("GpuSplit dispatch preserves mapped uploads and macro boundaries",
             REQUIRE(probe.writes == 1);
         }
         f.Compare();
+    }
+}
+
+TEST_CASE("GpuSplit macro write runs match single macro write entries",
+          "[video_core][maxwell_fast_method][gpu_split_dispatch]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    namespace Egla66 = VideoCommon::Nx2Egla66;
+    namespace FastDraw = VideoCommon::Nx2FastDraw;
+    const bool previous = Egla66::ring_run;
+    SCOPE_EXIT {
+        Egla66::ring_run = previous;
+        FastDraw::g_delta = {};
+    };
+    struct ProbeEngine final : Tegra::Engines::EngineInterface {
+        std::vector<std::pair<u32, u32>> writes;
+        void CallMethod(Core::System&, u32 method, u32 argument, bool) override {
+            writes.emplace_back(method, argument);
+        }
+        void CallMultiMethod(Core::System&, u32, const u32*, u32, u32) override {}
+    };
+    for (const bool fast_engine : {false, true}) {
+        for (const u64 start : {u64{0}, Access::NearWrap() - 6}) {
+            CAPTURE(fast_engine, start);
+            // f.slow takes single Direct entries (the gate off), f.fast the same writes in runs.
+            Fixture f;
+            f.slow.fast_maxwell3d = fast_engine;
+            f.fast.fast_maxwell3d = fast_engine;
+            ProbeEngine reference_probe;
+            ProbeEngine run_probe;
+            VideoCommon::GpuSplit reference;
+            VideoCommon::GpuSplit runs;
+            Access::Initialize(reference, f.system, start);
+            Access::Initialize(runs, f.system, start);
+            u64 reference_position = start;
+            u64 run_position = start;
+            const u64 runs_before = Egla66::g_ring_runs.load();
+            const u64 run_writes_before = Egla66::g_ring_run_writes.load();
+            FastDraw::g_delta = {};
+            bool run_gate = true;
+            const auto macro = [&](u32 method, u32 argument) {
+                Egla66::ring_run = false;
+                reference.MacroWrite(&f.slow, method, argument);
+                Egla66::ring_run = run_gate;
+                runs.MacroWrite(&f.fast, method, argument);
+            };
+            const auto flush = [&] {
+                // Publishing closes the open run, as before the back may read it. Each side runs
+                // from the same fast draw delta: both must record the same and move the serial alike.
+                reference.Publish();
+                runs.Publish();
+                Egla66::ring_run = false;
+                const FastDraw::Delta delta = FastDraw::g_delta;
+                const u64 reference_serial = FastDraw::Serial();
+                while (reference_position < Access::End(reference)) {
+                    reference_position =
+                        Access::Execute(reference, reference_position, Access::End(reference));
+                }
+                const bool reference_moved = FastDraw::Serial() != reference_serial;
+                const FastDraw::Delta reference_delta = FastDraw::g_delta;
+                FastDraw::g_delta = delta;
+                const u64 run_serial = FastDraw::Serial();
+                while (run_position < Access::End(runs)) {
+                    run_position = Access::Execute(runs, run_position, Access::End(runs));
+                }
+                REQUIRE(run_position == Access::End(runs));
+                REQUIRE((FastDraw::Serial() != run_serial) == reference_moved);
+                REQUIRE(FastDraw::g_delta.binds == reference_delta.binds);
+                REQUIRE(FastDraw::g_delta.num_writes == reference_delta.num_writes);
+                REQUIRE(FastDraw::g_delta.write_begin == reference_delta.write_begin);
+                REQUIRE(FastDraw::g_delta.write_end == reference_delta.write_end);
+                REQUIRE(run_probe.writes == reference_probe.writes);
+                f.Compare();
+            };
+            std::mt19937 rng{fast_engine ? 31u : 32u};
+            for (u32 step = 0; step < 4000; ++step) {
+                CAPTURE(step);
+                const u32 kind = rng() % 100;
+                if (kind < 35) {
+                    const u32 method = f.state_methods[rng() % f.state_methods.size()];
+                    macro(method, RandomArgument(rng, method, f.slow));
+                } else if (kind < 55) {
+                    const u32 method = executable_methods[rng() % executable_methods.size()];
+                    macro(method, RandomArgument(rng, method, f.slow));
+                } else if (kind < 75) {
+                    macro(CbData + rng() % 16, rng());
+                } else if (kind < 78) {
+                    macro(CbOffset, (rng() % 0x4000) * 4);
+                } else if (kind < 80) {
+                    macro(ShadowControl, rng() % 4);
+                } else if (kind < 85) {
+                    // A write from the command list ends the run.
+                    const u32 method = rng() % 2 == 0 ? CbData + rng() % 16
+                                                      : f.state_methods[rng() % f.state_methods.size()];
+                    const u32 argument = rng();
+                    reference.Method(&f.slow, method, argument, true, nullptr);
+                    runs.Method(&f.fast, method, argument, true, nullptr);
+                } else if (kind < 89) {
+                    // Another engine's macro writes: an engine switch ends the run.
+                    const u32 method = rng() % 0x100;
+                    const u32 argument = rng();
+                    Egla66::ring_run = false;
+                    reference.MacroWrite(&reference_probe, method, argument);
+                    Egla66::ring_run = run_gate;
+                    runs.MacroWrite(&run_probe, method, argument);
+                } else if (kind < 91) {
+                    reference.Defer([] {});
+                    runs.Defer([] {});
+                } else if (kind < 95) {
+                    // The gate may differ between any two writes (only tests change it).
+                    run_gate = rng() % 4 != 0;
+                } else {
+                    flush();
+                }
+            }
+            flush();
+            const u64 made_runs = Egla66::g_ring_runs.load() - runs_before;
+            REQUIRE(made_runs != 0);
+            REQUIRE(Egla66::g_ring_run_writes.load() - run_writes_before > 2 * made_runs);
+        }
     }
 }
 

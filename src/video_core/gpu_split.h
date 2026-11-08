@@ -12,6 +12,7 @@
 #include <type_traits>
 
 #include "common/common_types.h"
+#include "video_core/nx2_egla66.h"
 
 namespace Core {
 class System;
@@ -119,35 +120,16 @@ public:
     void MultiMethod(Tegra::Engines::EngineInterface* engine, u32 method, const u32* words,
                      u32 amount, u32 methods_pending, const GPUVAddr* segment);
     /// A write made by a macro: CallMethod without the method sink, as the engines' macros do.
-    /// Consecutive macro writes to one engine go into one Run entry (the back loops over them
-    /// instead of dispatching an entry per write: ~2.5 million writes a second in DK Bananza).
     void MacroWrite(Tegra::Engines::EngineInterface* engine, u32 method, u32 argument) {
         SelectEngine(engine);
-        const u64 word = (u64{method & 0xffff} << 8) | (u64{argument} << 32);
-        if (open_run != nullptr && open_run_end == write_position &&
-            ((open_run[0] >> 8) & 0xffffff) < MaxRunWrites) {
-            u64* const next = Reserve(1);
-            // Reserve may have wrapped or published (closing the run): append only right after
-            // the run's last word.
-            if (open_run != nullptr && next == open_run + 1 + ((open_run[0] >> 8) & 0xffffff)) {
-                *next = word;
-                open_run[0] += u64{1} << 8;
-                Commit(1);
-                if (open_run != nullptr) {
-                    open_run_end = write_position;
-                }
-                return;
-            }
-            open_run = nullptr;
+        if (Nx2Egla66::ring_run) {
+            AppendRunWrite((u64{method & 0xffff} << 8) | (u64{argument} << 32));
+            return;
         }
-        u64* const entry = Reserve(2);
-        entry[0] = static_cast<u64>(Kind::Run) | (u64{1} << 8);
-        entry[1] = word;
-        open_run = entry;
-        Commit(2);
-        if (open_run != nullptr) {
-            open_run_end = write_position;
-        }
+        u64* const entry = Reserve(1);
+        entry[0] = static_cast<u64>(Kind::Method) | IsLast | Direct | (u64{method & 0xffff} << 8) |
+                   (u64{argument} << 32);
+        Commit(1);
     }
 
     /// Defer flag: the call doesn't end fast draw reuse (nx2_fast_draw.h).
@@ -242,6 +224,37 @@ private:
         return ReserveSlow(words);
     }
     u64* ReserveSlow(size_t words);
+    /// EGLA-66 ring-run: consecutive macro writes to one engine go into one Run entry (the back
+    /// loops over them instead of dispatching an entry per write: ~2.5 million writes a second in
+    /// DK Bananza).
+    void AppendRunWrite(u64 word) {
+        Nx2Egla66::Count(Nx2Egla66::g_ring_run_writes);
+        if (open_run != nullptr && open_run_end == write_position &&
+            ((open_run[0] >> 8) & 0xffffff) < MaxRunWrites) {
+            u64* const next = Reserve(1);
+            // Reserve may have wrapped or published (closing the run): append only right after
+            // the run's last word.
+            if (open_run != nullptr && next == open_run + 1 + ((open_run[0] >> 8) & 0xffffff)) {
+                *next = word;
+                open_run[0] += u64{1} << 8;
+                Commit(1);
+                if (open_run != nullptr) {
+                    open_run_end = write_position;
+                }
+                return;
+            }
+            open_run = nullptr;
+        }
+        Nx2Egla66::Count(Nx2Egla66::g_ring_runs);
+        u64* const entry = Reserve(2);
+        entry[0] = static_cast<u64>(Kind::Run) | (u64{1} << 8);
+        entry[1] = word;
+        open_run = entry;
+        Commit(2);
+        if (open_run != nullptr) {
+            open_run_end = write_position;
+        }
+    }
     void Commit(size_t words) {
         write_position += words;
         if (write_position - published_local >= publish_every) {
