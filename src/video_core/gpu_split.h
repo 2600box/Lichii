@@ -12,13 +12,10 @@
 #include <type_traits>
 
 #include "common/common_types.h"
+#include "video_core/engines/engine_interface.h"
 
 namespace Core {
 class System;
-}
-
-namespace Tegra::Engines {
-class EngineInterface;
 }
 
 namespace VideoCommon {
@@ -111,6 +108,9 @@ public:
             entry[1] = *segment;
         }
         Commit(words);
+        if (engine->memory_write_mask[method]) {
+            last_memory_write_position = write_position;
+        }
     }
     void MultiMethod(Tegra::Engines::EngineInterface* engine, u32 method, const u32* words,
                      u32 amount, u32 methods_pending, const GPUVAddr* segment);
@@ -121,6 +121,9 @@ public:
         entry[0] = static_cast<u64>(Kind::Method) | IsLast | Direct | (u64{method & 0xffff} << 8) |
                    (u64{argument} << 32);
         Commit(1);
+        if (engine->memory_write_mask[method]) {
+            last_memory_write_position = write_position;
+        }
     }
 
     /// Defer flag: the call doesn't end fast draw reuse (nx2_fast_draw.h).
@@ -137,6 +140,7 @@ public:
         entry[1] = reinterpret_cast<u64>(&CallThunk<Func>);
         std::memcpy(entry + 2, &func, sizeof(Func));
         Commit(2 + payload);
+        last_memory_write_position = write_position;
     }
     void DeferFunction(std::function<void()>&& func);
     /// Runs `func` on the back and waits for it: for work on back-owned state, such as a buffer
@@ -182,6 +186,10 @@ public:
     /// Waits until the back executed the work sent before the last NoteSync. Returns whether any
     /// of it was still queued.
     bool WaitForSync();
+    /// EXPERIMENT (macro-dma-narrow): for the front's macro memory reads, waits until the back
+    /// executed what can write memory in command order (memory_write_mask methods, deferred calls,
+    /// compute and copy work) and the work before the last host-level wait, all sent so far.
+    bool WaitForMemoryWriters(DrainSite site);
 
 private:
     friend struct GpuSplitTestAccess;
@@ -255,6 +263,7 @@ private:
     u64 write_position{};
     u64 last_writer_position{};
     u64 last_sync_position{};
+    u64 last_memory_write_position{};
     u64 published_local{};
     u64 consumed_cache{};
     /// Words between publishes: small right after a drain, while the back has nothing to do.

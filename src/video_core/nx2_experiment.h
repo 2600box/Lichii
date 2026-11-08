@@ -31,9 +31,10 @@ enum Switch : u32 {
     NativePreflush = 512,   ///< native-preflush: Switch 2 CPU reads mark pages for fence downloads
     FastDraw = 1024,        ///< fast-draw: delta draws after light state changes (nx2_fast_draw.h)
     FastDrawVerify = 2048,  ///< fast-draw-verify: resolve those draws in full and count mismatches
+    MacroDmaNarrow = 4096,  ///< macro-dma-narrow: macro memory reads wait for memory writers only
 };
 
-inline constexpr std::array<std::pair<Switch, const char*>, 12> switch_files{{
+inline constexpr std::array<std::pair<Switch, const char*>, 13> switch_files{{
     {BackPicksOff, "back-perf-off"},
     {EntryWaitSkip, "entry-wait-skip"},
     {UboInPlace, "ubo-inplace"},
@@ -46,11 +47,15 @@ inline constexpr std::array<std::pair<Switch, const char*>, 12> switch_files{{
     {NativePreflush, "native-preflush"},
     {FastDraw, "fast-draw"},
     {FastDrawVerify, "fast-draw-verify"},
+    {MacroDmaNarrow, "macro-dma-narrow"},
 }};
 
 inline std::atomic<u32> g_on{0};
 inline std::atomic<u64> g_entry_skips{0};
 inline std::atomic<u64> g_entry_misses{0};
+inline std::atomic<u64> g_dma_narrowed{0};
+inline std::atomic<u64> g_dma_unverified{0};
+inline std::atomic<u64> g_dma_differ{0};
 inline std::atomic<u64> g_memo_hits{0};
 inline std::atomic<u64> g_memo_misses{0};
 inline std::atomic<u64> g_memo_mismatches{0};
@@ -113,6 +118,14 @@ inline void Refresh() {
         if (dynamic_skips != 0 || dynamic_updates != 0) {
             LOG_INFO(HW_GPU, "EXPERIMENT dynamic-state-skip: {} draws skipped, {} updated in 10 s",
                      dynamic_skips, dynamic_updates);
+        }
+        const u64 narrowed = g_dma_narrowed.exchange(0, std::memory_order_relaxed);
+        if (narrowed != 0) {
+            LOG_INFO(HW_GPU,
+                     "EXPERIMENT macro-dma-narrow: {} macro memory reads narrowed in 10 s; in total "
+                     "{} not checkable, {} differ from the drained read",
+                     narrowed, g_dma_unverified.load(std::memory_order_relaxed),
+                     g_dma_differ.load(std::memory_order_relaxed));
         }
     }
 }
