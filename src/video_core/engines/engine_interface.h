@@ -50,7 +50,7 @@ public:
     std::vector<std::pair<u32, u32>> method_sink{};
     GPUVAddr current_dma_segment;
     bool current_dirty{};
-    /// EDEN_NX2_FAST_DRAW: the engine reports its own changes (Maxwell3D); a method of any other
+    /// Fast draw (nx2_fast_draw.h): the engine reports its own changes (Maxwell3D); a method of any other
     /// engine ends draw reuse.
     bool reports_fast_draw_breaks{};
 protected:

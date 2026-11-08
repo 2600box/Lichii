@@ -127,7 +127,7 @@ public:
         Commit(1);
     }
 
-    /// Defer flag: the call doesn't end EDEN_NX2_FAST_DRAW reuse (nx2_fast_draw.h).
+    /// Defer flag: the call doesn't end fast draw reuse (nx2_fast_draw.h).
     static constexpr u64 FastDrawNeutral = 1 << 7;
 
     /// Runs `func` on the back after everything sent before it. Must be trivially copyable.

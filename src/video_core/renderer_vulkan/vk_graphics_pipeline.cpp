@@ -36,7 +36,6 @@
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "common/settings.h"
 #include "shader_recompiler/exception.h"
-#include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_profile.h"
 
 #if defined(__clang__) && defined(NDEBUG)
@@ -689,7 +688,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             }
         }
     }
-    if (delta_blocker == DeltaBlocker::None && VideoCommon::Nx2FastDraw::g_delta_enabled) {
+    if (std::exchange(capture_delta, false) && delta_blocker == DeltaBlocker::None) {
         const auto same_view = [](const VideoCommon::ImageViewInOut& lhs,
                                   const VideoCommon::ImageViewInOut& rhs) {
             return lhs.index == rhs.index && lhs.id == rhs.id;
@@ -873,29 +872,32 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     return ConfigureDraw(rescaling, render_area);
 }
 
-GraphicsPipeline::DeltaResult GraphicsPipeline::ConfigureDelta() {
+bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
     namespace Profile = VideoCommon::Nx2Profile;
+    // ConfigureImpl without reading handles and resolving image views, samplers and texture
+    // buffers: the buffers are resolved, synchronized and bound as it does.
+    buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);
     {
         Profile::Scope scope{Profile::Zone::ReadHandles};
         for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
-            const auto& descriptors = stage_infos[stage].storage_buffers_descriptors;
-            if (!configured_stages[stage] || descriptors.empty()) {
+            if (!configured_stages[stage]) {
                 continue;
             }
             buffer_cache.UnbindGraphicsStorageBuffers(stage);
             size_t ssbo_index{};
-            for (const auto& desc : descriptors) {
+            for (const auto& desc : stage_infos[stage].storage_buffers_descriptors) {
+                ASSERT(desc.count == 1);
                 buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
-                                                       desc.cbuf_offset, desc.is_written);
+                                                       desc.cbuf_offset, desc.is_written,
+                                                       desc.indirect_offset);
                 ++ssbo_index;
             }
         }
     }
     {
         Profile::Scope scope{Profile::Zone::UpdateBuffers};
-        if (!buffer_cache.UpdateGraphicsStageBuffers()) {
-            return DeltaResult::NeedsFull;
-        }
+        buffer_cache.UpdateGraphicsBuffers(is_indexed);
+        buffer_cache.BindHostGeometryBuffers(is_indexed);
     }
     {
         Profile::Scope scope{Profile::Zone::DescriptorAcquire};
@@ -936,16 +938,16 @@ GraphicsPipeline::DeltaResult GraphicsPipeline::ConfigureDelta() {
         texture_cache.UpdateRenderTargets(false);
         const std::span<const VideoCommon::ImageViewInOut> view_span{delta_views};
         texture_cache.CheckFeedbackLoop(view_span);
-        if (scheduler.TakeFragmentBarrier() &&
+        if (scheduler.HasFragmentBarrier() &&
             (scheduler.RenderPassHasStores() || texture_cache.SamplesRenderTarget(view_span))) {
             scheduler.RequestOutsideRenderPassOperationContext();
         }
     }
-    if (IsBuilt() && !pipeline) {
-        return DeltaResult::Failed;
+    if (IsBuilt() && (!pipeline || build->Failed())) {
+        return false;
     }
     Profile::Scope scope{Profile::Zone::ConfigureDraw};
-    return ConfigureDraw(rescaling, render_area) ? DeltaResult::Configured : DeltaResult::Failed;
+    return ConfigureDraw(rescaling, render_area);
 }
 
 bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,

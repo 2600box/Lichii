@@ -21,42 +21,20 @@ namespace VideoCommon::Nx2Experiment {
 enum Switch : u32 {
     BackPicksOff = 1,  ///< back-perf-off: no empty-draw skip, no clean-word early-out
     EntryWaitSkip = 2, ///< entry-wait-skip: entries on pages read before skip the writer wait
-    UboInPlace = 4,    ///< ubo-inplace: compare small uniform buffers in guest memory, no read copy
-    CbWriteCache = 8,  ///< cb-write-cache: constant buffer words keep their page's translation
-    TextureMemo = 16,  ///< texture-memo: a draw's sampled textures are resolved from the last draw's
-    TextureMemoVerify = 32, ///< texture-memo-verify: with texture-memo, also resolve in full and compare
-    DynamicStateSkip = 64,  ///< dynamic-state-skip: no dynamic state update while no flag is dirty
-    GeometryMemo = 128,     ///< geometry-memo: index/vertex lookups kept while their inputs hold
-    GeometrySyncSkip = 256, ///< geometry-sync-skip: no upload scan of unwritten index/vertex ranges
-    NativePreflush = 512,   ///< native-preflush: Switch 2 CPU reads mark pages for fence downloads
+    FastDraw = 4,      ///< fast-draw: delta draws after light state changes (nx2_fast_draw.h)
+    FastDrawVerify = 8, ///< fast-draw-verify: resolve those draws in full and count mismatches
 };
 
-inline constexpr std::array<std::pair<Switch, const char*>, 10> switch_files{{
+inline constexpr std::array<std::pair<Switch, const char*>, 4> switch_files{{
     {BackPicksOff, "back-perf-off"},
     {EntryWaitSkip, "entry-wait-skip"},
-    {UboInPlace, "ubo-inplace"},
-    {CbWriteCache, "cb-write-cache"},
-    {TextureMemo, "texture-memo"},
-    {TextureMemoVerify, "texture-memo-verify"},
-    {DynamicStateSkip, "dynamic-state-skip"},
-    {GeometryMemo, "geometry-memo"},
-    {GeometrySyncSkip, "geometry-sync-skip"},
-    {NativePreflush, "native-preflush"},
+    {FastDraw, "fast-draw"},
+    {FastDrawVerify, "fast-draw-verify"},
 }};
 
 inline std::atomic<u32> g_on{0};
 inline std::atomic<u64> g_entry_skips{0};
 inline std::atomic<u64> g_entry_misses{0};
-inline std::atomic<u64> g_memo_hits{0};
-inline std::atomic<u64> g_memo_misses{0};
-inline std::atomic<u64> g_memo_mismatches{0};
-inline std::atomic<u64> g_dynamic_skips{0};
-inline std::atomic<u64> g_dynamic_updates{0};
-
-/// For counters one thread writes: a plain load and store, not a locked add.
-inline void Count(std::atomic<u64>& counter) {
-    counter.store(counter.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
-}
 
 [[nodiscard]] inline bool On(Switch which) {
     return (g_on.load(std::memory_order_relaxed) & which) != 0;
@@ -95,20 +73,6 @@ inline void Refresh() {
         if (skips != 0 || misses != 0) {
             LOG_INFO(HW_GPU, "EXPERIMENT entry-wait-skip: {} writer waits skipped in 10 s, {} missed GPU writes in total",
                      skips, misses);
-        }
-        const u64 hits = g_memo_hits.exchange(0, std::memory_order_relaxed);
-        const u64 memo_misses = g_memo_misses.exchange(0, std::memory_order_relaxed);
-        if (hits != 0 || memo_misses != 0) {
-            LOG_INFO(HW_GPU,
-                     "EXPERIMENT texture-memo: {} draws resolved from the memo, {} in full in 10 s; "
-                     "{} verify mismatches in total",
-                     hits, memo_misses, g_memo_mismatches.load(std::memory_order_relaxed));
-        }
-        const u64 dynamic_skips = g_dynamic_skips.exchange(0, std::memory_order_relaxed);
-        const u64 dynamic_updates = g_dynamic_updates.exchange(0, std::memory_order_relaxed);
-        if (dynamic_skips != 0 || dynamic_updates != 0) {
-            LOG_INFO(HW_GPU, "EXPERIMENT dynamic-state-skip: {} draws skipped, {} updated in 10 s",
-                     dynamic_skips, dynamic_updates);
         }
     }
 }

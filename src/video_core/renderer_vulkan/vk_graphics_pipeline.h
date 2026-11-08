@@ -277,9 +277,8 @@ public:
         return build->Failed();
     }
 
-    /// EDEN_NX2_FAST_DRAW=2 (nx2_fast_draw.h): whether draws can keep this pipeline's resolved
-    /// image views and samplers after light changes. Handles computed at draw time are resolved
-    /// on every draw.
+    /// Fast draw (nx2_fast_draw.h): whether draws can keep the image views and samplers the last
+    /// captured Configure resolved. Handles computed at draw time are resolved on every draw.
     [[nodiscard]] bool TakesDeltaDraws() const noexcept {
         return delta_blocker == DeltaBlocker::None && delta_views_valid;
     }
@@ -304,16 +303,17 @@ public:
         return handle_constant_buffers;
     }
 
-    enum class DeltaResult { Configured, Failed, NeedsFull };
-    /// Binds the constant and storage buffers again (storage buffer addresses are read from
-    /// constant buffers) and records the draw's descriptors with the image views, samplers and
-    /// texture buffers the last full Configure resolved.
-    DeltaResult ConfigureDelta();
+    /// Resolves and binds every buffer as Configure does (storage buffer addresses are read from
+    /// the constant buffers again) and records the draw's descriptors with the image views,
+    /// samplers and texture buffers the last captured Configure resolved. False when the draw
+    /// can't be recorded, as for Configure.
+    bool ConfigureDelta(bool is_indexed);
 
-    /// EDEN_NX2_FAST_DRAW_VERIFY: the next Configure compares what it resolves with the views
-    /// and samplers a delta draw would have kept; DeltaMismatch reports the result.
-    void VerifyNextDelta() noexcept {
-        verify_delta = true;
+    /// The next Configure keeps the views and samplers it resolves for delta draws. With
+    /// `verify`, it first compares them with the ones kept before; DeltaMismatch reports it.
+    void CaptureNextDelta(bool verify) noexcept {
+        capture_delta = true;
+        verify_delta = verify;
     }
     [[nodiscard]] bool DeltaMismatch() const noexcept {
         return delta_mismatch;
@@ -374,6 +374,7 @@ private:
 
     DeltaBlocker delta_blocker{};
     bool delta_views_valid{};
+    bool capture_delta{};
     bool verify_delta{};
     bool delta_mismatch{};
     std::array<bool, NUM_STAGES> configured_stages{};
