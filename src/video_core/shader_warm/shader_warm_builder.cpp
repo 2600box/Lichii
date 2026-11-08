@@ -44,6 +44,7 @@ constexpr std::string_view StageConverting = "Converting";
 constexpr std::string_view StageWriting = "Writing";
 /// Conversions in flight (each holds a copy of its program).
 constexpr size_t MaxPendingJobs = 2048;
+constexpr u32 PrecachedPipelinesMagic = 0x31504750; // "PGP1"
 
 fs::path TitleDir(u64 title_id) {
     return Common::FS::GetEdenPath(Common::FS::EdenPath::ShaderDir) /
@@ -381,12 +382,56 @@ bool TakeSkipWarm() {
     return skip_warm.exchange(false, std::memory_order_relaxed);
 }
 
+fs::path PrecachedPipelinesPath(u64 title_id) {
+    return TitleDir(title_id) / "precache-graphics.bin";
+}
+
+std::unordered_set<u64> ReadPrecachedPipelines(const fs::path& file, const DriverStamp& stamp) {
+    std::unordered_set<u64> hashes;
+    std::ifstream in(file, std::ios::binary);
+    u32 magic{};
+    DriverStamp saved;
+    u64 count{};
+    if (!in.read(reinterpret_cast<char*>(&magic), sizeof(magic)) ||
+        magic != PrecachedPipelinesMagic ||
+        !in.read(reinterpret_cast<char*>(&saved.driver), sizeof(saved.driver)) ||
+        !in.read(reinterpret_cast<char*>(&saved.device_id), sizeof(saved.device_id)) ||
+        !in.read(reinterpret_cast<char*>(&saved.cache_version), sizeof(saved.cache_version)) ||
+        !in.read(reinterpret_cast<char*>(&count), sizeof(count)) || saved != stamp) {
+        return hashes;
+    }
+    for (u64 i = 0; i < count; ++i) {
+        u64 hash{};
+        if (!in.read(reinterpret_cast<char*>(&hash), sizeof(hash))) {
+            break;
+        }
+        hashes.insert(hash);
+    }
+    return hashes;
+}
+
+bool WritePrecachedPipelines(const fs::path& file, const DriverStamp& stamp,
+                             const std::unordered_set<u64>& hashes) {
+    std::ofstream out(file, std::ios::binary | std::ios::trunc);
+    Write(out, PrecachedPipelinesMagic);
+    Write(out, stamp.driver);
+    Write(out, stamp.device_id);
+    Write(out, stamp.cache_version);
+    Write(out, static_cast<u64>(hashes.size()));
+    for (const u64 hash : hashes) {
+        Write(out, hash);
+    }
+    out.close();
+    return static_cast<bool>(out);
+}
+
 bool DeleteWarmFiles(u64 title_id, std::string* error) {
     const auto warm = ComputeWarmPath(title_id);
     fs::path tmp = warm;
     tmp += ".tmp";
     bool ok = true;
-    for (const auto& path : {warm, WarmMarkerPath(warm), WarmCountPath(warm), tmp}) {
+    for (const auto& path :
+         {warm, WarmMarkerPath(warm), WarmCountPath(warm), tmp, PrecachedPipelinesPath(title_id)}) {
         std::error_code ec;
         fs::remove(path, ec);
         if (ec) {
@@ -475,9 +520,9 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
             LOG_WARNING(Render_Vulkan, "Shader precache: zstd dictionary pack: {}", e.what());
         }
     }
-    if (archives.empty()) {
-        return fail("No shader archives found in the game files");
-    }
+    // Without archives the file is written empty: the precache then has only the pipeline cache
+    // of earlier sessions to build.
+    result.archives = archives.size();
     LOG_INFO(Render_Vulkan, "Shader precache build: {} archives, {} zstd dictionaries",
              archives.size(), dictionaries.Count());
 

@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <unordered_set>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -90,6 +91,24 @@ TEST_CASE("ShaderPrecache: the marker matches only the same file and driver", "[
 
     WriteBytes(warm, "a rebuilt precache");
     REQUIRE_FALSE(marker->Matches(*ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53)));
+}
+
+TEST_CASE("ShaderPrecache: precached pipelines are kept per driver", "[video_core]") {
+    TempDir dir;
+    const auto file = dir.path / "precache-graphics.bin";
+    const ShaderWarm::DriverStamp stamp{0x1234, 0x2206, 53};
+    REQUIRE(ShaderWarm::ReadPrecachedPipelines(file, stamp).empty());
+
+    const std::unordered_set<u64> hashes{1, 0xfedcba9876543210ULL, 42};
+    REQUIRE(ShaderWarm::WritePrecachedPipelines(file, stamp, hashes));
+    REQUIRE(ShaderWarm::ReadPrecachedPipelines(file, stamp) == hashes);
+    REQUIRE(ShaderWarm::ReadPrecachedPipelines(file, {0x1235, 0x2206, 53}).empty());
+    REQUIRE(ShaderWarm::ReadPrecachedPipelines(file, {0x1234, 0x2207, 53}).empty());
+    REQUIRE(ShaderWarm::ReadPrecachedPipelines(file, {0x1234, 0x2206, 54}).empty());
+
+    // A truncated file keeps the hashes it holds in full.
+    std::filesystem::resize_file(file, std::filesystem::file_size(file) - 4);
+    REQUIRE(ShaderWarm::ReadPrecachedPipelines(file, stamp).size() == 2);
 }
 
 TEST_CASE("ShaderPrecache: the entry count belongs to a file of one size", "[video_core]") {
