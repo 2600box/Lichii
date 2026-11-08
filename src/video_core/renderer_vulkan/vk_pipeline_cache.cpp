@@ -1341,7 +1341,7 @@ void PipelineCache::PrecacheComputeShaders(u64 title_id, std::stop_token stop_lo
                 break;
             }
             Entry entry;
-            entry.env.Deserialize(file);
+            entry.env.Deserialize(file, end);
             if (entry.env.ShaderStage() != Shader::Stage::Compute) {
                 LOG_WARNING(Render_Vulkan, "Shader precache: non-compute entry in {}", path);
                 break;
