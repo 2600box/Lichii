@@ -793,6 +793,18 @@ AppLoader::LoadResult AppLoader_NX::Load(Kernel::KProcess& process, Core::System
     if (impl->status != ResultStatus::Success) {
         return {impl->status, {}};
     }
+    const auto& owner = impl->Archive().applications()[impl->app];
+    u32 extracted_addons = 0;
+    for (u32 si = owner.first_snapshot; si < owner.first_snapshot + owner.snapshot_count; ++si) {
+        const auto& s = impl->Archive().snapshots()[si];
+        extracted_addons += s.type == AddOn && s.addon_title_id().has_value();
+    }
+    if (extracted_addons > 0) {
+        LOG_WARNING(Loader,
+                    "NX archive has {} extracted add-on content snapshot(s); AoC mounting is not "
+                    "supported yet",
+                    extracted_addons);
+    }
     if (!impl->tree) {
         // The frontend owns this provider; the game list fills it the same way.
         if (const auto* slot = system.GetContentProviderUnion().GetSlotProvider(
