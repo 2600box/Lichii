@@ -51,6 +51,7 @@
 #include "video_core/renderer_vulkan/vk_cooperative_hmma_test.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+#include "video_core/renderer_vulkan/vk_pipeline_library.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
@@ -1320,10 +1321,13 @@ size_t WarmThreads(bool before_start) {
 bool ComputeNoInline();
 
 /// The "already warmed" marker: warm file size and last-write time, entry count, GPU driver
-/// version and device ID, pipeline cache version, and whether shared shader functions were built
+/// version and device ID, pipeline cache version, whether shared shader functions were built
 /// as calls (compute bit 0, graphics bit 1: the SPIR-V the driver compiled differs between the
-/// two). Next to the warm file, or in the title's shader folder when that folder is not writable.
-/// Markers written before the last field existed no longer match, so that warm-up runs once more.
+/// two), and the graphics link mode (bit 0 fast links usable, bit 1 optimized links on: together
+/// they decide whether libraries keep link time optimization info, which changes what the driver
+/// caches). Next to the warm file, or in the title's shader folder when that folder is not
+/// writable. Markers written before the last field existed no longer match, so that warm-up runs
+/// once more.
 struct WarmStamp {
     u64 size{};
     s64 write_time{};
@@ -1332,6 +1336,7 @@ struct WarmStamp {
     u32 device_id{};
     u32 cache_version{};
     u32 no_inline{};
+    u32 link_mode{};
 };
 
 /// The marker values for `file` on this device, empty when the file's size or time cannot be read.
@@ -1347,13 +1352,16 @@ std::optional<WarmStamp> CurrentStamp(const std::filesystem::path& file, const D
         return std::nullopt;
     }
     const u32 no_inline = (ComputeNoInline() ? 1U : 0U) | (GraphicsNoInline() ? 2U : 0U);
+    const u32 link_mode =
+        (device.CanFastLinkGraphicsLibraries() ? 1U : 0U) | (GplOptimizeEnabled() ? 2U : 0U);
     return WarmStamp{size,
                      static_cast<s64>(time.time_since_epoch().count()),
                      entries,
                      device.GetDriverVersion(),
                      device.GetDeviceID(),
                      CACHE_VERSION,
-                     no_inline};
+                     no_inline,
+                     link_mode};
 }
 
 std::array<std::filesystem::path, 2> MarkerPaths(const std::filesystem::path& file,
@@ -1373,11 +1381,11 @@ bool WarmAlreadyDone(const std::filesystem::path& file, const std::filesystem::p
         std::ifstream in(marker);
         WarmStamp saved;
         if (in >> saved.size >> saved.write_time >> saved.entries >> saved.driver >>
-            saved.device_id >> saved.cache_version >> saved.no_inline) {
+            saved.device_id >> saved.cache_version >> saved.no_inline >> saved.link_mode) {
             if (saved.size == stamp->size && saved.write_time == stamp->write_time &&
                 saved.driver == stamp->driver && saved.device_id == stamp->device_id &&
                 saved.cache_version == stamp->cache_version &&
-                saved.no_inline == stamp->no_inline) {
+                saved.no_inline == stamp->no_inline && saved.link_mode == stamp->link_mode) {
                 return true;
             }
         }
@@ -1399,7 +1407,7 @@ void WriteWarmMarker(const std::filesystem::path& file, const std::filesystem::p
         std::ofstream out(marker, std::ios::trunc);
         out << stamp->size << ' ' << stamp->write_time << ' ' << stamp->entries << ' '
             << stamp->driver << ' ' << stamp->device_id << ' ' << stamp->cache_version << ' '
-            << stamp->no_inline << '\n';
+            << stamp->no_inline << ' ' << stamp->link_mode << '\n';
         out.close();
         if (out) {
             return;
