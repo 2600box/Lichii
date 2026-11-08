@@ -17,6 +17,7 @@
 
 #include "common/common_types.h"
 #include "video_core/engines/engine_interface.h"
+#include "video_core/nx2_experiment.h"
 
 namespace Core {
 class System;
@@ -134,10 +135,14 @@ public:
     /// A write made by a macro: CallMethod without the method sink, as the engines' macros do.
     void MacroWrite(Tegra::Engines::EngineInterface* engine, u32 method, u32 argument) {
         SelectEngine(engine);
-        u64* const entry = Reserve(1);
-        entry[0] = static_cast<u64>(Kind::Method) | IsLast | Direct | (u64{method & 0xffff} << 8) |
-                   (u64{argument} << 32);
-        Commit(1);
+        if (Nx2Experiment::On(Nx2Experiment::MacroRingRun)) {
+            AppendRunWrite((u64{method & 0xffff} << 8) | (u64{argument} << 32));
+        } else {
+            u64* const entry = Reserve(1);
+            entry[0] = static_cast<u64>(Kind::Method) | IsLast | Direct |
+                       (u64{method & 0xffff} << 8) | (u64{argument} << 32);
+            Commit(1);
+        }
         if (engine->memory_write_mask[method]) {
             last_memory_write_position = write_position;
         }
@@ -316,7 +321,9 @@ private:
         Method, ///< Bits 8-23 method, 32-63 argument; flags IsLast, HasSegment (word 1)
         Multi,  ///< Bits 8-23 method, 32-63 amount; word 1 methods pending, [segment], words
         Call,   ///< Bits 8-31 payload size in words; word 1 thunk, then the payload
+        Run,    ///< Bits 8-31 count; then count macro writes (bits 8-23 method, 32-63 argument)
     };
+    static constexpr u64 MaxRunWrites = (u64{1} << 24) - 1;
     static constexpr u64 IsLast = 1 << 4;
     static constexpr u64 HasSegment = 1 << 5;
     static constexpr u64 Direct = 1 << 6; ///< Method: call it even if not executable (macros)
@@ -357,6 +364,37 @@ private:
         return ReserveSlow(words);
     }
     u64* ReserveSlow(size_t words);
+    /// EXPERIMENT (macro-ring-run): consecutive macro writes to one engine go into one Run entry
+    /// (the back loops over them instead of dispatching an entry per write: ~2.5 million writes a
+    /// second in DK Bananza).
+    void AppendRunWrite(u64 word) {
+        Nx2Experiment::Count(Nx2Experiment::g_ring_run_writes);
+        if (open_run != nullptr && open_run_end == write_position &&
+            ((open_run[0] >> 8) & 0xffffff) < MaxRunWrites) {
+            u64* const next = Reserve(1);
+            // Reserve may have wrapped or published (closing the run): append only right after
+            // the run's last word.
+            if (open_run != nullptr && next == open_run + 1 + ((open_run[0] >> 8) & 0xffffff)) {
+                *next = word;
+                open_run[0] += u64{1} << 8;
+                Commit(1);
+                if (open_run != nullptr) {
+                    open_run_end = write_position;
+                }
+                return;
+            }
+            open_run = nullptr;
+        }
+        Nx2Experiment::Count(Nx2Experiment::g_ring_runs);
+        u64* const entry = Reserve(2);
+        entry[0] = static_cast<u64>(Kind::Run) | (u64{1} << 8);
+        entry[1] = word;
+        open_run = entry;
+        Commit(2);
+        if (open_run != nullptr) {
+            open_run_end = write_position;
+        }
+    }
     void Commit(size_t words) {
         write_position += words;
         if (write_position - published_local >= publish_every) {
@@ -386,14 +424,18 @@ private:
     /// Runs the entry at `entry` (of the `words` published before the ring's end), returns its size.
     size_t Execute(const u64* entry, size_t words);
 
+    // Read by both threads, written only while the split starts and stops. Apart from the front's
+    // fields: it writes those for every entry, and the back reads these for every entry.
     Core::System* system{};
     bool active{};
     u32 starts{};
     bool front_macros{};
     std::unique_ptr<u64[]> ring;
+    void (*idle_hook)(void*){};
+    void* idle_argument{};
 
     // Front side.
-    u64 write_position{};
+    alignas(128) u64 write_position{};
     u64 last_writer_position{};
     static constexpr u32 PendingWriteWords = 8;
     struct PendingWrite {
@@ -421,9 +463,12 @@ private:
     /// Words between publishes: small right after a drain, while the back has nothing to do.
     size_t publish_every{PublishEvery};
     Tegra::Engines::EngineInterface* front_engine{};
+    /// The Run entry MacroWrite appends to (unpublished, nothing written after it), or null.
+    u64* open_run{};
+    u64 open_run_end{};
 
     // Back side.
-    Tegra::Engines::EngineInterface* back_engine{};
+    alignas(128) Tegra::Engines::EngineInterface* back_engine{};
 
     /// Whether the back is done with the Vulkan scheduler until it gets more work: set after its
     /// idle hook ran, cleared before it executes entries.
@@ -435,9 +480,7 @@ private:
     static GpuSplit instance;
     static inline thread_local bool on_back_thread{};
     static inline thread_local bool on_gpu_thread{};
-    void (*idle_hook)(void*){};
-    void* idle_argument{};
-    alignas(64) std::atomic<bool> hook_requested{};
+    alignas(128) std::atomic<bool> hook_requested{};
     std::atomic<bool> back_running{};
     std::atomic<bool> back_quiet{true};
 

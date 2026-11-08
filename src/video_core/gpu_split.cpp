@@ -140,6 +140,7 @@ void GpuSplit::Stop() {
     // wrap at a time and never reached the old write position (the next game's first GPU work
     // never ran, it waited on its syncpoint forever), and the engines it held were freed.
     ring.reset();
+    open_run = nullptr;
     write_position = 0;
     last_writer_position = 0;
     pending_write_count = 0;
@@ -196,6 +197,8 @@ void GpuSplit::WaitForSpace(size_t words) {
 }
 
 void GpuSplit::Publish() {
+    // The back may read anything published: no more appends to the open run.
+    open_run = nullptr;
     if (published_local == write_position) {
         return;
     }
@@ -525,6 +528,58 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
         engine->CallMultiMethod(*system, method, reinterpret_cast<const u32*>(entry + data),
                                 amount, static_cast<u32>(entry[1]));
         return data + (amount + 1) / 2;
+    }
+    case Kind::Run: {
+        const size_t count = static_cast<size_t>((head >> 8) & 0xffffff);
+        const u64* const writes = entry + 1;
+        auto* const engine = back_engine;
+        if (engine->fast_maxwell3d) {
+            // As the Direct Method entries above, constant buffer words in a row included. Only
+            // Method entries feed the sink: one check covers the run.
+            engine->ConsumeSink(*system);
+            using Tegra::Engines::Maxwell3D;
+            auto* const maxwell3d = static_cast<Maxwell3D*>(engine);
+            constexpr u32 cb_data = MAXWELL3D_REG_INDEX(const_buffer.buffer);
+            for (size_t i = 0; i < count;) {
+                const u32 method = static_cast<u32>((writes[i] >> 8) & 0xffff);
+                const u32 argument = static_cast<u32>(writes[i] >> 32);
+                if (method - cb_data >= 16) {
+                    maxwell3d->CallMethod(*system, method, argument, true);
+                    ++i;
+                    continue;
+                }
+                std::array<u32, 64> methods;
+                std::array<u32, 64> arguments;
+                u32 words_in_row = 0;
+                while (words_in_row < methods.size() && i < count) {
+                    const u32 next_method = static_cast<u32>((writes[i] >> 8) & 0xffff);
+                    if (next_method - cb_data >= 16) {
+                        break;
+                    }
+                    methods[words_in_row] = next_method;
+                    arguments[words_in_row] = static_cast<u32>(writes[i] >> 32);
+                    ++words_in_row;
+                    ++i;
+                }
+                if (words_in_row == 1) {
+                    maxwell3d->CallMethod(*system, method, argument, true);
+                } else {
+                    maxwell3d->CallConstBufferWords(*system, methods.data(), arguments.data(),
+                                                    words_in_row);
+                }
+            }
+            return 1 + count;
+        }
+        Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
+        for (size_t i = 0; i < count; ++i) {
+            if (!engine->reports_fast_draw_breaks) {
+                Nx2FastDraw::Break(Nx2FastDraw::Reason::OtherEngine);
+            }
+            engine->ConsumeSink(*system);
+            engine->CallMethod(*system, static_cast<u32>((writes[i] >> 8) & 0xffff),
+                               static_cast<u32>(writes[i] >> 32), true);
+        }
+        return 1 + count;
     }
     case Kind::Call: {
         if ((head & FastDrawNeutral) == 0) {

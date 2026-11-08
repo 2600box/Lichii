@@ -39,9 +39,10 @@ enum Switch : u32 {
     AcquireMetSkip = 262144, ///< acquire-met-skip: met GEQUAL acquires skip the drain (fb4d4e47a7)
     DmaReadKnown = 524288,   ///< dma-read-known: macro reads of report memory skip the drain (#243)
     WriterWaitSynced = 1048576, ///< writer-wait-synced: lists wait for writers up to the last sync
+    MacroRingRun = 131072,  ///< macro-ring-run: macro writes share one split ring entry (ab22f858eb)
 };
 
-inline constexpr std::array<std::pair<Switch, const char*>, 20> switch_files{{
+inline constexpr std::array<std::pair<Switch, const char*>, 21> switch_files{{
     {BackPicksOff, "back-perf-off"},
     {EntryWaitSkip, "entry-wait-skip"},
     {UboInPlace, "ubo-inplace"},
@@ -62,6 +63,7 @@ inline constexpr std::array<std::pair<Switch, const char*>, 20> switch_files{{
     {AcquireMetSkip, "acquire-met-skip"},
     {DmaReadKnown, "dma-read-known"},
     {WriterWaitSynced, "writer-wait-synced"},
+    {MacroRingRun, "macro-ring-run"},
 }};
 
 inline std::atomic<u32> g_on{0};
@@ -75,6 +77,8 @@ inline std::atomic<u64> g_memo_misses{0};
 inline std::atomic<u64> g_memo_mismatches{0};
 inline std::atomic<u64> g_dynamic_skips{0};
 inline std::atomic<u64> g_dynamic_updates{0};
+inline std::atomic<u64> g_ring_runs{0};
+inline std::atomic<u64> g_ring_run_writes{0};
 inline std::atomic<u64> g_reset_calls{0};
 inline std::atomic<u64> g_reset_records{0};
 inline std::atomic<u64> g_reset_ns{0};
@@ -189,6 +193,12 @@ inline void Refresh() {
         if (const u64 shortened = g_writer_waits_shortened.exchange(0, std::memory_order_relaxed);
             shortened != 0) {
             LOG_INFO(HW_GPU, "EXPERIMENT writer-wait-synced: {} waits shortened in 10 s", shortened);
+        }
+        const u64 runs = g_ring_runs.exchange(0, std::memory_order_relaxed);
+        const u64 run_writes = g_ring_run_writes.exchange(0, std::memory_order_relaxed);
+        if (runs != 0 || run_writes != 0) {
+            LOG_INFO(HW_GPU, "EXPERIMENT macro-ring-run: {} run entries carrying {} writes in 10 s",
+                     runs, run_writes);
         }
     }
 }
