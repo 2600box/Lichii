@@ -742,3 +742,49 @@ TEST_CASE("DeviceMemoryManager: UpdatePagesCachedBatch basic") {
     manager.UpdatePagesCachedBatch(ranges, 1);
     SUCCEED("UpdatePagesCachedBatch executed without error");
 }
+
+TEST_CASE("MemoryTracker: synchronized watches beyond the geometry slots", "[video_core]") {
+    RasterizerInterface rasterizer;
+    std::optional<MemoryTracker> memory_track(rasterizer);
+    memory_track->UnmarkRegionAsCpuModified(c, WORD * 8);
+    constexpr u32 geometry = 3;
+    constexpr u32 binding = 64 + 200;
+    constexpr u32 last = MemoryTracker::NUM_SYNCHRONIZED_SLOTS - 1;
+    memory_track->WatchSynchronized(geometry, c, PAGE);
+    memory_track->WatchSynchronized(binding, c + WORD * 4, PAGE * 3);
+    memory_track->WatchSynchronized(last, c + WORD * 6, PAGE);
+    REQUIRE(memory_track->IsSynchronized(geometry));
+    REQUIRE(memory_track->IsSynchronized(binding));
+    REQUIRE(memory_track->IsSynchronized(last));
+    REQUIRE(!memory_track->IsSynchronized(binding + 1));
+
+    // In another page: no watch forgets.
+    memory_track->MarkRegionAsCpuModified(c + WORD * 2, 4);
+    REQUIRE(memory_track->IsSynchronized(geometry));
+    REQUIRE(memory_track->IsSynchronized(binding));
+    REQUIRE(memory_track->IsSynchronized(last));
+
+    // 512 MiB away: the same 1 MiB region bin, but not the range.
+    memory_track->MarkRegionAsCpuModified(c + WORD * 4 + (u64{512} << 20), 4);
+    REQUIRE(memory_track->IsSynchronized(binding));
+
+    // On one of the binding range's pages (the tracker marks whole pages).
+    memory_track->MarkRegionAsCpuModified(c + WORD * 4 + PAGE * 2 + 100, 1);
+    REQUIRE(!memory_track->IsSynchronized(binding));
+    REQUIRE(memory_track->IsSynchronized(geometry));
+    REQUIRE(memory_track->IsSynchronized(last));
+
+    // A cached write forgets too, and so does flushing cached writes, every watch.
+    memory_track->WatchSynchronized(binding, c + WORD * 4, PAGE * 3);
+    memory_track->CachedCpuWrite(c + WORD * 6, 8);
+    REQUIRE(!memory_track->IsSynchronized(last));
+    REQUIRE(memory_track->IsSynchronized(binding));
+    memory_track->FlushCachedWrites();
+    REQUIRE(!memory_track->IsSynchronized(geometry));
+    REQUIRE(!memory_track->IsSynchronized(binding));
+
+    // Watches after the bins were cleared still forget.
+    memory_track->WatchSynchronized(binding, c + WORD * 5, PAGE);
+    memory_track->MarkRegionAsCpuModified(c + WORD * 5, PAGE);
+    REQUIRE(!memory_track->IsSynchronized(binding));
+}

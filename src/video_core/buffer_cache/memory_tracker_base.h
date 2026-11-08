@@ -127,7 +127,7 @@ public:
 
     /// Flushes cached CPU writes, and notify the device_tracker about the deltas
     void FlushCachedWrites(VAddr query_cpu_addr, u64 query_size) noexcept {
-        synchronized_mask = 0;
+        ForgetAllSynchronized();
         IteratePages<false>(query_cpu_addr, query_size, [](Manager* manager, [[maybe_unused]] u64 offset, [[maybe_unused]] size_t size) {
             manager->FlushCachedWrites();
         });
@@ -135,7 +135,7 @@ public:
 
     void FlushCachedWrites() noexcept {
         if (!cached_pages.empty()) {
-            synchronized_mask = 0;
+            ForgetAllSynchronized();
         }
         for (auto id : cached_pages) {
             top_tier[id]->FlushCachedWrites();
@@ -143,17 +143,28 @@ public:
         cached_pages.clear();
     }
 
+    /// Watch slots: 0-63 for the buffer cache's geometry slots, the rest for its binding table
+    /// (EGLA-66 storage-sync-skip), which only fills them with that test gate on.
+    static constexpr u32 NUM_SYNCHRONIZED_SLOTS = 320;
+
     /// A range an upload scan just cleared (BufferCache::SynchronizeGeometryBuffer). Only a CPU
     /// mark or a cached-write flush sets CPU or Untracked bits again, so until one reaches its
     /// pages another scan would find and change nothing.
     void WatchSynchronized(u32 slot, VAddr cpu_addr, u64 size) noexcept {
-        synchronized_ranges[slot] = {Common::AlignDown(cpu_addr, BYTES_PER_PAGE),
-                                     Common::AlignUp(cpu_addr + size, BYTES_PER_PAGE)};
-        synchronized_mask |= u64{1} << slot;
+        const VAddr begin = Common::AlignDown(cpu_addr, BYTES_PER_PAGE);
+        const VAddr end = Common::AlignUp(cpu_addr + size, BYTES_PER_PAGE);
+        synchronized_ranges[slot] = {begin, end};
+        synchronized_mask[slot / 64] |= u64{1} << (slot % 64);
+        if (slot >= 64) {
+            ForEachSynchronizedRegion(begin, end, [this](u32 region) {
+                synchronized_regions[region / 64] |= u64{1} << (region % 64);
+                return false;
+            });
+        }
     }
 
     [[nodiscard]] bool IsSynchronized(u32 slot) const noexcept {
-        return ((synchronized_mask >> slot) & 1) != 0;
+        return ((synchronized_mask[slot / 64] >> (slot % 64)) & 1) != 0;
     }
 
     /// Call 'func' for each CPU modified range and unmark those pages as CPU modified
@@ -221,13 +232,61 @@ private:
     void ForgetSynchronized(VAddr cpu_addr, u64 size) noexcept {
         const VAddr write_begin = Common::AlignDown(cpu_addr, BYTES_PER_PAGE);
         const VAddr write_end = Common::AlignUp(cpu_addr + size, BYTES_PER_PAGE);
-        for (u64 mask = synchronized_mask; mask != 0; mask &= mask - 1) {
-            const u32 slot = static_cast<u32>(std::countr_zero(mask));
-            const auto [begin, end] = synchronized_ranges[slot];
-            if (write_begin < end && begin < write_end) {
-                synchronized_mask &= ~(u64{1} << slot);
+        const auto forget = [&](size_t word) {
+            for (u64 mask = synchronized_mask[word]; mask != 0; mask &= mask - 1) {
+                const u32 bit = static_cast<u32>(std::countr_zero(mask));
+                const auto [begin, end] = synchronized_ranges[word * 64 + bit];
+                if (write_begin < end && begin < write_end) {
+                    synchronized_mask[word] &= ~(u64{1} << bit);
+                }
+            }
+        };
+        forget(0);
+        // The binding slots can be many: a write outside every 1 MiB region they cover skips them.
+        u64 bindings = 0;
+        for (size_t word = 1; word < synchronized_mask.size(); ++word) {
+            bindings |= synchronized_mask[word];
+        }
+        if (bindings == 0 ||
+            !ForEachSynchronizedRegion(write_begin, write_end, [this](u32 region) {
+                return ((synchronized_regions[region / 64] >> (region % 64)) & 1) != 0;
+            })) {
+            return;
+        }
+        bindings = 0;
+        for (size_t word = 1; word < synchronized_mask.size(); ++word) {
+            forget(word);
+            bindings |= synchronized_mask[word];
+        }
+        if (bindings == 0) {
+            synchronized_regions = {};
+        }
+    }
+
+    void ForgetAllSynchronized() noexcept {
+        synchronized_mask = {};
+        synchronized_regions = {};
+    }
+
+    static constexpr u32 SYNCHRONIZED_REGION_BITS = 20;
+    static constexpr u32 NUM_SYNCHRONIZED_REGIONS = 512;
+
+    /// Calls func with each 1 MiB region (modulo NUM_SYNCHRONIZED_REGIONS) [begin, end) touches
+    /// until it returns true; returns whether it did.
+    template <typename Func>
+    static bool ForEachSynchronizedRegion(VAddr begin, VAddr end, Func&& func) {
+        if (end <= begin) {
+            return false;
+        }
+        const u64 first = begin >> SYNCHRONIZED_REGION_BITS;
+        const u64 last = (end - 1) >> SYNCHRONIZED_REGION_BITS;
+        const u64 count = (std::min<u64>)(last - first + 1, NUM_SYNCHRONIZED_REGIONS);
+        for (u64 i = 0; i < count; ++i) {
+            if (func(static_cast<u32>((first + i) % NUM_SYNCHRONIZED_REGIONS))) {
+                return true;
             }
         }
+        return false;
     }
 
     template <bool create_region_on_fail, typename Func>
@@ -328,8 +387,10 @@ private:
     std::deque<std::array<Manager, MANAGER_POOL_SIZE>> manager_pool;
     std::deque<Manager*> free_managers;
     ::Common::unordered_set<u32> cached_pages;
-    std::array<std::pair<VAddr, VAddr>, 64> synchronized_ranges{};
-    u64 synchronized_mask{};
+    std::array<std::pair<VAddr, VAddr>, NUM_SYNCHRONIZED_SLOTS> synchronized_ranges{};
+    std::array<u64, NUM_SYNCHRONIZED_SLOTS / 64> synchronized_mask{};
+    /// The 1 MiB regions the binding slots' ranges touch, set until no binding slot is watched.
+    std::array<u64, NUM_SYNCHRONIZED_REGIONS / 64> synchronized_regions{};
     DeviceTracker* device_tracker = nullptr;
 };
 

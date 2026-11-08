@@ -606,6 +606,11 @@ private:
     /// SynchronizeBuffer for vertex buffer slots 0-31 and the index buffer (slot 32).
     void SynchronizeGeometryBuffer(u32 slot, BufferId buffer_id, DAddr device_addr, u32 size);
 
+    /// SynchronizeBuffer for graphics storage buffers and classic-path uniform buffers; with
+    /// EDEN_NX2_EGLA66_STORAGE_SYNC_SKIP skipped as SynchronizeGeometryBuffer skips. Returns what
+    /// SynchronizeBuffer does (true: nothing uploaded).
+    bool SynchronizeBindingBuffer(BufferId buffer_id, DAddr device_addr, u32 size, bool storage);
+
     void UploadMemory(Buffer& buffer, u64 total_size_bytes, u64 largest_copy,
                       std::span<BufferCopy> copies);
 
@@ -685,6 +690,11 @@ private:
         u64 deletions{};
     };
     std::array<GeometrySync, NUM_VERTEX_BUFFERS + 1> geometry_syncs{};
+    /// EGLA-66 storage-sync-skip: the storage and classic uniform ranges last scanned, by a hash
+    /// of the range (SynchronizeBindingBuffer); entry i watches FIRST_BINDING_SYNC_SLOT + i.
+    static constexpr u32 FIRST_BINDING_SYNC_SLOT = 64;
+    static constexpr u32 NUM_BINDING_SYNCS = 256;
+    std::array<GeometrySync, NUM_BINDING_SYNCS> binding_syncs{};
     /// Counts DeleteBuffer calls: a buffer id older than this count may have been freed or reused.
     u64 buffer_deletions = 0;
     struct GeometryStats {
