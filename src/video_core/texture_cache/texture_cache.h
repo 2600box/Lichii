@@ -179,8 +179,6 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
             runtime.Finish();
             SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, map.mapped_span, swizzle_data_buffer);
             ++gc_download_deletes;
-            // Guest memory holds the GPU's data now (DeleteImage must not mark it stale).
-            image.flags &= ~ImageFlagBits::GpuModified;
             ClearStaleImage(image);
         } else {
             MarkStale(image); // before UntrackImage (see MarkStale)
@@ -3790,7 +3788,6 @@ template <class P>
 void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
     ImageBase& image = slot_images[image_id];
     ++images_deleted;
-    MarkStale(image);
     // Drop every decode still queued for it, whatever IsDecoding says: an image re-decoded while
     // a decode was in flight has two, and the first to finish clears the flag. A decode left
     // behind was uploaded into the next image to take this slot (another texture's data: garbage
