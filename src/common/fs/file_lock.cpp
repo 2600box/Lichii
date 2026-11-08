@@ -43,6 +43,7 @@ bool TryLock(std::intptr_t handle, bool& busy) {
     if (LockFileEx(reinterpret_cast<HANDLE>(handle),
                    LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0,
                    &overlapped) != FALSE) {
+        busy = false;
         return true;
     }
     busy = GetLastError() == ERROR_LOCK_VIOLATION;
