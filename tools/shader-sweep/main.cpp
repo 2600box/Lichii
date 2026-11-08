@@ -29,6 +29,16 @@
 #include "shader_recompiler/frontend/maxwell/structured_control_flow.h"
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/host_translate_info.h"
+#ifdef SHADER_SWEEP_V2
+#include "common/unique_function.h"
+#include "video_core/pipeline_cache_files.h"
+#include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+#include "video_core/renderer_vulkan/vk_shader_cache_v2.h"
+#include "video_core/shader_cache_v2/cache.h"
+#include "video_core/shader_cache_v2/cache_file.h"
+#include "video_core/shader_cache_v2/records.h"
+#include "video_core/shader_environment.h"
+#endif
 
 namespace {
 using Json = nlohmann::json;
@@ -743,65 +753,363 @@ std::vector<PipelineStage> CompileLegacyPipeline(std::span<OfflineEnvironment> e
     return stages;
 }
 
+struct ParsedRecord {
+    std::vector<OfflineEnvironment> envs;
+    std::vector<size_t> env_offsets; ///< From the start of the record
+    std::vector<u8> key;
+    std::array<u64, 6> hashes{};
+    bool compute{};
+};
+
 // One pipeline record as the cache stores it: environment count, environments, pipeline key.
+ParsedRecord ParseRecord(std::span<const u8> bytes, u32 version, size_t& size) {
+    Reader reader{bytes};
+    const auto offset = [&] { return bytes.size() - reader.Remaining(); };
+    const u32 count = reader.Read<u32>();
+    if (count == 0 || count > 6)
+        throw std::runtime_error("Invalid number of shader environments");
+    ParsedRecord record;
+    record.envs = std::vector<OfflineEnvironment>(count);
+    for (OfflineEnvironment& env : record.envs) {
+        record.env_offsets.push_back(offset());
+        env.Load(reader, version);
+    }
+    record.compute = record.envs.front().ShaderStage() == Stage::Compute;
+    if (record.compute ? count != 1 : std::ranges::any_of(record.envs, [](const auto& env) {
+            return env.ShaderStage() == Stage::Compute;
+        })) {
+        throw std::runtime_error("Invalid shader stages in the pipeline record");
+    }
+    record.key.resize(record.compute ? 24 : 1056);
+    reader.Copy(record.key.data(), record.key.size());
+    if (record.compute) {
+        u32 shared_memory;
+        std::array<u32, 3> workgroup;
+        std::memcpy(&shared_memory, record.key.data() + 8, sizeof(shared_memory));
+        std::memcpy(workgroup.data(), record.key.data() + 12, sizeof(workgroup));
+        if (record.envs.front().SharedMemorySize() != shared_memory ||
+            record.envs.front().WorkgroupSize() != workgroup) {
+            throw std::runtime_error("Pipeline key and shader environment disagree");
+        }
+    } else {
+        std::memcpy(record.hashes.data(), record.key.data(), sizeof(record.hashes));
+        if (static_cast<size_t>(
+                std::ranges::count_if(record.hashes, [](u64 h) { return h != 0; })) != count) {
+            throw std::runtime_error("Pipeline key and shader environments disagree");
+        }
+    }
+    size = offset();
+    return record;
+}
+
+ParsedRecord ParseWholeRecord(std::span<const u8> bytes, u32 version) {
+    size_t size{};
+    ParsedRecord record = ParseRecord(bytes, version, size);
+    if (size != bytes.size())
+        throw std::runtime_error("Trailing bytes after pipeline record");
+    return record;
+}
+
+// The key a v2 log files a record under (ComputeRecordKey, GraphicsRecordKey): it leaves the
+// driver out, so it pairs a legacy record with its migrated copy. Nullopt without the v2 cache.
+std::optional<u64> RecordKey(std::span<const u8> bytes, const ParsedRecord& record) {
+#ifdef SHADER_SWEEP_V2
+    if (record.compute)
+        return Vulkan::ComputeRecordKey(bytes);
+    Vulkan::GraphicsPipelineCacheKey key;
+    static_assert(sizeof(key) == 1056);
+    std::memcpy(&key, record.key.data(), sizeof(key));
+    return Vulkan::GraphicsRecordKey(key);
+#else
+    (void)bytes;
+    (void)record;
+    return std::nullopt;
+#endif
+}
+
+Json ListEntry(const std::string& file, u64 offset, std::span<const u8> bytes, u32 version) {
+    const ParsedRecord record = ParseWholeRecord(bytes, version);
+    const auto record_key = RecordKey(bytes, record);
+    Json stages = Json::array();
+    for (size_t index = 0; index < record.envs.size(); ++index) {
+        stages.push_back({{"stage", StageNames[static_cast<u32>(record.envs[index].ShaderStage())]},
+                          {"offset", offset + record.env_offsets[index]}});
+    }
+    return {{"file", file},
+            {"offset", offset},
+            {"kind", record.compute ? "compute" : "graphics"},
+            {"record_key", record_key ? Json(fmt::format("{:016x}", *record_key)) : Json()},
+            {"stages", stages}};
+}
+
+std::vector<u8> ReadWholeFile(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file)
+        throw std::runtime_error("Cannot open " + path.string());
+    std::vector<u8> bytes(static_cast<size_t>(file.tellg()));
+    file.seekg(0);
+    if (!file.read(reinterpret_cast<char*>(bytes.data()),
+                   static_cast<std::streamsize>(bytes.size())))
+        throw std::runtime_error("Cannot read " + path.string());
+    return bytes;
+}
+
+u32 CacheFileVersion(std::span<const u8> header) {
+    static constexpr std::array<u8, 8> Magic{'y', 'u', 'z', 'u', 'c', 'a', 'c', 'h'};
+    u32 version{};
+    if (header.size() >= 12 && std::ranges::equal(header.first(8), Magic))
+        std::memcpy(&version, header.data() + 8, sizeof(version));
+    if (version < OldestCacheVersion || version > NewestCacheVersion) {
+        throw std::runtime_error(fmt::format("Not a Vulkan pipeline cache of versions {} to {}",
+                                             OldestCacheVersion, NewestCacheVersion));
+    }
+    return version;
+}
+
+// The legacy path's records: those of the cache file as they are, up to the first damaged one,
+// where the runtime stops reading.
+void ListLegacy(const std::filesystem::path& cache, const std::filesystem::path& output_dir,
+                Json& diagnostic) {
+    const auto bytes = ReadWholeFile(cache);
+    const u32 version = CacheFileVersion(bytes);
+    diagnostic["cache_version"] = version;
+    diagnostic["record_version"] = version;
+    Json records = Json::array();
+    std::span<const u8> rest = std::span{bytes}.subspan(12);
+    while (!rest.empty()) {
+        const u64 offset = bytes.size() - rest.size();
+        size_t size{};
+        try {
+            ParseRecord(rest, version, size);
+        } catch (const std::exception& error) {
+            diagnostic["damaged"] = {{"offset", offset}, {"message", error.what()}};
+            break;
+        }
+        const auto record = rest.first(size);
+        const auto name = fmt::format("{:06d}.record", records.size());
+        WriteFile(output_dir / name, std::vector<u8>(record.begin(), record.end()));
+        records.push_back(ListEntry(name, offset, record, version));
+        rest = rest.subspan(size);
+    }
+    diagnostic["records"] = records;
+}
+
+#ifdef SHADER_SWEEP_V2
+// The v2 path's records: the cache migrated by the production migration into a new log, read
+// back by the production reader. With a v2 log of Program records, native programs take the
+// code of this build's records (FindProgram, TakeProgramCode), and records of another build's
+// lowering are lowered again and their pipeline records moved to the new code, as the boot does.
+void ListV2(const std::filesystem::path& cache, const std::filesystem::path& programs_log,
+            const std::filesystem::path& output_dir, Json& diagnostic) {
+    namespace V2 = VideoCommon::ShaderCacheV2;
+    std::array<u8, 12> header{};
+    {
+        std::ifstream file(cache, std::ios::binary);
+        if (!file || !file.read(reinterpret_cast<char*>(header.data()), header.size()))
+            throw std::runtime_error("Cannot read " + cache.string());
+    }
+    const u32 version = CacheFileVersion(header);
+    diagnostic["cache_version"] = version;
+    // Migrated records keep their bytes, so they are read in the source version's layout
+    diagnostic["record_version"] = version;
+    const auto work = output_dir / "migration";
+    std::filesystem::create_directories(work);
+    std::filesystem::copy_file(cache,
+                               VideoCommon::VersionedPipelineCachePath(work, "vulkan", version),
+                               std::filesystem::copy_options::overwrite_existing);
+    const auto log = work / V2::FileName;
+    std::filesystem::remove(log);
+    const auto migration = Vulkan::MigrateLegacyPipelineCache(work, log, 16);
+    if (!migration.version) {
+        throw std::runtime_error(
+            migration.failed
+                ? "The migration couldn't write the v2 log"
+                : fmt::format("The v2 cache doesn't migrate version {} caches", version));
+    }
+    diagnostic["migration"] = {{"source_version", *migration.version},
+                               {"graphics", migration.graphics},
+                               {"compute", migration.compute},
+                               {"collapsed", migration.collapsed}};
+    V2::LogFile file = V2::ReadLogFile(log);
+    const V2::LogStats& stats = file.parsed.stats;
+    diagnostic["log"] = {{"records", stats.records},
+                         {"live", stats.live},
+                         {"bad_headers", stats.bad_headers},
+                         {"bad_payloads", stats.bad_payloads},
+                         {"torn_tail_bytes", stats.torn_tail_bytes}};
+
+    // As the boot does: programs of this build's lowering are found (LoadPrograms, FindProgram),
+    // those of another build's are lowered again (RelowerProgramRecord). Every program found or
+    // lowered to other code replaces the code of the pipeline records using it.
+    Vulkan::RelinkedPrograms programs;
+    u64 program_records{}, hits{}, relowered_count{}, unusable{};
+    if (!programs_log.empty()) {
+        const V2::LogFile program_file = V2::ReadLogFile(programs_log);
+        V2::Cache program_cache{work / "programs.v2.bin"};
+        program_cache.LoadPrograms(program_file.parsed.live);
+        for (const V2::LogRecord& entry : program_file.parsed.live) {
+            if (entry.kind != V2::RecordKind::Program)
+                continue;
+            ++program_records;
+            const std::optional<V2::ProgramRecord> record = V2::DecodeProgram(entry.payload);
+            if (!record) {
+                ++unusable;
+                continue;
+            }
+            const V2::FoundProgram found =
+                program_cache.FindProgram(V2::ProgramKeyInputsOf(*record));
+            if (found.lookup == V2::ProgramLookup::Hit) {
+                ++hits;
+                V2::ProgramRecord taken = *record;
+                taken.lowered_code = found.code->code;
+                taken.texture_bound = found.code->texture_bound;
+                programs.insert_or_assign(record->unique_hash,
+                                          Vulkan::RelinkedProgram{record->unique_hash,
+                                                                  record->texture_bound,
+                                                                  std::move(taken)});
+                continue;
+            }
+            std::optional<V2::ProgramRecord> relowered;
+            if (record->lowering_stamp != V2::LoweringStamp()) {
+                try {
+                    relowered = V2::RelowerProgramRecord(*record);
+                } catch (const std::exception&) {
+                }
+            }
+            if (!relowered) {
+                ++unusable;
+                continue;
+            }
+            ++relowered_count;
+            if (relowered->unique_hash != record->unique_hash) {
+                programs.insert_or_assign(record->unique_hash,
+                                          Vulkan::RelinkedProgram{record->unique_hash,
+                                                                  record->texture_bound,
+                                                                  std::move(*relowered)});
+            }
+        }
+    }
+
+    Json records = Json::array();
+    u64 relinked{};
+    for (const V2::LogRecord& entry : file.parsed.live) {
+        if (entry.kind != V2::RecordKind::Graphics && entry.kind != V2::RecordKind::Compute)
+            continue;
+        std::vector<u8> payload(entry.payload.begin(), entry.payload.end());
+        bool rekeyed_record{};
+        if (!programs.empty()) {
+            try {
+                if (auto rekeyed =
+                        Vulkan::RekeyPipelineRecord(entry.kind, entry.payload, programs)) {
+                    payload = std::move(rekeyed->payload);
+                    rekeyed_record = true;
+                    ++relinked;
+                }
+            } catch (const std::ios_base::failure&) {
+                // Compiling it reports the damage
+            }
+        }
+        const auto name = fmt::format("{:06d}.record", records.size());
+        WriteFile(output_dir / name, payload);
+        Json listed;
+        try {
+            listed = ListEntry(name, entry.offset + V2::RecordHeaderSize, payload, version);
+        } catch (const std::exception& error) {
+            listed = {{"file", name},
+                      {"offset", entry.offset},
+                      {"stages", Json::array()},
+                      {"error", error.what()}};
+        }
+        listed["kind"] = entry.kind == V2::RecordKind::Compute ? "compute" : "graphics";
+        // The key the migration filed it under, which the legacy record has too
+        listed["record_key"] = fmt::format("{:016x}", entry.key);
+        listed["relinked"] = rekeyed_record;
+        records.push_back(std::move(listed));
+    }
+    diagnostic["programs"] = {{"records", program_records},
+                              {"hits", hits},
+                              {"relowered", relowered_count},
+                              {"unusable", unusable},
+                              {"relinked_records", relinked}};
+    diagnostic["records"] = records;
+}
+
+// What the v2 boot does with a record before building it: the production reader's checks.
+void CheckV2Payload(std::span<const u8> payload) {
+    Common::UniqueFunction<void, std::istream&, VideoCommon::FileEnvironment> read_compute{
+        [](std::istream& file, VideoCommon::FileEnvironment env) {
+            Vulkan::ComputePipelineCacheKey key;
+            file.read(reinterpret_cast<char*>(&key), sizeof(key));
+            VideoCommon::CheckComputeRecord(env, key.shared_memory_size, key.workgroup_size);
+        }};
+    Common::UniqueFunction<void, std::istream&, std::vector<VideoCommon::FileEnvironment>>
+        read_graphics{[](std::istream& file, std::vector<VideoCommon::FileEnvironment> envs) {
+            Vulkan::GraphicsPipelineCacheKey key;
+            file.read(reinterpret_cast<char*>(&key), sizeof(key));
+            VideoCommon::CheckGraphicsRecord(key.unique_hashes, envs.size());
+        }};
+    try {
+        VideoCommon::ReadPipelinePayload(payload, read_compute, read_graphics);
+    } catch (const std::ios_base::failure& error) {
+        throw std::runtime_error(fmt::format("The v2 reader rejects the record: {}", error.what()));
+    }
+}
+#endif
+
+int RunList(const std::filesystem::path& cache, const std::string& path_name,
+            const std::filesystem::path& programs_log, const std::filesystem::path& output_dir,
+            Json& diagnostic) {
+    diagnostic["input_format"] = "cache";
+    diagnostic["path"] = path_name;
+    std::filesystem::create_directories(output_dir);
+    if (path_name == "legacy") {
+        ListLegacy(cache, output_dir, diagnostic);
+    } else {
+#ifdef SHADER_SWEEP_V2
+        ListV2(cache, programs_log, output_dir, diagnostic);
+#endif
+    }
+    diagnostic["status"] = "ok";
+    diagnostic["phase"] = "output";
+    std::cout << diagnostic.dump() << '\n';
+    return 0;
+}
+
 int RunPipeline(const std::string& record_path, u32 version, const std::string& path_name,
                 const std::filesystem::path& output_dir, Json& diagnostic) {
     diagnostic["input_format"] = "pipeline";
     diagnostic["path"] = path_name;
     const auto bytes = ReadFile(record_path);
-    Reader reader{bytes};
-    const u32 count = reader.Read<u32>();
-    if (count == 0 || count > 6)
-        throw std::runtime_error("Invalid number of shader environments");
-    std::vector<OfflineEnvironment> envs(count);
-    for (OfflineEnvironment& env : envs)
-        env.Load(reader, version);
-    const bool compute = envs.front().ShaderStage() == Stage::Compute;
-    if (compute ? count != 1 : std::ranges::any_of(envs, [](const auto& env) {
-            return env.ShaderStage() == Stage::Compute;
-        })) {
-        throw std::runtime_error("Invalid shader stages in the pipeline record");
-    }
-    std::vector<u8> key(compute ? 24 : 1056);
-    reader.Copy(key.data(), key.size());
-    if (reader.Remaining())
-        throw std::runtime_error("Trailing bytes after pipeline record");
-    std::array<u64, 6> hashes{};
-    if (compute) {
-        u32 shared_memory;
-        std::array<u32, 3> workgroup;
-        std::memcpy(&shared_memory, key.data() + 8, sizeof(shared_memory));
-        std::memcpy(workgroup.data(), key.data() + 12, sizeof(workgroup));
-        if (envs.front().SharedMemorySize() != shared_memory ||
-            envs.front().WorkgroupSize() != workgroup) {
-            throw std::runtime_error("Pipeline key and shader environment disagree");
-        }
-    } else {
-        std::memcpy(hashes.data(), key.data(), sizeof(hashes));
-        if (static_cast<size_t>(std::ranges::count_if(hashes, [](u64 h) { return h != 0; })) !=
-            count) {
-            throw std::runtime_error("Pipeline key and shader environments disagree");
-        }
-    }
+#ifdef SHADER_SWEEP_V2
+    if (path_name == "v2")
+        CheckV2Payload(bytes);
+#endif
+    ParsedRecord record = ParseWholeRecord(bytes, version);
+    const auto& key = record.key;
+    const bool compute = record.compute;
     // The key the legacy cache looks the pipeline up by; every stage module belongs to it.
     const u64 pipeline_hash = Common::CityHash64(reinterpret_cast<const char*>(key.data()),
                                                  compute ? key.size() : GraphicsKeySize(key));
+    const auto record_key = RecordKey(bytes, record);
+    // The key each path files the stage modules under
+    const u64 path_key = path_name == "v2" ? record_key.value() : pipeline_hash;
     diagnostic["kind"] = compute ? "compute" : "graphics";
     diagnostic["pipeline_hash"] = fmt::format("{:016x}", pipeline_hash);
+    diagnostic["record_key"] = record_key ? Json(fmt::format("{:016x}", *record_key)) : Json();
     Json stages = Json::array();
     size_t env_index = 0;
     for (u32 slot = 0; slot < (compute ? 1U : 6U); ++slot) {
-        if (!compute && hashes[slot] == 0)
+        if (!compute && record.hashes[slot] == 0)
             continue;
-        const auto& env = envs[env_index++];
-        u64 unique_hash = hashes[slot];
+        const auto& env = record.envs[env_index++];
+        u64 unique_hash = record.hashes[slot];
         if (compute)
             std::memcpy(&unique_hash, key.data(), sizeof(unique_hash));
         stages.push_back({{"slot", slot},
                           {"unique_hash", fmt::format("{:016x}", unique_hash)},
                           {"stage", StageNames[static_cast<u32>(env.ShaderStage())]},
-                          {"key", compute ? fmt::format("{:016x}", pipeline_hash)
-                                          : fmt::format("{:016x}/{}", pipeline_hash, slot)},
+                          {"key", compute ? fmt::format("{:016x}", path_key)
+                                          : fmt::format("{:016x}/{}", path_key, slot)},
                           {"spirv", nullptr},
                           {"spirv_words", 0}});
     }
@@ -810,7 +1118,7 @@ int RunPipeline(const std::string& record_path, u32 version, const std::string& 
         "Pipeline replay mirrors the runtime's per-pipeline translation on the offline SPIR-V 1.4 "
         "profile: geometry, viewport-layer and mesh shader support, not MoltenVK, no transform "
         "feedback");
-    auto compiled = CompileLegacyPipeline(envs, key, diagnostic);
+    auto compiled = CompileLegacyPipeline(record.envs, key, diagnostic);
     diagnostic["phase"] = "output";
     std::filesystem::create_directories(output_dir);
     for (size_t index = 0; index < compiled.size(); ++index) {
@@ -838,7 +1146,8 @@ int main(int argc, char** argv) {
         if constexpr (std::endian::native != std::endian::little) {
             throw std::runtime_error("Only little-endian hosts are supported");
         }
-        std::string input, output, environment, pipeline_key, pipeline, output_dir;
+        std::string input, output, environment, pipeline_key, pipeline, output_dir, list,
+            programs_log;
         std::string format{"instructions"}, path{"legacy"};
         std::optional<Stage> requested_stage;
         u32 version{};
@@ -855,7 +1164,9 @@ int main(int argc, char** argv) {
                              "  [--pipeline-key FILE] [--capture-extent] "
                              "(--output SPV | --lower-only WORDS | --packed-code WORDS)\n"
                              "shader-sweep --pipeline RECORD --cache-version 46..54 "
-                             "--output-dir DIR [--path legacy]\n";
+                             "--output-dir DIR [--path legacy|v2]\n"
+                             "shader-sweep --list CACHE --output-dir DIR [--path legacy|v2] "
+                             "[--programs-log V2LOG]\n";
                 return 0;
             }
             if (!arg.starts_with("--")) {
@@ -883,7 +1194,20 @@ int main(int argc, char** argv) {
                 pipeline = value;
             else if (arg == "--output-dir")
                 output_dir = value;
+            else if (arg == "--list")
+                list = value;
+            else if (arg == "--programs-log")
+                programs_log = value;
             else if (arg == "--path") {
+#ifdef SHADER_SWEEP_V2
+                if (value == "v2") {
+                    path = value;
+                    continue;
+                }
+#else
+                if (value == "v2")
+                    throw std::runtime_error("This build has no v2 cache (build it in the tree)");
+#endif
                 if (value != "legacy")
                     throw std::runtime_error("Unknown compilation path " + value);
                 path = value;
@@ -905,17 +1229,25 @@ int main(int argc, char** argv) {
             } else
                 throw std::runtime_error("Unknown option " + arg);
         }
+        if (!list.empty()) {
+            if (!input.empty() || !environment.empty() || !pipeline_key.empty() ||
+                !output.empty() || !pipeline.empty() || requested_stage || capture_extent ||
+                version != 0 || output_dir.empty() || (!programs_log.empty() && path != "v2")) {
+                throw std::runtime_error("Invalid arguments; see --help");
+            }
+            return RunList(list, path, programs_log, output_dir, diagnostic);
+        }
         if (!pipeline.empty()) {
             if (!input.empty() || !environment.empty() || !pipeline_key.empty() ||
                 !output.empty() || requested_stage || capture_extent || version == 0 ||
-                output_dir.empty()) {
+                output_dir.empty() || !programs_log.empty()) {
                 throw std::runtime_error("Invalid arguments; see --help");
             }
             return RunPipeline(pipeline, version, path, output_dir, diagnostic);
         }
-        if (output.empty() || !output_dir.empty() || (input.empty() && environment.empty()) ||
-            (environment.empty() != (version == 0)) || (lower_only && input.empty()) ||
-            (capture_extent && input.empty())) {
+        if (output.empty() || !output_dir.empty() || !programs_log.empty() || path != "legacy" ||
+            (input.empty() && environment.empty()) || (environment.empty() != (version == 0)) ||
+            (lower_only && input.empty()) || (capture_extent && input.empty())) {
             throw std::runtime_error("Invalid arguments; see --help");
         }
         if (format != "instructions" && format != "native-header")

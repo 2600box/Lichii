@@ -98,9 +98,10 @@ python3 tools/nx2/shader_sweep.py replay /path/to/cache/shader/0400486024dec000 
 ```
 
 Inputs are `vulkan.bin` or `vulkan.fork-vNN.bin` files, or directories searched for them.
-`--compiler-b` defaults to `--compiler-a`, and both paths default to `legacy`, the only path
-`shader-sweep` implements today. A new path is added to `shader-sweep --path` and needs no
-change here. The output directory must be new or empty.
+`--compiler-b` defaults to `--compiler-a`, and both paths default to `legacy`. The paths are
+`legacy` and `v2` (see [Compare with shader cache v2](#compare-with-shader-cache-v2)). A new
+path is added to `shader-sweep --path` and needs no change here. The output directory must be
+new or empty.
 
 Each record is passed whole to `shader-sweep --pipeline` (see
 [its README](../shader-sweep/README.md)), once per path. The legacy path translates and emits
@@ -134,6 +135,37 @@ compute records the runtime holds as alternative translations of one program (nu
 rebuilds, tried in order at boot), and later graphics records with the key of an earlier one,
 which the runtime never builds. A new path's content keys must not collide.
 
+### Compare with shader cache v2
+
+`--path-b v2` compares the legacy cache with what shader cache v2 makes of it, using the
+production code linked into `shader-sweep`:
+
+1. `MigrateLegacyPipelineCache` migrates a copy of the cache into a new v2 log in the output
+   directory, and `ReadLogFile` reads it back.
+2. If a `lichii-cache.v2.bin` log is next to the cache, its Program records are used as the boot
+   uses them. `LoadPrograms` and `FindProgram` find the records of this build's lowering, and
+   `RelowerProgramRecord` lowers the records of other builds again. `RekeyPipelineRecord` then
+   gives each pipeline record that uses one of these programs the program's code and new key.
+3. `shader-sweep --pipeline --path v2` checks each record with `ReadPipelinePayload`, as the
+   boot does, then compiles it.
+
+Each side lists the cache itself (`shader-sweep --list`). The records are paired by the v2
+record key, which leaves the driver out: `GraphicsRecordKey` for graphics and
+`ComputeRecordKey` for compute. The legacy listing computes the same key, so a side with
+`--path v2` needs a `shader-sweep` built in the tree, for both compilers. Within a key, the last
+legacy record is paired, because the migration keeps the last one. Two more verdicts cover the
+records the migration leaves out. They are counted but are not failures:
+
+- `collapsed`: an earlier legacy record whose key a later one has. The migration kept only the
+  later one.
+- `dropped`: a legacy record with no v2 record of its key.
+
+A v2 record with no legacy record is `one-sided`. Path B keys are `<record key>/<program slot>`,
+and a key collision there is fatal as before. The summary gives, for each cache, the migration
+counts (source version, graphics, compute, collapsed) and the Program records: how many were
+found, lowered again or unusable, and how many pipeline records were moved to their code. A
+moved record keeps its original key in `record_key`, and its row has `relinked: true`.
+
 The fixed offline profile replaces the device: geometry, viewport-layer and mesh shader
 support, not MoltenVK, no device-specific workarounds. Transform feedback pipelines are not
 replayed and fail on both paths. A replay compares two paths under that same profile; it does
@@ -150,8 +182,12 @@ then build only this target:
 cmake --build C:/lx/build-tools --target shader-sweep --parallel 12
 ```
 
+This in-tree build links `video_core` for `--path v2`, so the first build takes as long as an
+emulator build.
+
 Copy the cache while the emulator is closed, because the runtime appends to the file and
-rewrites it. Then run the replay with native Windows Python:
+rewrites it. For `--path v2`, also copy `lichii-cache.v2.bin` from the same folder if it exists.
+Then run the replay with native Windows Python:
 
 ```sh
 PY=/c/Users/Zortos/AppData/Local/Programs/Python/Python314/python.exe
@@ -159,6 +195,10 @@ $PY -I C:/lx/src/tools/nx2/shader_sweep.py replay \
     C:/Users/Zortos/.capy/work/replay/caches/0400486024dec000 \
     --compiler-a C:/lx/build-tools/bin/shader-sweep.exe \
     --output C:/Users/Zortos/.capy/work/replay/oot-legacy --jobs 12
+$PY -I C:/lx/src/tools/nx2/shader_sweep.py replay \
+    C:/Users/Zortos/.capy/work/replay/caches/0400486024dec000 \
+    --compiler-a C:/lx/build-tools/bin/shader-sweep.exe --path-a legacy --path-b v2 \
+    --output C:/Users/Zortos/.capy/work/replay/oot-v2 --jobs 12
 ```
 
 The script uses only the standard library and needs no `spirv-val`.
@@ -179,7 +219,11 @@ python3 tools/shader-sweep/test_captured.py /path/to/shader-sweep
 
 `tools/shader-sweep/test_replay.py /path/to/shader-sweep` builds v54 caches from the same
 fixtures (single-stage, linked and compute records and a duplicate record) and replays them
-with one binary as both paths, serially and with four jobs.
+with one binary as both paths, serially and with four jobs. With `--v2`, which the in-tree
+`shader-sweep-replay-v2` test passes, it also replays them against `--path v2`. The migrated
+cache must match on every stage, with the duplicate record collapsed. Records that differ only
+in the driver fields must pair. A byte planted in one migrated record must give exactly one
+mismatch.
 
 ## Playthrough hints
 

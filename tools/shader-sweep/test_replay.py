@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Replay synthetic v54 caches built from the captured fixtures through shader-sweep."""
+"""Replay synthetic v54 caches built from the captured fixtures through shader-sweep.
+
+With --v2 (shader-sweep built in the tree), also replay them against the shader cache v2 path.
+"""
 
 import json
+import os
 from pathlib import Path
 import struct
 import subprocess
@@ -13,9 +17,17 @@ import unittest
 from test_captured import serialize_environment
 
 BINARY = Path(sys.argv.pop(1)).resolve()
+V2 = "--v2" in sys.argv
+if V2:
+    sys.argv.remove("--v2")
 ROOT = Path(__file__).resolve().parent
 SWEEP = ROOT.parent / "nx2" / "shader_sweep.py"
 MAXWELL_EXIT = 0xE30000000007000F
+# FixedPipelineState::driver_id in a graphics key, after the six program hashes
+DRIVER_OFFSET = 48 + 16
+# A bit of the first instruction of a graphics record's first environment: after the environment
+# count, the environment's sizes and parameters and the 80-byte shader program header
+PLANT_OFFSET, PLANT_MASK = 4 + 6 * 8 + 7 * 4 + 80, 0x10
 
 
 def fixture(name):
@@ -73,7 +85,7 @@ def fixture_cache():
     return b"yuzucach" + struct.pack("<I", 54) + b"".join(records)
 
 
-class ReplayTests(unittest.TestCase):
+class ReplayCase(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.root = Path(self.directory.name)
@@ -102,6 +114,8 @@ class ReplayTests(unittest.TestCase):
                                 capture_output=True, text=True, timeout=60)
         return result.returncode, json.loads(result.stdout)
 
+
+class ReplayTests(ReplayCase):
     def test_same_compiler_is_deterministic_serial_and_parallel(self):
         """Paths A and B on one binary agree word for word on every fixture stage."""
         cache = fixture_cache()
@@ -149,7 +163,7 @@ class ReplayTests(unittest.TestCase):
 
     def test_unknown_path_and_inconsistent_records_are_input_errors(self):
         byte_store, data = fixture("bananza-byte-store")
-        for key, extra in ((graphics_key(data, {1: fixture_hash(data, 1)}), ["--path", "v2"]),
+        for key, extra in ((graphics_key(data, {1: fixture_hash(data, 1)}), ["--path", "v3"]),
                            (graphics_key(data, {1: 1, 5: 2}), []),
                            (graphics_key(data, {1: 1}) + b"x", [])):
             code, result = self.compile(record([byte_store], key), *extra)
@@ -169,6 +183,66 @@ class ReplayTests(unittest.TestCase):
         print(json.dumps([{k: row.get(k) for k in ("record", "stage", "verdict", "words_b",
                                                    "error_b")}
                           for row in report["stages"]]), file=sys.stderr)
+
+
+# Forwards to shader-sweep, then flips one byte of one record a --list call wrote
+PLANTING_COMPILER = '''
+import json, subprocess, sys
+from pathlib import Path
+result = subprocess.run([{binary!r}, *sys.argv[1:]], capture_output=True, text=True)
+if "--list" in sys.argv:
+    listed = json.loads(result.stdout)
+    directory = Path(sys.argv[sys.argv.index("--output-dir") + 1])
+    path = directory / listed["records"][{record}]["file"]
+    data = bytearray(path.read_bytes())
+    data[{offset}] ^= {mask}
+    path.write_bytes(data)
+sys.stdout.write(result.stdout)
+sys.stderr.write(result.stderr)
+sys.exit(result.returncode)
+'''
+
+
+@unittest.skipUnless(V2, "needs shader-sweep built in the tree (--v2)")
+class V2ReplayTests(ReplayCase):
+    def test_migrated_cache_replays_without_mismatch(self):
+        """The production migration and reader give the same SPIR-V as the legacy records."""
+        report = self.replay(fixture_cache(), "--path-b", "v2")
+        verdicts = [row["verdict"] for row in report["stages"]]
+        self.assertEqual(sorted(verdicts), ["collapsed"] + ["match"] * 6, report["stages"])
+        self.assertEqual(report["collisions"], [])
+        migration = report["listings"][0]["b"]["migration"]
+        self.assertEqual(migration, {"source_version": 54, "graphics": 4, "compute": 1,
+                                     "collapsed": 1})
+        collapsed, = (row for row in report["stages"] if row["verdict"] == "collapsed")
+        self.assertEqual(collapsed["entry"], 0)
+        for row in report["stages"]:
+            if row["verdict"] == "match":
+                self.assertEqual(row["key_b"].split("/")[0], row["record_key"])
+
+    def test_graphics_record_key_leaves_the_driver_out(self):
+        """Records differing only in the driver fields pair, and the earlier one collapses."""
+        byte_store, data = fixture("bananza-byte-store")
+        key = graphics_key(data, {1: fixture_hash(data, 1)})
+        other_driver = bytearray(key)
+        struct.pack_into("<II", other_driver, DRIVER_OFFSET, 1, 2)
+        cache = (b"yuzucach" + struct.pack("<I", 54) + record([byte_store], key) +
+                 record([byte_store], bytes(other_driver)))
+        report = self.replay(cache, "--path-b", "v2")
+        self.assertEqual(sorted(row["verdict"] for row in report["stages"]),
+                         ["collapsed", "match"])
+
+    @unittest.skipIf(os.name == "nt", "the planting compiler needs a POSIX shebang")
+    def test_planted_byte_in_a_migrated_record_is_one_mismatch(self):
+        planting = self.root / "planting-shader-sweep"
+        planting.write_text(f"#!{sys.executable}\n" + PLANTING_COMPILER.format(
+            binary=str(BINARY), record=1, offset=PLANT_OFFSET, mask=PLANT_MASK))
+        planting.chmod(0o755)
+        report = self.replay(fixture_cache(), "--path-b", "v2", "--compiler-b", str(planting),
+                             code=1)
+        bad = [row for row in report["stages"] if row["verdict"] not in ("match", "collapsed")]
+        self.assertEqual([(row["verdict"], row["record"]) for row in bad],
+                         [("mismatch", "000-000001")], bad)
 
 
 if __name__ == "__main__":
