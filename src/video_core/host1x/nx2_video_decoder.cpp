@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <optional>
 #include <set>
@@ -53,6 +54,9 @@ std::optional<NvdecCommon::VideoCodec> CodecFromMime(std::string_view mime) {
 // dav1d defaults to a thread per host thread. A 1080p60 movie needs a few, and the emulator's
 // own threads need the rest.
 int Dav1dThreads() {
+    if (const char* env = std::getenv("EDEN_NX2_DAV1D_THREADS")) {
+        return std::atoi(env);
+    }
     return static_cast<int>(std::clamp(std::thread::hardware_concurrency() / 2, 2U, 8U));
 }
 
