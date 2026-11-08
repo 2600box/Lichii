@@ -177,6 +177,28 @@ private:
 
     void QueueVulkanPipelineCacheFlush();
 
+    /// Queues one write of the driver pipeline cache file on the serialization thread, with no
+    /// throttle. For the end of a precache: its builds never reach the timed flush, which counts
+    /// only pipelines built during play.
+    void QueueVulkanPipelineCacheSave();
+
+    /// One build of the shader precache: builds a pipeline and destroys it, true when it built.
+    struct PrecacheJob {
+        u64 graphics_hash{}; ///< The cached graphics pipeline it builds, 0 for a compute program
+        Common::UniqueFunction<bool> build;
+    };
+
+    /// Shader precache before the game starts (precache_shaders), on every CPU thread: the cached
+    /// graphics pipelines this boot skipped (`jobs`; `precached` holds those built by earlier
+    /// precaches) and the compute programs of the title's precache file (made from the game files,
+    /// missing reads guessed) are built, then thrown away. They only fill the driver's shader
+    /// cache, so a later build of the same pipeline finds the driver's work done. Reports progress
+    /// through `callback` and returns when it is done, skipped from the loading screen or the load
+    /// is stopped.
+    void PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
+                         std::unordered_set<u64> precached, std::stop_token stop_loading,
+                         const VideoCore::DiskResourceLoadCallback& callback);
+
     const Device& device;
     Scheduler& scheduler;
     DescriptorPool& descriptor_pool;
