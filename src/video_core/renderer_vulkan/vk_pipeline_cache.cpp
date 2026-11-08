@@ -2416,7 +2416,7 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
         // The driver compiles on this thread. Precache and boot workers would otherwise hold their
         // IR through the compile, up to hundreds of MiB for one large shader.
         program = {};
-        code = {};
+        code = std::vector<u32>{};
         pools.block.Free();
         pools.inst.Free();
     }
