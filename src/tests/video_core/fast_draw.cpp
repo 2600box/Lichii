@@ -159,6 +159,19 @@ TEST_CASE("Fast draw breaks reuse on anything that changes what a draw binds", "
     CHECK(breaks([&] { FastDraw::Break(FastDraw::Reason::Fence); }));
 }
 
+TEST_CASE("Fast draw uniform serial ignores register writes", "[fast_draw]") {
+    const bool tracked = FastDraw::g_track_uniforms.exchange(true);
+    const u64 serial = FastDraw::Serial();
+    const u64 uniform_serial = FastDraw::UniformSerial();
+    FastDraw::Break(FastDraw::Reason::Register, ViewportScaleX);
+    REQUIRE(FastDraw::Serial() == serial + 1);
+    REQUIRE(FastDraw::UniformSerial() == uniform_serial);
+    FastDraw::Break(FastDraw::Reason::Method);
+    FastDraw::Break(FastDraw::Reason::TextureHeaders);
+    REQUIRE(FastDraw::UniformSerial() == uniform_serial + 2);
+    FastDraw::g_track_uniforms.store(tracked);
+}
+
 TEST_CASE("Fast draw serial never moves while disabled", "[fast_draw]") {
     FastDrawFixture f;
     FastDrawFixture::SetSwitch(false);

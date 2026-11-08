@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -43,9 +44,11 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/egla66.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_download_trace.h"
 #include "video_core/nx2_egla66.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/surface.h"
 #include "video_core/texture_cache/types.h"
 
@@ -489,6 +492,17 @@ public:
         } while (channel_state->has_deleted_buffers);
     }
 
+    /// EDEN_NX2_EGLA66_UBO_KEEP(_FULL): called before each graphics draw binds its buffers.
+    /// `delta`: the constant buffer binds and data since the previous draw, when nothing else that
+    /// can write memory came in between (a delta draw, or a full draw after register writes only);
+    /// else nullptr.
+    void BeginGraphicsUniforms(const Nx2FastDraw::Delta* delta, bool full_draw);
+
+    [[nodiscard]] bool UniformKeepActive() const noexcept {
+        return egla66_ubo_keep || egla66_ubo_keep_verify || egla66_ubo_keep_full ||
+               egla66_ubo_keep_full_verify;
+    }
+
     Common::SpinRecursiveMutex mutex;
     Runtime& runtime;
     bool any_buffer_uploaded = false;
@@ -699,6 +713,49 @@ private:
         u64 syncs_skipped{};
         u64 verify_mismatches{};
     } geometry_stats;
+
+    /// EDEN_NX2_EGLA66_UBO_KEEP: a delta draw binds a small uniform buffer from the stream
+    /// allocation the previous draw made for it, without reading guest memory, when nothing ordered
+    /// between the two draws wrote its range: no inline constant data, no rebind, no GPU write and
+    /// no buffer deletion. Anything else in between ends the delta chain.
+    /// EDEN_NX2_EGLA66_UBO_KEEP_FULL does the same for full draws that only register writes
+    /// (Nx2FastDraw::UniformSerial) separate from the previous draw.
+    [[nodiscard]] bool UniformRangeKept(size_t stage, u32 index, DAddr device_addr,
+                                        u32 size) const noexcept;
+    void NoteUniformGpuWrite(DAddr device_addr, u64 size) {
+        if (!UniformKeepActive()) {
+            return;
+        }
+        UniformKeep& keep = uniform_keep;
+        if (keep.gpu_writes.size() == keep.gpu_writes.capacity()) {
+            keep.gpu_writes_lost = true;
+            return;
+        }
+        keep.gpu_writes.emplace_back(device_addr, device_addr + size);
+    }
+    const bool egla66_ubo_keep = Egla66::Env("EDEN_NX2_EGLA66_UBO_KEEP");
+    const bool egla66_ubo_keep_verify = Egla66::Env("EDEN_NX2_EGLA66_UBO_KEEP_VERIFY");
+    const bool egla66_ubo_keep_full = Egla66::Env("EDEN_NX2_EGLA66_UBO_KEEP_FULL");
+    const bool egla66_ubo_keep_full_verify = Egla66::Env("EDEN_NX2_EGLA66_UBO_KEEP_FULL_VERIFY");
+    struct UniformKeep {
+        std::array<u32, NUM_STAGES> candidates{}; ///< Streamed by the previous draw, not rebound
+        std::array<u32, NUM_STAGES> streamed{};   ///< Streamed by this draw
+        /// Device ranges written since the previous draw began: inline constant data, then the
+        /// GPU-modified marks.
+        boost::container::static_vector<std::pair<DAddr, DAddr>, Nx2FastDraw::Delta::MaxWrites + 8>
+            writes;
+        boost::container::static_vector<std::pair<DAddr, DAddr>, 8> gpu_writes;
+        bool gpu_writes_lost{}; ///< More GPU-modified marks than gpu_writes holds
+        bool verify{};          ///< This draw runs the original path and compares
+        bool full_draw{};
+        u64 draw_deletions{}; ///< buffer_deletions when the previous draw began
+        u64 kept{};
+        u64 kept_full{};
+        u64 streamed_binds{};
+        u64 verified{};
+        u64 mismatches{};
+        std::chrono::steady_clock::time_point window{};
+    } uniform_keep;
 
     boost::container::small_vector<BufferCopy, 4> upload_copies;
 

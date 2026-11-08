@@ -439,6 +439,9 @@ GraphicsPipeline* RasterizerVulkan::TakeReusableDraw(bool is_indexed, bool is_in
     namespace FastDraw = VideoCommon::Nx2FastDraw;
     const ReusableDraw draw = std::exchange(reusable_draw, ReusableDraw{});
     const FastDraw::Delta delta = std::exchange(FastDraw::g_delta, FastDraw::Delta{});
+    if (buffer_cache.UniformKeepActive()) {
+        taken_delta = delta;
+    }
     const auto full = [&](FullDraw reason) -> GraphicsPipeline* {
         ++fast_draw_stats.full[static_cast<size_t>(reason)];
         return nullptr;
@@ -791,6 +794,16 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     if (verify_pipeline != nullptr) {
         ++fast_draw_stats.verified;
         fast_draw_stats.pipeline_mismatches += verify_pipeline != pipeline ? 1 : 0;
+    }
+    if (buffer_cache.UniformKeepActive()) {
+        // Full draws: only register writes since the previous draw (EDEN_NX2_EGLA66_UBO_KEEP_FULL).
+        const bool delta_draw = delta_pipeline != nullptr && verify_pipeline == nullptr;
+        const u64 uniform_serial = FastDraw::UniformSerial();
+        const bool held = fast_draw_on && uniform_serial == taken_uniform_serial &&
+                          gpu_memory == taken_uniform_memory;
+        taken_uniform_serial = uniform_serial;
+        taken_uniform_memory = gpu_memory;
+        buffer_cache.BeginGraphicsUniforms(delta_draw || held ? &taken_delta : nullptr, !delta_draw);
     }
     if (!pipeline) {
         report_failure("no pipeline");
