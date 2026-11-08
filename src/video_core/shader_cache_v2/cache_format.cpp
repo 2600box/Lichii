@@ -125,6 +125,26 @@ std::vector<u8> TombstonePayload(RecordKind kind) {
     return payload;
 }
 
+std::optional<LogRecord> ParseRecord(std::span<const u8> bytes, u64 offset) {
+    if (bytes.size() < RecordHeaderSize) {
+        return std::nullopt;
+    }
+    const std::optional<RecordHeader> header = ReadRecordHeader(bytes, 0);
+    if (!header || u64{RecordHeaderSize} + header->payload_size + RecordHashSize > bytes.size()) {
+        return std::nullopt;
+    }
+    const auto payload = bytes.subspan(RecordHeaderSize, header->payload_size);
+    if (Load<u64>(bytes, RecordHeaderSize + header->payload_size) !=
+        PayloadHash(header->kind, header->key, payload)) {
+        return std::nullopt;
+    }
+    return LogRecord{.kind = static_cast<RecordKind>(header->kind),
+                     .flags = header->flags,
+                     .key = header->key,
+                     .offset = offset,
+                     .payload = payload};
+}
+
 ParsedLog ParseLog(std::span<const u8> bytes) {
     ParsedLog log;
     LogStats& stats = log.stats;

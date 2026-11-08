@@ -12,6 +12,7 @@
 
 #include "common/common_types.h"
 #include "common/polyfill_thread.h"
+#include "video_core/shader_cache_v2/cache_file.h"
 #include "video_core/shader_cache_v2/cache_format.h"
 
 namespace VideoCommon::ShaderCacheV2 {
@@ -54,9 +55,10 @@ public:
 
     /// Compacts the log (CompactLog) once the records queued now are written. It is left for a
     /// later boot while another process holds the lock.
-    void Compact();
+    void Compact(CompactLimit limit = {});
 
-    /// Writes the queued records now. True when none is left, false when `deadline` passed first.
+    /// Writes the queued records now, and a compaction asked for. True when none is left, false
+    /// when `deadline` passed first.
     bool Drain(std::chrono::milliseconds deadline);
 
     [[nodiscard]] WriterStats Stats() const;
@@ -86,6 +88,7 @@ private:
     u32 draining{};
     bool writing{};
     bool compact{};
+    CompactLimit compact_limit;
     WriterStats stats;
 
     std::jthread thread;

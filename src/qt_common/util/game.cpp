@@ -12,6 +12,7 @@
 #include "qt_common/config/uisettings.h"
 #include "qt_common/qt_common.h"
 #include "video_core/pipeline_cache_files.h"
+#include "video_core/shader_cache_v2/cache.h"
 
 #include <QDesktopServices>
 #include <QStandardPaths>
@@ -287,8 +288,9 @@ void RemoveTransferableShaderCache(u64 program_id, GameListRemoveTarget target) 
 void RemoveVulkanDriverPipelineCache(u64 program_id) {
     const auto shader_cache_dir = Common::FS::GetEdenPath(Common::FS::EdenPath::ShaderDir);
     const auto shader_cache_folder_path = shader_cache_dir / fmt::format("{:016x}", program_id);
-    const auto binaries_file = VideoCommon::VersionedPipelineCachePath(
-        shader_cache_folder_path, "vulkan_binaries", VideoCommon::VulkanPipelineCacheVersion);
+    // Shader cache v2's driver blobs (EDEN_NX2_SHADER_CACHE=v2)
+    const auto binaries_file =
+        shader_cache_folder_path / VideoCommon::ShaderCacheV2::DriverFileName;
     if (Common::FS::Exists(binaries_file) && !Common::FS::RemoveFile(binaries_file)) {
         QtCommon::Frontend::Warning(tr("Error Removing Vulkan Driver Pipeline Cache"),
                                     tr("Failed to remove the saved compiled shaders."));

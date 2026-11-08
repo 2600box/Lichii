@@ -222,6 +222,8 @@ add_library(video_core STATIC
     renderer_vulkan/vk_pipeline_cache.h
     renderer_vulkan/vk_pipeline_cache_records.cpp
     renderer_vulkan/vk_pipeline_cache_records.h
+    renderer_vulkan/vk_pipeline_binaries.cpp
+    renderer_vulkan/vk_pipeline_binaries.h
     renderer_vulkan/vk_shader_cache_v2.cpp
     renderer_vulkan/vk_shader_cache_v2.h
     renderer_vulkan/vk_present_manager.cpp
@@ -267,8 +269,6 @@ add_library(video_core STATIC
     vulkan_common/vulkan_memory_allocator.h
     vulkan_common/vulkan_surface.cpp
     vulkan_common/vulkan_surface.h
-    vulkan_common/vulkan_pipeline_binary_cache.cpp
-    vulkan_common/vulkan_pipeline_binary_cache.h
     vulkan_common/vulkan_wrapper.cpp
     vulkan_common/vulkan_wrapper.h
     vulkan_common/nsight_aftermath_tracker.cpp
@@ -287,6 +287,9 @@ add_library(video_core STATIC
     shader_cache_v2/cache_format.h
     shader_cache_v2/cache_writer.cpp
     shader_cache_v2/cache_writer.h
+    shader_cache_v2/driver_blobs.cpp
+    shader_cache_v2/driver_blobs.h
+    shader_cache_v2/payload_io.h
     shader_cache_v2/records.cpp
     shader_cache_v2/records.h
     shader_environment.cpp

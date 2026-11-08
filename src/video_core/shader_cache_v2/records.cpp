@@ -9,80 +9,11 @@
 #include "video_core/native_lowering.h"
 #include "video_core/shader_cache_v2/cache_format.h"
 #include "video_core/shader_cache_v2/lowering_stamp.h"
+#include "video_core/shader_cache_v2/payload_io.h"
 #include "video_core/shader_cache_v2/records.h"
 
 namespace VideoCommon::ShaderCacheV2 {
 namespace {
-
-class Writer {
-public:
-    template <typename T>
-    void Put(const T& value) {
-        static_assert(std::is_trivially_copyable_v<T>);
-        PutBytes(&value, sizeof(T));
-    }
-
-    template <typename T>
-    void PutSpan(std::span<const T> values) {
-        static_assert(std::is_trivially_copyable_v<T>);
-        PutBytes(values.data(), values.size_bytes());
-    }
-
-    std::vector<u8> Take() {
-        return std::move(bytes);
-    }
-
-private:
-    void PutBytes(const void* data, size_t size) {
-        const size_t at = bytes.size();
-        bytes.resize(at + size);
-        if (size != 0) {
-            std::memcpy(bytes.data() + at, data, size);
-        }
-    }
-
-    std::vector<u8> bytes;
-};
-
-class Reader {
-public:
-    explicit Reader(std::span<const u8> bytes_) : bytes{bytes_} {}
-
-    template <typename T>
-    bool Get(T& value) {
-        static_assert(std::is_trivially_copyable_v<T>);
-        return GetBytes(&value, sizeof(T));
-    }
-
-    template <typename T>
-    bool GetVector(std::vector<T>& values, u64 count) {
-        static_assert(std::is_trivially_copyable_v<T>);
-        if (count > (bytes.size() - offset) / sizeof(T)) {
-            return false;
-        }
-        values.resize(static_cast<size_t>(count));
-        return GetBytes(values.data(), values.size() * sizeof(T));
-    }
-
-    bool AtEnd() const {
-        return offset == bytes.size();
-    }
-
-private:
-    bool GetBytes(void* data, size_t size) {
-        if (size > bytes.size() - offset) {
-            return false;
-        }
-        if (size != 0) {
-            std::memcpy(data, bytes.data() + offset, size);
-        }
-        offset += size;
-        return true;
-    }
-
-    std::span<const u8> bytes;
-    size_t offset{};
-};
 
 constexpr u32 ProgramPayloadVersion = 1;
 
@@ -135,7 +66,7 @@ std::shared_ptr<LoweredNativeCode> RelowerProgram(const ProgramRecord& record) {
 }
 
 u64 ProgramKey(const ProgramRecord& record) {
-    Writer key;
+    PayloadWriter key;
     key.Put(record.source);
     key.Put(record.stage);
     key.Put(record.header_size);
@@ -151,7 +82,7 @@ u64 ProgramKey(const ProgramRecord& record) {
 }
 
 std::vector<u8> EncodeProgram(const ProgramRecord& record) {
-    Writer out;
+    PayloadWriter out;
     out.Put(ProgramPayloadVersion);
     out.Put(record.source);
     out.Put(record.geometry);
@@ -175,7 +106,7 @@ std::vector<u8> EncodeProgram(const ProgramRecord& record) {
 }
 
 std::optional<ProgramRecord> DecodeProgram(std::span<const u8> payload) {
-    Reader in{payload};
+    PayloadReader in{payload};
     ProgramRecord record;
     u32 version{};
     u16 reserved{};
@@ -214,7 +145,7 @@ std::optional<u64> ProgramStamp(std::span<const u8> payload) {
 }
 
 std::vector<u8> EncodeUsed(const UsedRecord& record) {
-    Writer out;
+    PayloadWriter out;
     out.Put(record.session_time);
     out.Put(static_cast<u64>(record.pipelines.size()));
     out.PutSpan(std::span<const u64>{record.pipelines});
@@ -222,7 +153,7 @@ std::vector<u8> EncodeUsed(const UsedRecord& record) {
 }
 
 std::optional<UsedRecord> DecodeUsed(std::span<const u8> payload) {
-    Reader in{payload};
+    PayloadReader in{payload};
     UsedRecord record;
     u64 count{};
     if (!in.Get(record.session_time) || !in.Get(count) || !in.GetVector(record.pipelines, count) ||
@@ -233,7 +164,7 @@ std::optional<UsedRecord> DecodeUsed(std::span<const u8> payload) {
 }
 
 std::vector<u8> EncodeMigrated(const MigratedRecord& record) {
-    Writer out;
+    PayloadWriter out;
     out.Put(record.source_size);
     out.Put(record.source_mtime);
     out.Put(record.source_version);
@@ -246,7 +177,7 @@ std::vector<u8> EncodeMigrated(const MigratedRecord& record) {
 }
 
 std::optional<MigratedRecord> DecodeMigrated(std::span<const u8> payload) {
-    Reader in{payload};
+    PayloadReader in{payload};
     MigratedRecord record;
     u64 length{};
     std::vector<char> name;

@@ -32,12 +32,15 @@ class ShaderNotify;
 namespace Vulkan {
 
 class Device;
+class PipelineBinaries;
 class PipelineStatistics;
 class Scheduler;
 
 class ComputePipeline {
 public:
+    /// `binary_key` is the pipeline's key for shader cache v2's driver layer, `binaries` (or null)
     explicit ComputePipeline(const Device& device, Scheduler& scheduler, vk::PipelineCache& pipeline_cache,
+                             PipelineBinaries* binaries, u64 binary_key,
                              DescriptorPool& descriptor_pool,
                              GuestDescriptorQueue& guest_descriptor_queue,
                              DescriptorBufferRing& descriptor_buffer_ring,
@@ -102,6 +105,8 @@ private:
 
     const Device& device;
     vk::PipelineCache& pipeline_cache;
+    PipelineBinaries* const binaries;
+    const u64 binary_key;
     GuestDescriptorQueue& guest_descriptor_queue;
     DescriptorBufferRing& descriptor_buffer_ring;
     Shader::Info info;

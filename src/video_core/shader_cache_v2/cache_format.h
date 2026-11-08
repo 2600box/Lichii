@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -38,6 +39,11 @@ enum class RecordKind : u16 {
     Tombstone = 4,
     Used = 5,
     Migrated = 6,
+    /// Driver blob files (driver_blobs.h): the device the file is for, and the binaries of the
+    /// pipeline with the record's key
+    DeviceIdentity = 7,
+    GraphicsBinary = 8,
+    ComputeBinary = 9,
 };
 
 /// Bytes a record with a payload of this size takes in the file
@@ -93,6 +99,10 @@ struct ParsedLog {
     std::vector<LogRecord> live;
     LogStats stats;
 };
+
+/// The record at the start of `bytes` (read from the file at `offset`), when its header and
+/// payload are intact. Its payload points into `bytes`.
+[[nodiscard]] std::optional<LogRecord> ParseRecord(std::span<const u8> bytes, u64 offset = 0);
 
 /// Reads a whole log held in memory. Never throws on any input: a damaged record header is
 /// skipped by scanning for the next valid one, a record whose payload doesn't match its hash is

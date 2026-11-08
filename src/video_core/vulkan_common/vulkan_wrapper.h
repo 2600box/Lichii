@@ -8,7 +8,6 @@
 
 #include <array>
 #include <exception>
-#include <filesystem>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -1067,12 +1066,6 @@ public:
 };
 
 class Device : public Handle<VkDevice, NoOwner, DeviceDispatch> {
-public:
-    /// Saves and reuses the driver's compiled pipelines in this file (VK_KHR_pipeline_binary).
-    void EnablePipelineBinaryCache(const std::filesystem::path& file) const;
-    /// Stops it; later pipelines are compiled normally.
-    void DisablePipelineBinaryCache() const;
-
     using Handle<VkDevice, NoOwner, DeviceDispatch>::Handle;
 
 public:

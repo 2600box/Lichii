@@ -340,6 +340,16 @@ public:
         return properties.properties.deviceID;
     }
 
+    /// Returns the PCI vendor ID of the physical device.
+    u32 GetVendorID() const {
+        return properties.properties.vendorID;
+    }
+
+    /// Returns the UUID the driver's pipeline cache data is valid for.
+    std::span<const u8, VK_UUID_SIZE> GetPipelineCacheUUID() const {
+        return properties.properties.pipelineCacheUUID;
+    }
+
     /// Returns the device name.
     std::string_view GetModelName() const {
         return properties.properties.deviceName;
@@ -1153,7 +1163,8 @@ FN_MAX_LIMIT_LIST
         return extensions.maintenance4;
     }
 
-    /// Returns true if VK_KHR_pipeline_binary is enabled (compiled pipelines can be saved).
+    /// Returns true if VK_KHR_pipeline_binary is enabled: only shader cache v2 enables it, on
+    /// drivers that don't prefer their own cache.
     bool IsKhrPipelineBinarySupported() const {
         return extensions.pipeline_binary;
     }
@@ -1337,6 +1348,7 @@ private:
         VkPhysicalDeviceSubgroupSizeControlProperties subgroup_size_control{};
         VkPhysicalDeviceTransformFeedbackPropertiesEXT transform_feedback{};
         VkPhysicalDeviceMaintenance5PropertiesKHR maintenance5{};
+        VkPhysicalDevicePipelineBinaryPropertiesKHR pipeline_binary{};
         VkPhysicalDeviceDepthStencilResolveProperties depth_stencil_resolve{};
         VkPhysicalDeviceCustomBorderColorPropertiesEXT custom_border_color{};
         VkPhysicalDeviceCooperativeMatrixPropertiesKHR cooperative_matrix{};
