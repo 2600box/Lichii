@@ -18,6 +18,7 @@
 #include <dxgi1_4.h>
 #endif
 
+#include <cstdlib>
 #include <cstring>
 #include <iterator>
 #include <string>
@@ -237,6 +238,18 @@ vk::Image MemoryAllocator::TryCreateImage(const VkImageCreateInfo &ci, bool dedi
 
 VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedicated, bool may_fail,
                                         vk::Image &image) const {
+    // TEST ONLY (EGLA-92): EDEN_NX2_IMAGE_LOCAL_ONLY=1 keeps the budgeted and over-budget attempts
+    // on device-local memory types, so VMA cannot move an image to system memory unnoticed.
+    static const bool local_only = [] {
+        const char* value = std::getenv("EDEN_NX2_IMAGE_LOCAL_ONLY");
+        return value != nullptr && value[0] == '1';
+    }();
+    u32 local_types{};
+    for (u32 type = 0; type < properties.memoryTypeCount; ++type) {
+        if ((properties.memoryTypes[type].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0) {
+            local_types |= 1u << type;
+        }
+    }
     const VmaAllocationCreateInfo alloc_ci = {
             // Best fit: images freed by the thousand leave holes in the blocks, which new ones
             // should fill before VMA takes another block.
@@ -247,7 +260,7 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
             .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
             .requiredFlags = 0,
             .preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-            .memoryTypeBits = 0,
+            .memoryTypeBits = local_only ? local_types : 0,
             .pool = VK_NULL_HANDLE,
             .pUserData = nullptr,
             .priority = 0.f,
@@ -283,6 +296,7 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
         host.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
         host.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
         host.preferredFlags = 0;
+        host.memoryTypeBits = 0;
         result = vmaCreateImage(allocator, &ci, &host, &handle, &allocation, &alloc_info);
         static u32 host_logged{};
         if (result == VK_SUCCESS && host_logged++ < 16) {
