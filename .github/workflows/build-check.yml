@@ -265,6 +265,21 @@ jobs:
       - name: Run tests
         run: ctest --test-dir build --output-on-failure --no-tests=error --parallel "$NUMBER_OF_PROCESSORS"
 
+      # Test branches only: the emulator with its Qt files, to try a branch without building it.
+      - name: Package the emulator
+        run: |
+          mkdir -p package
+          cp build/bin/lichii.exe build/bin/eden-cli.exe package/
+          cp build/bin/*.dll package/ 2>/dev/null || true
+          windeployqt --release --no-translations package/lichii.exe
+
+      - name: Upload the emulator
+        uses: actions/upload-artifact@v4
+        with:
+          name: lichii-windows-${{ github.sha }}
+          path: package/
+          retention-days: 7
+
       - name: Save dependencies and compiler objects
         if: always()
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
