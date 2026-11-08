@@ -456,7 +456,7 @@ std::string HostPath(const FileSys::VirtualFile& file) {
 
 void CopyText(std::span<char> out, std::string_view text) {
     const auto length = std::min(text.size(), out.size() - 1);
-    std::memcpy(out.data(), text.data(), length);
+    text.copy(out.data(), length);
     out[length] = '\0';
 }
 
