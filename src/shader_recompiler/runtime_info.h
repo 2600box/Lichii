@@ -8,6 +8,7 @@
 
 #include <array>
 #include <bitset>
+#include <cstdlib>
 #include <map>
 #include <optional>
 #include <vector>
@@ -83,11 +84,28 @@ struct TransformFeedbackVarying {
     u32 components{};
 };
 
+/// Emulate screen-linear (noperspective) varyings with perspective interpolation, so that
+/// clipping a primitive close to the camera interpolates them correctly on every driver.
+/// EDEN_NX2_NOPERSP_AS_SMOOTH=0 turns it off.
+inline bool NoPerspectiveAsSmooth() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_NOPERSP_AS_SMOOTH");
+        return !(value && value[0] == '0');
+    }();
+    return enabled;
+}
+
 struct RuntimeInfo {
     std::array<AttributeType, 32> generic_input_types{};
     VaryingState previous_stage_stores;
     /// Fragment stage after a mesh program: generic inputs it writes per primitive.
     std::bitset<32> per_primitive_generics{};
+    /// Last pre-rasterization stage: generic outputs the fragment stage reads screen-linear.
+    /// With NoPerspectiveAsSmooth() they are written times Position.w and the fragment stage
+    /// reads them perspective-correct times FragCoord.w, so clipping interpolates them right.
+    std::bitset<32> noperspective_outputs{};
+    /// Fragment stage: the previous stage writes noperspective_outputs (not a mesh program).
+    bool scaled_noperspective_inputs{};
     std::map<IR::Attribute, IR::Attribute> previous_stage_legacy_stores_mapping;
 
     bool convert_depth_mode{};
