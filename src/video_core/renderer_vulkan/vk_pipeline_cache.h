@@ -41,6 +41,7 @@
 #include "video_core/shader_cache.h"
 #include "video_core/shader_cache_v2/cache.h"
 #include "video_core/shader_jobs.h"
+#include "video_core/shader_stage_translation.h"
 
 namespace Core {
 class System;
@@ -104,17 +105,7 @@ class Scheduler;
 
 using VideoCommon::ShaderInfo;
 
-struct ShaderPools {
-    void ReleaseContents() {
-        flow_block.ReleaseContents();
-        block.ReleaseContents();
-        inst.ReleaseContents();
-    }
-
-    Shader::ObjectPool<Shader::IR::Inst> inst{8192};
-    Shader::ObjectPool<Shader::IR::Block> block{32};
-    Shader::ObjectPool<Shader::Maxwell::Flow::Block> flow_block{32};
-};
+using VideoCommon::ShaderPools;
 
 struct ComputePipelineCacheEntry {
     std::unique_ptr<ComputePipeline> pipeline;
@@ -159,14 +150,29 @@ private:
 
     std::unique_ptr<GraphicsPipeline> CreateGraphicsPipeline();
 
+    /// Shader cache v2, run-time misses: the stages translated at once on shader_jobs' CPU workers
+    /// while the GPU thread waited (VideoCommon::TranslateStages)
+    struct ParallelTranslation {
+        std::chrono::nanoseconds wait{};   ///< On the GPU thread
+        std::chrono::nanoseconds stages{}; ///< The stages' translations together
+        size_t count{};
+    };
+
     /// Builds the pipeline on the workers with build_in_parallel, else here. With the v2 cache it is
     /// a job of shader_jobs with build_in_parallel, else left for the caller's Build() (see
-    /// BuildQueue).
+    /// BuildQueue). With `parallel` the stages translate at once on shader_jobs, each in IR pools
+    /// of its own; their environments must be safe to read from those threads.
     std::unique_ptr<GraphicsPipeline> CreateGraphicsPipeline(
         ShaderPools& pools, const GraphicsPipelineCacheKey& key,
         std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
         bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools = nullptr,
-        std::unique_ptr<EmissionBudget::Reservation> reservation = nullptr);
+        std::unique_ptr<EmissionBudget::Reservation> reservation = nullptr,
+        ParallelTranslation* parallel = nullptr);
+
+    /// Released IR pools for a build, or new ones
+    [[nodiscard]] std::shared_ptr<ShaderPools> TakeSparePools();
+    /// Releases the pools' contents and keeps a few for later builds
+    void ReturnPools(std::shared_ptr<ShaderPools> pools);
 
     [[nodiscard]] bool StaleNullPointerSlot(const ComputePipelineCacheEntry& entry) const;
 
@@ -176,12 +182,15 @@ private:
                                                     const ShaderInfo* shader,
                                                     std::span<const u64> keep_pointers = {});
 
-    /// Builds the pipeline as CreateGraphicsPipeline does
+    /// Builds the pipeline as CreateGraphicsPipeline does. With `emit_pools`, which `pools` must
+    /// be, the SPIR-V is emitted by the CPU stage of the pipeline's job (shader cache v2), which
+    /// takes the pools and the program.
     ComputePipelineCacheEntry CreateComputePipeline(ShaderPools& pools,
                                                      const ComputePipelineCacheKey& key,
                                                      Shader::Environment& env,
                                                      PipelineStatistics* statistics,
-                                                     bool build_in_parallel);
+                                                     bool build_in_parallel,
+                                                     std::shared_ptr<ShaderPools> emit_pools = nullptr);
 
     /// Where CreateGraphicsPipeline and CreateComputePipeline build; `cpu_bytes` estimates the
     /// IR a deferred emission holds

@@ -294,6 +294,8 @@ add_library(video_core STATIC
     shader_jobs.h
     shader_notify.cpp
     shader_notify.h
+    shader_stage_translation.cpp
+    shader_stage_translation.h
     shader_warm/shader_archives.cpp
     shader_warm/shader_archives.h
     shader_warm/shader_warm_builder.cpp

@@ -45,7 +45,8 @@ public:
                              const PipelineBuildQueue& build_queue,
                              PipelineStatistics* pipeline_statistics,
                              VideoCore::ShaderNotify* shader_notify, const Shader::Info& info,
-                             vk::ShaderModule spv_module, u64 shader_hash);
+                             vk::ShaderModule spv_module, u64 shader_hash,
+                             std::function<vk::ShaderModule()> emit = {});
 
     ~ComputePipeline();
 
