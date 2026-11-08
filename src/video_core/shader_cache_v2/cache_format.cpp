@@ -157,20 +157,21 @@ std::array<u8, FileHeaderSize> EncodeFileHeader(u64 created_unix) {
 
 void EncodeRecord(std::vector<u8>& out, RecordKind kind, u64 key, std::span<const u8> payload,
                   u16 flags) {
-    const size_t begin = out.size();
-    out.resize(begin + RecordSize(payload.size()));
-    u8* const record = out.data() + begin;
-    Store<u32>(record, RecordMagic);
-    Store<u16>(record + 4, static_cast<u16>(kind));
-    Store<u16>(record + 6, flags);
-    Store<u32>(record + 8, static_cast<u32>(payload.size()));
-    Store<u64>(record + 12, key);
-    Store<u32>(record + 20, Crc32(record, 20));
-    if (!payload.empty()) {
-        std::memcpy(record + RecordHeaderSize, payload.data(), payload.size());
-    }
-    Store<u64>(record + RecordHeaderSize + payload.size(),
-               PayloadHash(static_cast<u16>(kind), key, payload));
+    std::array<u8, RecordHeaderSize> header{};
+    Store<u32>(header.data(), RecordMagic);
+    Store<u16>(header.data() + 4, static_cast<u16>(kind));
+    Store<u16>(header.data() + 6, flags);
+    Store<u32>(header.data() + 8, static_cast<u32>(payload.size()));
+    Store<u64>(header.data() + 12, key);
+    Store<u32>(header.data() + 20, Crc32(header.data(), 20));
+    std::array<u8, RecordHashSize> hash{};
+    Store<u64>(hash.data(), PayloadHash(static_cast<u16>(kind), key, payload));
+    const size_t end = out.size() + RecordSize(payload.size());
+    out.reserve(end);
+    out.insert(out.end(), header.begin(), header.end());
+    out.insert(out.end(), payload.begin(), payload.end());
+    out.insert(out.end(), hash.begin(), hash.end());
+    out.resize(end);
 }
 
 std::vector<u8> TombstonePayload(RecordKind kind) {
