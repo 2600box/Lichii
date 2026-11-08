@@ -35,9 +35,10 @@ enum Switch : u32 {
     PipelineClean = 8192,   ///< pipeline-clean: no pipeline key refresh while its inputs hold (1c8772da73)
     FlushCoalesce = 16384,  ///< flush-coalesce: adjacent device pages flush in one call (9bd828ce55)
     AliasSkip = 32768,      ///< alias-skip: no alias walk while no alias is newer (e368878151)
+    ResetBatch = 65536,     ///< reset-batch: indirect reset records written in merged runs (b33ef6014b)
 };
 
-inline constexpr std::array<std::pair<Switch, const char*>, 16> switch_files{{
+inline constexpr std::array<std::pair<Switch, const char*>, 17> switch_files{{
     {BackPicksOff, "back-perf-off"},
     {EntryWaitSkip, "entry-wait-skip"},
     {UboInPlace, "ubo-inplace"},
@@ -54,6 +55,7 @@ inline constexpr std::array<std::pair<Switch, const char*>, 16> switch_files{{
     {PipelineClean, "pipeline-clean"},
     {FlushCoalesce, "flush-coalesce"},
     {AliasSkip, "alias-skip"},
+    {ResetBatch, "reset-batch"},
 }};
 
 inline std::atomic<u32> g_on{0};

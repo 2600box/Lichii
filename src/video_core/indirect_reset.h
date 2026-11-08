@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <limits>
 #include <optional>
+#include <vector>
 
 #include "common/common_types.h"
 
@@ -27,5 +29,45 @@ struct IndirectResetListRange {
         return std::nullopt;
     }
     return IndirectResetListRange{begin, size};
+}
+
+struct IndirectResetRecord {
+    u64 gpu_addr;
+    u64 device_addr;
+};
+
+struct IndirectResetRun {
+    u64 gpu_addr;
+    u64 device_addr;
+    u64 size;
+};
+
+/// Sorts the records and merges duplicates and records adjacent in both address spaces into
+/// runs. Records that partly overlap make the write order matter, so they get no runs.
+[[nodiscard]] inline std::optional<std::vector<IndirectResetRun>> IndirectResetRuns(
+    std::vector<IndirectResetRecord> records, u64 record_size) {
+    std::ranges::sort(records, {}, &IndirectResetRecord::gpu_addr);
+    std::vector<IndirectResetRun> runs;
+    for (const IndirectResetRecord& record : records) {
+        if (runs.empty()) {
+            runs.push_back({record.gpu_addr, record.device_addr, record_size});
+            continue;
+        }
+        IndirectResetRun& run = runs.back();
+        const u64 last = run.gpu_addr + run.size - record_size;
+        if (record.gpu_addr == last) {
+            continue;
+        }
+        if (record.gpu_addr < last + record_size) {
+            return std::nullopt;
+        }
+        if (record.gpu_addr == run.gpu_addr + run.size &&
+            record.device_addr == run.device_addr + run.size) {
+            run.size += record_size;
+            continue;
+        }
+        runs.push_back({record.gpu_addr, record.device_addr, record_size});
+    }
+    return runs;
 }
 } // namespace VideoCommon

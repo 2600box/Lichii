@@ -710,9 +710,45 @@ bool RasterizerVulkan::TryNx2IndirectReset(bool is_indexed, u32 instance_count) 
     }
     namespace Experiment = VideoCommon::Nx2Experiment;
     const auto loop_start = std::chrono::steady_clock::now();
-    const std::span<const u8> bytes{reinterpret_cast<const u8*>(record.data()), sizeof(record)};
-    for (const u64 pointer : pointers) {
-        AccelerateInlineToMemory(pointer, bytes.size(), bytes);
+    // Ported from b33ef6014b and 27a56ad29f (PR #769): one write per run of adjacent records.
+    std::optional<std::vector<VideoCommon::IndirectResetRun>> runs;
+    if (Experiment::On(Experiment::ResetBatch)) {
+        std::vector<VideoCommon::IndirectResetRecord> records;
+        records.reserve(pointers.size());
+        for (const u64 pointer : pointers) {
+            const auto device_addr = gpu_memory->GpuToCpuAddress(pointer);
+            if (!device_addr) {
+                break;
+            }
+            records.push_back({pointer, *device_addr});
+        }
+        if (records.size() == pointers.size()) {
+            runs = VideoCommon::IndirectResetRuns(std::move(records), sizeof(record));
+        }
+        if (!runs) {
+            Experiment::g_reset_unbatched.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    if (runs) {
+        u64 longest = 0;
+        for (const auto& run : *runs) {
+            longest = (std::max)(longest, run.size);
+        }
+        std::vector<u8> pattern(longest);
+        for (u64 offset = 0; offset < longest; offset += sizeof(record)) {
+            std::memcpy(pattern.data() + offset, record.data(), sizeof(record));
+        }
+        for (const auto& run : *runs) {
+            AccelerateInlineToMemory(run.gpu_addr, run.size,
+                                     std::span<const u8>{pattern.data(), run.size});
+        }
+        Experiment::g_reset_runs.fetch_add(runs->size(), std::memory_order_relaxed);
+    } else {
+        const std::span<const u8> bytes{reinterpret_cast<const u8*>(record.data()),
+                                        sizeof(record)};
+        for (const u64 pointer : pointers) {
+            AccelerateInlineToMemory(pointer, bytes.size(), bytes);
+        }
     }
     Experiment::g_reset_calls.fetch_add(1, std::memory_order_relaxed);
     Experiment::g_reset_records.fetch_add(count, std::memory_order_relaxed);
