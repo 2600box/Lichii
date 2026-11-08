@@ -25,13 +25,20 @@ inline bool vstream{};
 
 inline std::atomic<u64> g_vstream_skipped{0};
 
+/// GPU::TickWork returns without its mutex when every sync request made has run
+/// (jpkto 20628c90ae).
+inline bool tickwork{};
+
+inline std::atomic<u64> g_tickwork_skipped{0};
+
 inline void ReadSwitches() {
     const auto read = [](const char* name) {
         const char* const value = std::getenv(name);
         return value != nullptr && value[0] == '1';
     };
     vstream = read("EDEN_NX2_EGLA66_VSTREAM");
-    LOG_INFO(HW_GPU, "EGLA66 sweep 3 gates: vstream {}", vstream);
+    tickwork = read("EDEN_NX2_EGLA66_TICKWORK");
+    LOG_INFO(HW_GPU, "EGLA66 sweep 3 gates: vstream {}, tickwork {}", vstream, tickwork);
 }
 
 /// For counters one thread writes: a plain load and store, not a locked add.
@@ -41,7 +48,7 @@ inline void Count(std::atomic<u64>& counter, u64 amount = 1) {
 
 /// The split's back thread, once per loop: logs what the enabled candidates did in the last 10 s.
 inline void Report() {
-    if (!vstream) {
+    if (!vstream && !tickwork) {
         return;
     }
     static u32 calls{};
@@ -65,6 +72,11 @@ inline void Report() {
         static u64 skipped{};
         LOG_INFO(HW_GPU, "EGLA66 vstream: {} disabled vertex streams not translated in 10 s",
                  take(g_vstream_skipped, skipped));
+    }
+    if (tickwork) {
+        static u64 skipped{};
+        LOG_INFO(HW_GPU, "EGLA66 tickwork: {} ticks returned without the mutex in 10 s",
+                 take(g_tickwork_skipped, skipped));
     }
 }
 
