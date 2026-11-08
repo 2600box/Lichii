@@ -28,6 +28,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_fast_draw.h"
+#include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
 
 namespace VideoCommon {
@@ -140,6 +141,7 @@ void GpuSplit::Stop() {
     // wrap at a time and never reached the old write position (the next game's first GPU work
     // never ran, it waited on its syncpoint forever), and the engines it held were freed.
     ring.reset();
+    open_run = nullptr;
     write_position = 0;
     last_writer_position = 0;
     last_sync_position = 0;
@@ -152,6 +154,7 @@ void GpuSplit::Stop() {
     published.store(0, std::memory_order_relaxed);
     consumed.store(0, std::memory_order_relaxed);
     back_waiting.store(false, std::memory_order_relaxed);
+    back_idle.store(false, std::memory_order_relaxed);
     front_waiting.store(false, std::memory_order_relaxed);
 }
 
@@ -189,13 +192,18 @@ void GpuSplit::WaitForSpace(size_t words) {
 }
 
 void GpuSplit::Publish() {
+    // The back may read anything published: no more appends to the open run.
+    open_run = nullptr;
     if (published_local == write_position) {
         return;
     }
     published_local = write_position;
     publish_every = std::min<size_t>(publish_every * 2, PublishEvery);
     published.store(write_position, std::memory_order_seq_cst);
-    if (back_waiting.load(std::memory_order_seq_cst)) {
+    // EGLA-66 publish: taken back here, so the publishes until the back runs again (one per
+    // entry while it is idle) don't wake it once more each.
+    if (back_waiting.load(std::memory_order_seq_cst) &&
+        (!Nx2Egla66::publish || back_waiting.exchange(false, std::memory_order_seq_cst))) {
         wake.fetch_add(1, std::memory_order_seq_cst);
         wake.notify_one();
     }
@@ -354,6 +362,17 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
                 }
                 return count;
             }
+            // EGLA-66 state-run (9b06c4fd38): state writes in a row in one loop, as the sink
+            // would process them, instead of a sink push (or CallMethod for macro writes) each.
+            if (Nx2Egla66::state_run && !maxwell3d->execution_mask[method] &&
+                (head & HasSegment) == 0 && method < Maxwell3D::Regs::NUM_REGS &&
+                !Nx2Perf::Verify()) {
+                maxwell3d->ConsumeSink(*system);
+                const size_t count = maxwell3d->CallStateMethodRun(entry, words);
+                Nx2Egla66::Count(Nx2Egla66::g_state_runs);
+                Nx2Egla66::Count(Nx2Egla66::g_state_run_writes, count);
+                return count;
+            }
             if ((head & Direct) != 0) {
                 maxwell3d->ConsumeSink(*system);
                 maxwell3d->CallMethod(*system, method, argument, true);
@@ -404,6 +423,58 @@ size_t GpuSplit::Execute(const u64* entry, size_t words) {
                                 amount, static_cast<u32>(entry[1]));
         return data + (amount + 1) / 2;
     }
+    case Kind::Run: {
+        const size_t count = static_cast<size_t>((head >> 8) & 0xffffff);
+        const u64* const writes = entry + 1;
+        auto* const engine = back_engine;
+        if (engine->fast_maxwell3d) {
+            // As the Direct Method entries above, constant buffer words in a row included. Only
+            // Method entries feed the sink: one check covers the run.
+            engine->ConsumeSink(*system);
+            using Tegra::Engines::Maxwell3D;
+            auto* const maxwell3d = static_cast<Maxwell3D*>(engine);
+            constexpr u32 cb_data = MAXWELL3D_REG_INDEX(const_buffer.buffer);
+            for (size_t i = 0; i < count;) {
+                const u32 method = static_cast<u32>((writes[i] >> 8) & 0xffff);
+                const u32 argument = static_cast<u32>(writes[i] >> 32);
+                if (method - cb_data >= 16) {
+                    maxwell3d->CallMethod(*system, method, argument, true);
+                    ++i;
+                    continue;
+                }
+                std::array<u32, 64> methods;
+                std::array<u32, 64> arguments;
+                u32 words_in_row = 0;
+                while (words_in_row < methods.size() && i < count) {
+                    const u32 next_method = static_cast<u32>((writes[i] >> 8) & 0xffff);
+                    if (next_method - cb_data >= 16) {
+                        break;
+                    }
+                    methods[words_in_row] = next_method;
+                    arguments[words_in_row] = static_cast<u32>(writes[i] >> 32);
+                    ++words_in_row;
+                    ++i;
+                }
+                if (words_in_row == 1) {
+                    maxwell3d->CallMethod(*system, method, argument, true);
+                } else {
+                    maxwell3d->CallConstBufferWords(*system, methods.data(), arguments.data(),
+                                                    words_in_row);
+                }
+            }
+            return 1 + count;
+        }
+        Nx2Profile::Scope method_scope{Nx2Profile::Zone::Method};
+        for (size_t i = 0; i < count; ++i) {
+            if (!engine->reports_fast_draw_breaks) {
+                Nx2FastDraw::Break(Nx2FastDraw::Reason::OtherEngine);
+            }
+            engine->ConsumeSink(*system);
+            engine->CallMethod(*system, static_cast<u32>((writes[i] >> 8) & 0xffff),
+                               static_cast<u32>(writes[i] >> 32), true);
+        }
+        return 1 + count;
+    }
     case Kind::Call: {
         if ((head & FastDrawNeutral) == 0) {
             Nx2FastDraw::Break(Nx2FastDraw::Reason::Call);
@@ -433,9 +504,13 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
     u64 read_position = 0;
     while (!stop_token.stop_requested()) {
         Nx2Profile::Report("GPU back thread");
+        Nx2Egla66::Report();
         u64 available = published.load(std::memory_order_acquire);
         if (available == read_position) {
             Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
+            if (Nx2Egla66::publish) {
+                back_idle.store(true, std::memory_order_relaxed);
+            }
             // The front usually sends more within microseconds: spin briefly before sleeping.
             for (u32 spins = 0; spins < 8192 && available == read_position &&
                                 !hook_requested.load(std::memory_order_relaxed);
@@ -462,6 +537,9 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 back_waiting.store(false, std::memory_order_relaxed);
                 continue;
             }
+        }
+        if (Nx2Egla66::publish && back_idle.load(std::memory_order_relaxed)) {
+            back_idle.store(false, std::memory_order_relaxed);
         }
         u64 last_store = read_position;
         while (read_position != available) {

@@ -12,6 +12,7 @@
 #include <type_traits>
 
 #include "common/common_types.h"
+#include "video_core/nx2_egla66.h"
 
 namespace Core {
 class System;
@@ -121,6 +122,10 @@ public:
     /// A write made by a macro: CallMethod without the method sink, as the engines' macros do.
     void MacroWrite(Tegra::Engines::EngineInterface* engine, u32 method, u32 argument) {
         SelectEngine(engine);
+        if (Nx2Egla66::ring_run) {
+            AppendRunWrite((u64{method & 0xffff} << 8) | (u64{argument} << 32));
+            return;
+        }
         u64* const entry = Reserve(1);
         entry[0] = static_cast<u64>(Kind::Method) | IsLast | Direct | (u64{method & 0xffff} << 8) |
                    (u64{argument} << 32);
@@ -163,6 +168,14 @@ public:
 
     /// Makes what was sent visible to the back.
     void Publish();
+    /// EGLA-66 publish (#717 PUBLISH_WAITS): before the front yields or sleeps, so the back
+    /// doesn't idle on work the front already decoded.
+    void PublishBeforeWait() {
+        if (published_local != write_position) {
+            Nx2Egla66::Count(Nx2Egla66::g_wait_publishes);
+            Publish();
+        }
+    }
     /// Waits until the back executed everything sent so far.
     void Drain(DrainSite site = DrainSite::Other);
 
@@ -192,7 +205,9 @@ private:
         Method, ///< Bits 8-23 method, 32-63 argument; flags IsLast, HasSegment (word 1)
         Multi,  ///< Bits 8-23 method, 32-63 amount; word 1 methods pending, [segment], words
         Call,   ///< Bits 8-31 payload size in words; word 1 thunk, then the payload
+        Run,    ///< Bits 8-31 count; then count macro writes (bits 8-23 method, 32-63 argument)
     };
+    static constexpr u64 MaxRunWrites = (u64{1} << 24) - 1;
     static constexpr u64 IsLast = 1 << 4;
     static constexpr u64 HasSegment = 1 << 5;
     static constexpr u64 Direct = 1 << 6; ///< Method: call it even if not executable (macros)
@@ -217,9 +232,45 @@ private:
         return ReserveSlow(words);
     }
     u64* ReserveSlow(size_t words);
+    /// EGLA-66 ring-run: consecutive macro writes to one engine go into one Run entry (the back
+    /// loops over them instead of dispatching an entry per write: ~2.5 million writes a second in
+    /// DK Bananza).
+    void AppendRunWrite(u64 word) {
+        Nx2Egla66::Count(Nx2Egla66::g_ring_run_writes);
+        if (open_run != nullptr && open_run_end == write_position &&
+            ((open_run[0] >> 8) & 0xffffff) < MaxRunWrites) {
+            u64* const next = Reserve(1);
+            // Reserve may have wrapped or published (closing the run): append only right after
+            // the run's last word.
+            if (open_run != nullptr && next == open_run + 1 + ((open_run[0] >> 8) & 0xffffff)) {
+                *next = word;
+                open_run[0] += u64{1} << 8;
+                Commit(1);
+                if (open_run != nullptr) {
+                    open_run_end = write_position;
+                }
+                return;
+            }
+            open_run = nullptr;
+        }
+        Nx2Egla66::Count(Nx2Egla66::g_ring_runs);
+        u64* const entry = Reserve(2);
+        entry[0] = static_cast<u64>(Kind::Run) | (u64{1} << 8);
+        entry[1] = word;
+        open_run = entry;
+        Commit(2);
+        if (open_run != nullptr) {
+            open_run_end = write_position;
+        }
+    }
     void Commit(size_t words) {
         write_position += words;
         if (write_position - published_local >= publish_every) {
+            Publish();
+        } else if (Nx2Egla66::publish && back_idle.load(std::memory_order_relaxed)) {
+            // EGLA-66 publish (#717 PUBLISH_IDLE): a back that ran out of work gets each entry
+            // at once instead of every publish_every words.
+            Nx2Egla66::Count(Nx2Egla66::g_idle_publishes);
             Publish();
         }
     }
@@ -261,6 +312,9 @@ private:
     /// Words between publishes: small right after a drain, while the back has nothing to do.
     size_t publish_every{PublishEvery};
     Tegra::Engines::EngineInterface* front_engine{};
+    /// The Run entry MacroWrite appends to (unpublished, nothing written after it), or null.
+    u64* open_run{};
+    u64 open_run_end{};
 
     // Back side.
     Tegra::Engines::EngineInterface* back_engine{};
@@ -280,6 +334,8 @@ private:
     alignas(128) std::atomic<u64> wait_target{~u64{0}};
     alignas(128) std::atomic<bool> back_waiting{};
     std::atomic<u32> wake{};
+    /// EGLA-66 publish: the back found the ring empty (it spins, runs its hook, then sleeps).
+    alignas(128) std::atomic<bool> back_idle{};
     /// The front sleeps in Backoff (#161: instead of yielding).
     alignas(128) std::atomic<bool> front_waiting{};
     std::atomic<u32> front_wake{};

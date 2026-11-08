@@ -91,6 +91,11 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
                     if (!scheduler.HasPendingChannels()) {
                         continue;
                     }
+                    // EGLA-66 publish (#717 PUBLISH_WAITS): what the resumed channels sent goes
+                    // to the back before this thread yields or sleeps.
+                    if (VideoCommon::Nx2Egla66::publish && split.Active()) {
+                        split.PublishBeforeWait();
+                    }
                     // The CPU usually releases the semaphore soon after: poll for half a
                     // millisecond, then in short sleeps. Ocarina of Time waits here ~330 times a
                     // second and its present waits for the work behind them: with 1 ms sleeps the
