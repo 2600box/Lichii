@@ -43,6 +43,8 @@ GRAPHICS_KEY_SIZE = 1056
 # Versions 47 through 54 share one record layout; 46 lacks storage-pointer classifications.
 CACHE_VERSIONS = range(46, 55)
 CACHE_NAME = re.compile(r"vulkan(?:\.fork-v\d+)?\.bin")
+# The shader cache v2 log of a title, beside its Vulkan pipeline cache
+V2_LOG_NAME = "lichii-cache.v2.bin"
 
 
 class CacheError(ValueError):
@@ -180,11 +182,11 @@ def first_difference(a, b):
     return words
 
 
-def replay_record(record, sides, root, timeout, keep_spirv):
-    """Compile one pipeline record on both sides and compare each stage's module."""
+def replay_record(pair, sides, root, timeout, keep_spirv):
+    """Compile one record on each side (A's and B's copy of it) and compare each stage's module."""
     outputs = []
-    for side in sides:
-        directory = root / "spirv" / side["name"] / record["id"]
+    for side, record in zip(sides, pair["records"]):
+        directory = root / "spirv" / side["name"] / pair["id"]
         command = [side["compiler"], "--pipeline", record["path"], "--cache-version",
                    str(record["version"]), "--path", side["path"], "--output-dir", str(directory)]
         result = invoke(command, timeout)
@@ -194,16 +196,24 @@ def replay_record(record, sides, root, timeout, keep_spirv):
             stages = None
         outputs.append((directory, result, stages))
     (dir_a, a, stages_a), (dir_b, b, stages_b) = outputs
+    record_a, record_b = pair["records"]
     rows = []
-    for index, env in enumerate(record["environments"]):
+    for index, env in enumerate(record_a["environments"]):
         reported = [result.get("stages") or [] for result in (a, b)]
         known = [stages[index] if index < len(stages) else {} for stages in reported]
-        row = {"source": record["source"], "record": record["id"], "entry": record["entry"],
-               "record_offset": record["offset"], "env_offset": env["offset"],
+        row = {"source": pair["source"], "record": pair["id"], "entry": record_a["entry"],
+               "record_offset": record_a["offset"], "env_offset": env["offset"],
                "stage": env["stage"], "slot": known[0].get("slot", known[1].get("slot")),
                "unique_hash": known[0].get("unique_hash", known[1].get("unique_hash")),
                "key_a": known[0].get("key"), "key_b": known[1].get("key"),
                "pipeline_hash_a": a.get("pipeline_hash"), "pipeline_hash_b": b.get("pipeline_hash")}
+        if record_b is not record_a:
+            row.update(record_key=pair["record_key"], entry_b=record_b["entry"],
+                       record_offset_b=record_b["offset"], relinked=record_b.get("relinked", False))
+        if len(record_b["environments"]) != len(record_a["environments"]):
+            row.update(verdict="mismatch", detail="the records have different stage counts")
+            rows.append(row)
+            continue
         if stages_a is None or stages_b is None:
             row["verdict"] = "unreplayable" if stages_a is None and stages_b is None else "one-sided"
             for name, result in (("a", a), ("b", b)):
@@ -231,6 +241,62 @@ def replay_record(record, sides, root, timeout, keep_spirv):
     return rows
 
 
+def list_records(side, cache, directory, timeout):
+    """The records of a cache as the side's compiler reads them on its path (shader-sweep --list).
+    A v2 side takes the Program records of the v2 log beside the cache, as the boot does."""
+    command = [side["compiler"], "--list", str(cache), "--path", side["path"],
+               "--output-dir", str(directory)]
+    programs = cache.parent / V2_LOG_NAME
+    if side["path"] == "v2" and programs.is_file():
+        command += ["--programs-log", str(programs)]
+    result = invoke(command, timeout)
+    if result["status"] != "ok":
+        raise CacheError(f"{side['label']} can't list the cache: "
+                         f"{result.get('error', {}).get('message', 'unknown error')}")
+    records = [{"entry": entry, "offset": listed["offset"], "kind": listed["kind"],
+                "path": str(directory / listed["file"]), "version": result["record_version"],
+                "record_key": listed.get("record_key"), "relinked": listed.get("relinked", False),
+                "environments": listed["stages"]}
+               for entry, listed in enumerate(result["records"])]
+    if any(record["record_key"] is None for record in records):
+        raise CacheError(f"{side['label']} has no v2 record keys; build shader-sweep in the tree")
+    info = {key: result[key] for key in ("path", "cache_version", "damaged", "migration", "log",
+                                         "programs") if key in result}
+    return info, records
+
+
+def pair_records(index, source, records_a, records_b, sides):
+    """Pairs records by the v2 record key, which leaves the driver out. Within a key the last
+    record pairs, as the migration keeps the last; the others are collapsed. A key only a legacy
+    side has was dropped by the migration; one only a v2 side has is one-sided."""
+    keys = defaultdict(lambda: ([], []))
+    for side, records in enumerate((records_a, records_b)):
+        for record in records:
+            keys[(record["kind"], record["record_key"])][side].append(record)
+    pairs, left = [], []
+    for (kind, record_key), (on_a, on_b) in keys.items():
+        if on_a and on_b:
+            pairs.append({"id": f"{index:03d}-{on_a[-1]['entry']:06d}", "source": source,
+                          "record_key": record_key, "records": (on_a[-1], on_b[-1])})
+            left += [(name, record, "collapsed") for name, records in (("a", on_a), ("b", on_b))
+                     for record in records[:-1]]
+            continue
+        name, records = ("a", on_a) if on_a else ("b", on_b)
+        other = sides[1 if name == "a" else 0]
+        verdict = ("dropped" if other["path"] == "v2" and sides[0 if name == "a" else 1]["path"]
+                   != "v2" else "one-sided")
+        left += [(name, record, verdict) for record in records]
+    rows = []
+    for name, record, verdict in left:
+        for env in record["environments"]:
+            rows.append({"source": source, "record": f"{index:03d}-{name}{record['entry']:06d}",
+                         "entry": record["entry"], "side": name, "record_offset": record["offset"],
+                         "env_offset": env["offset"], "stage": env["stage"], "slot": None,
+                         "record_key": record["record_key"], "verdict": verdict,
+                         "detail": f"only side {name.upper()} has this record"})
+    return sorted(pairs, key=lambda pair: (pair["records"][0]["entry"], pair["records"][1]["entry"])), rows
+
+
 def key_collisions(rows):
     """Records with different SPIR-V that path B files under the same key, per cache file."""
     seen, collisions = {}, []
@@ -246,23 +312,39 @@ def key_collisions(rows):
     return collisions
 
 
-def replay_summary(rows, collisions, input_errors, sides):
+def replay_summary(rows, collisions, input_errors, sides, listings=()):
     counts = Counter(row["verdict"] for row in rows)
     lines = [f"# Replay: A = {sides[0]['label']}, B = {sides[1]['label']}", "",
              "| Verdict | Stages |", "|---|---:|"]
-    for verdict in ("match", "mismatch", "one-sided", "unreplayable"):
+    for verdict in ("match", "mismatch", "one-sided", "unreplayable", "collapsed", "dropped"):
         lines.append(f"| {verdict} | {counts[verdict]} |")
     lines += [f"| key collisions in B | {len(collisions)} |",
               f"| unreadable caches | {len(input_errors)} |", ""]
     for error in input_errors:
         lines.append(f"- Unreadable cache {error['source']}: {error['error']['message']}")
+    for listing in listings:
+        for name in ("a", "b"):
+            info = listing[name]
+            if info.get("path") != "v2":
+                continue
+            migration, programs = info.get("migration", {}), info.get("programs", {})
+            lines.append(
+                f"- {listing['source']}, side {name.upper()}: migrated from version "
+                f"{migration.get('source_version')}, {migration.get('graphics')} graphics and "
+                f"{migration.get('compute')} compute records, {migration.get('collapsed')} "
+                f"collapsed; Program records {programs.get('records')} ({programs.get('hits')} "
+                f"of this build, {programs.get('relowered')} lowered again, "
+                f"{programs.get('unusable')} unusable), {programs.get('relinked_records')} "
+                f"pipeline records moved to their code")
     identity = "| Source | Record | Env offset | Stage | Slot | Key A | Key B |"
     bad = [row for row in rows if row["verdict"] in ("mismatch", "one-sided")]
     if bad:
         lines += ["", "## Mismatches", "", identity[:-1] + " Verdict | Detail |",
                   "|---|---|---:|---|---:|---|---|---|---|"]
         for row in bad:
-            if row["verdict"] == "mismatch":
+            if "detail" in row:
+                detail = row["detail"]
+            elif row["verdict"] == "mismatch":
                 detail = (f"words {row['words_a']} vs {row['words_b']}, first difference at "
                           f"word {row.get('first_difference_word')}")
             else:
@@ -332,8 +414,25 @@ def replay(argv):
         parser.error("no Vulkan pipeline caches found")
     records_dir = args.output / "records"
     records_dir.mkdir(parents=True)
-    records, input_errors = [], []
+    pairs, rows, input_errors, listings = [], [], [], []
     for index, path in enumerate(files):
+        if "v2" in (args.path_a, args.path_b):
+            # Each side reads the cache its own way; v2 migrates it into a log of its own.
+            try:
+                listed = [list_records(side, path, records_dir / side["name"] / f"{index:03d}",
+                                       args.timeout) for side in sides]
+            except CacheError as exc:
+                input_errors.append({"source": str(path), **failure("input", str(exc))})
+                continue
+            for side in sides:
+                if not args.keep_spirv:
+                    shutil.rmtree(records_dir / side["name"] / f"{index:03d}" / "migration",
+                                  ignore_errors=True)
+            listings.append({"source": str(path), "a": listed[0][0], "b": listed[1][0]})
+            paired, left = pair_records(index, str(path), listed[0][1], listed[1][1], sides)
+            pairs += paired
+            rows += left
+            continue
         try:
             parsed = list(parse_records(path.read_bytes()))
         except (CacheError, OSError) as exc:
@@ -343,32 +442,36 @@ def replay(argv):
             record_id = f"{index:03d}-{record['entry']:06d}"
             record_path = records_dir / f"{record_id}.record"
             record_path.write_bytes(record["bytes"])
-            records.append({**record, "id": record_id, "source": str(path), "path": str(record_path)})
-    rows = []
+            record = {**record, "path": str(record_path)}
+            pairs.append({"id": record_id, "source": str(path), "records": (record, record)})
     with ThreadPoolExecutor(max_workers=args.jobs) as executor:
-        work = executor.map(lambda record: replay_record(record, sides, args.output, args.timeout,
-                                                         args.keep_spirv), records)
+        work = executor.map(lambda pair: replay_record(pair, sides, args.output, args.timeout,
+                                                       args.keep_spirv), pairs)
         for done, record_rows in enumerate(work, 1):
             rows += record_rows
             if done % 100 == 0:
-                print(f"replayed {done}/{len(records)} records", file=sys.stderr)
+                print(f"replayed {done}/{len(pairs)} records", file=sys.stderr)
     collisions = key_collisions(rows)
     # Records that replay identically leave nothing behind; the others keep their record for
     # rerunning the compilers by hand.
     keep = {row["record"] for row in rows if row["verdict"] != "match"}
     keep |= {c[side] for c in collisions for side in ("first", "second")}
-    for record in records:
-        if record["id"] not in keep and not args.keep_spirv:
-            Path(record["path"]).unlink()
+    if not args.keep_spirv:
+        for pair in pairs:
+            if pair["id"] not in keep:
+                for record in pair["records"]:
+                    Path(record["path"]).unlink(missing_ok=True)
     report = {"a": sides[0], "b": sides[1], "inputs": [str(f) for f in files],
-              "input_errors": input_errors, "collisions": collisions, "stages": rows}
+              "input_errors": input_errors, "listings": listings, "collisions": collisions,
+              "stages": rows}
     (args.output / "replay.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    summary = replay_summary(rows, collisions, input_errors, sides)
+    summary = replay_summary(rows, collisions, input_errors, sides, listings)
     (args.output / "summary.md").write_text(summary, encoding="utf-8")
     print(summary)
     counts = Counter(row["verdict"] for row in rows)
-    print(f"{len(files)} caches; {len(records)} records; {len(rows)} stages; "
+    print(f"{len(files)} caches; {len(pairs)} record pairs; {len(rows)} stages; "
           f"{counts['mismatch']} mismatches; {counts['one-sided']} one-sided; "
+          f"{counts['collapsed']} collapsed; {counts['dropped']} dropped; "
           f"{len(collisions)} key collisions")
     return int(bool(input_errors or collisions or counts["mismatch"] or counts["one-sided"]))
 
