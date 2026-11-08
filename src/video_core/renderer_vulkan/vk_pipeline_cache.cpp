@@ -332,6 +332,26 @@ Shader::RuntimeInfo MakeRuntimeInfo(std::span<const Shader::IR::Program> program
     }
     info.force_early_z = key.state.early_z != 0;
     info.y_negate = key.state.y_negate != 0;
+    if (Shader::NoPerspectiveAsSmooth() && key.unique_hashes[5] != 0) {
+        const bool has_tess{key.unique_hashes[3] != 0};
+        const bool last_pre_raster{(stage == Shader::Stage::VertexB && !has_tess && !has_geometry) ||
+                                   (stage == Shader::Stage::TessellationEval && !has_geometry) ||
+                                   (stage == Shader::Stage::Geometry && has_geometry)};
+        if (stage == Shader::Stage::Fragment) {
+            info.scaled_noperspective_inputs =
+                previous_program && (previous_program->stage == Shader::Stage::VertexB ||
+                                     previous_program->stage == Shader::Stage::TessellationEval ||
+                                     previous_program->stage == Shader::Stage::Geometry);
+        }
+        if (last_pre_raster) {
+            const auto& fragment_info{programs[5].info};
+            for (size_t index = 0; index < 32; ++index) {
+                if (fragment_info.interpolation[index] == Shader::Interpolation::NoPerspective) {
+                    info.noperspective_outputs.set(index);
+                }
+            }
+        }
+    }
     return info;
 }
 

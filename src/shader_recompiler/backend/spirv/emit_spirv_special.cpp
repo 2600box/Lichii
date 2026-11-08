@@ -20,6 +20,33 @@ void ConvertDepthMode(EmitContext& ctx) {
     ctx.OpStore(ctx.output_position, vector);
 }
 
+/// Write screen-linear generic outputs times Position.w (see RuntimeInfo::noperspective_outputs).
+void ScaleNoPerspectiveOutputs(EmitContext& ctx) {
+    if (ctx.runtime_info.noperspective_outputs.none() || !Sirit::ValidId(ctx.output_position)) {
+        return;
+    }
+    const Id position{ctx.OpLoad(ctx.F32[4], ctx.output_position)};
+    const Id w{ctx.OpCompositeExtract(ctx.F32[1], position, 3u)};
+    for (size_t index = 0; index < ctx.output_generics.size(); ++index) {
+        if (!ctx.runtime_info.noperspective_outputs.test(index)) {
+            continue;
+        }
+        Id last{};
+        for (const GenericElementInfo& element : ctx.output_generics[index]) {
+            if (!Sirit::ValidId(element.id) || element.id.value == last.value ||
+                element.num_components == 0) {
+                continue;
+            }
+            last = element.id;
+            const Id type{ctx.F32[element.num_components]};
+            const Id value{ctx.OpLoad(type, element.id)};
+            const Id scaled{element.num_components == 1 ? ctx.OpFMul(type, value, w)
+                                                        : ctx.OpVectorTimesScalar(type, value, w)};
+            ctx.OpStore(element.id, scaled);
+        }
+    }
+}
+
 void SetFixedPipelinePointSize(EmitContext& ctx) {
     if (ctx.runtime_info.fixed_state_point_size) {
         const float point_size{*ctx.runtime_info.fixed_state_point_size};
@@ -151,6 +178,9 @@ void EmitEpilogue(EmitContext& ctx) {
         !ctx.profile.support_native_ndc) {
         ConvertDepthMode(ctx);
     }
+    if (ctx.stage == Stage::VertexB || ctx.stage == Stage::TessellationEval) {
+        ScaleNoPerspectiveOutputs(ctx);
+    }
     if (ctx.stage == Stage::Fragment) {
         AlphaTest(ctx);
     }
@@ -160,6 +190,7 @@ void EmitEmitVertex(EmitContext& ctx, const IR::Value& stream) {
     if (ctx.runtime_info.convert_depth_mode && !ctx.profile.support_native_ndc) {
         ConvertDepthMode(ctx);
     }
+    ScaleNoPerspectiveOutputs(ctx);
     // Stream 0 is the plain EmitVertex, which needs no GeometryStreams capability.
     if (stream.IsImmediate() && stream.U32() == 0) {
         ctx.OpEmitVertex();
