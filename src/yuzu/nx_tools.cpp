@@ -287,8 +287,9 @@ struct NxTools::Job {
 
     std::atomic<u64> total{0};
     std::atomic<u64> written{0};
-    // Time left: measured from the start, smoothed so it does not jump.
     QElapsedTimer clock;
+    // When nxformat started counting bytes (ms on `clock`), and the smoothed time left.
+    qint64 counting_since = -1;
     double seconds_left = -1;
     std::mutex lines_mutex;
     QStringList added;
@@ -794,22 +795,50 @@ void NxTools::Start(std::shared_ptr<Job> job) {
     job->clock.start();
     auto* timer = new QTimer(progress);
     connect(timer, &QTimer::timeout, this, [this, job] {
-        const auto total = job->total.load();
-        if (!progress || total == 0 || progress->wasCanceled()) {
+        if (!progress || progress->wasCanceled()) {
             return;
         }
+        // nxformat counts the bytes it reads, not the checks it makes before and after:
+        // those steps are shown as preparing and finishing, with the time elapsed.
+        const auto total = job->total.load();
         const auto done = std::min(job->written.load(), total);
-        const double fraction = static_cast<double>(done) / static_cast<double>(total);
-        const double elapsed = job->clock.elapsed() / 1000.0;
-        if (fraction < 0.01 || elapsed < 5.0) {
-            progress->setLabelText(job->title);
+        const qint64 now = job->clock.elapsed();
+        QString step;
+        if (total == 0) {
+            step = tr("Preparing...");
+        } else if (done >= total) {
+            step = tr("Finishing...");
         } else {
-            const double estimate = elapsed * (1.0 - fraction) / fraction;
-            job->seconds_left = job->seconds_left < 0
-                                    ? estimate
-                                    : job->seconds_left * 0.9 + estimate * 0.1;
-            progress->setLabelText(
-                tr("%1\n%2 left").arg(job->title, TimeLeft(job->seconds_left)));
+            if (job->counting_since < 0) {
+                job->counting_since = now;
+            }
+            // Time left: measured from the first counted byte, smoothed so it does not jump.
+            const double fraction = static_cast<double>(done) / static_cast<double>(total);
+            const double counting = (now - job->counting_since) / 1000.0;
+            if (fraction >= 0.01 && counting >= 5.0) {
+                const double estimate = counting * (1.0 - fraction) / fraction;
+                job->seconds_left = job->seconds_left < 0
+                                        ? estimate
+                                        : job->seconds_left * 0.9 + estimate * 0.1;
+                step = tr("%1 left").arg(TimeLeft(job->seconds_left));
+            }
+        }
+        const qint64 seconds = now / 1000;
+        const QString elapsed =
+            seconds >= 3600
+                ? QStringLiteral("%1:%2:%3")
+                      .arg(seconds / 3600)
+                      .arg(seconds / 60 % 60, 2, 10, QLatin1Char('0'))
+                      .arg(seconds % 60, 2, 10, QLatin1Char('0'))
+                : QStringLiteral("%1:%2").arg(seconds / 60).arg(seconds % 60, 2, 10,
+                                                                 QLatin1Char('0'));
+        QString text = tr("%1\nElapsed: %2").arg(job->title, elapsed);
+        if (!step.isEmpty()) {
+            text += QStringLiteral(" - ") + step;
+        }
+        progress->setLabelText(text);
+        if (total == 0) {
+            return;
         }
         // setValue() of a modal dialog processes events: Finished() may run inside it and
         // close the dialog, so it must be the last use of `progress` here. It stays below
