@@ -90,6 +90,11 @@ public:
         return mask;
     }
 
+    /// Any thread: whether reports may ever have been cached in the region.
+    [[nodiscard]] bool MayHoldQueries(VAddr addr, size_t size) const {
+        return page_filter.Any(addr, size);
+    }
+
     /// Return true when a CPU region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(VAddr addr, size_t size) {
         bool result = false;

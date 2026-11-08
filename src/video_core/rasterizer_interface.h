@@ -161,6 +161,12 @@ public:
         return false;
     }
 
+    /// Any thread: whether reports may ever have been cached in the range (false proves none).
+    [[nodiscard]] virtual bool MayHoldQueries([[maybe_unused]] DAddr addr,
+                                              [[maybe_unused]] u64 size) {
+        return true;
+    }
+
     /// Notify rasterizer that any caches of the specified region should be invalidated
     virtual void InvalidateRegion(DAddr addr, u64 size,
                                   VideoCommon::CacheType which = VideoCommon::CacheType::All) = 0;

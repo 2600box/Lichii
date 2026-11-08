@@ -44,6 +44,11 @@ public:
     }
 
     std::bitset<(std::numeric_limits<u16>::max)()> execution_mask{};
+    /// EXPERIMENT (macro-dma-narrow): methods that can write memory in command order (uploads,
+    /// reports, copies, dispatches). Draws and clears are left out: their writes are visible to the
+    /// front's macro memory reads only after a host-level wait.
+    std::bitset<(std::numeric_limits<u16>::max)()> memory_write_mask =
+        std::bitset<(std::numeric_limits<u16>::max)()>{}.set();
     /// A Maxwell3D whose CallMethod takes its fast path (Nx2Perf): GpuSplit's back calls it
     /// without the virtual call.
     bool fast_maxwell3d{};

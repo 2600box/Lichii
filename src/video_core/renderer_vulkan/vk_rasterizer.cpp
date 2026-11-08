@@ -2328,6 +2328,10 @@ bool RasterizerVulkan::HasPendingQueries(DAddr addr, u64 size) {
     return query_cache.IsRegionGpuModified(addr, size);
 }
 
+bool RasterizerVulkan::MayHoldQueries(DAddr addr, u64 size) {
+    return query_cache.MayHoldQueries(addr, size);
+}
+
 VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64 size) {
     std::optional<VideoCore::RasterizerDownloadArea> texture_area;
     {

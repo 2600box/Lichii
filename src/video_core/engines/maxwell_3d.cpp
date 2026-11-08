@@ -29,6 +29,7 @@
 #include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/query_cache/frame_trace.h"
+#include "video_core/nx2_experiment.h"
 #include "video_core/query_dma.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/textures/texture.h"
@@ -57,6 +58,19 @@ Maxwell3D::Maxwell3D(MemoryManager& memory_manager_)
     execution_mask.reset();
     for (size_t i = 0; i < execution_mask.size(); i++)
         execution_mask[i] = IsMethodExecutable(u32(i));
+    memory_write_mask.reset();
+    for (u32 i = 0; i < 16; ++i) {
+        memory_write_mask[MAXWELL3D_REG_INDEX(const_buffer.buffer) + i] = true;
+    }
+    for (const u32 method :
+         {MAXWELL3D_REG_INDEX(launch_dma), MAXWELL3D_REG_INDEX(inline_data),
+          MAXWELL3D_REG_INDEX(report_semaphore.query), MAXWELL3D_REG_INDEX(sync_info),
+          MAXWELL3D_REG_INDEX(wait_for_idle), MAXWELL3D_REG_INDEX(falcon[4])}) {
+        memory_write_mask[method] = true;
+    }
+    for (size_t i = MacroRegistersStart; i < memory_write_mask.size(); ++i) {
+        memory_write_mask[i] = true;
+    }
     fast_maxwell3d = !record_write_history &&
                      !trace_first_method_writes && !VideoCommon::Nx2Profile::Enabled();
 }
@@ -1536,7 +1550,17 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
         memory_manager.ReadBlockUnsafe(source, diag_before.data(), read_bytes);
     }
     VideoCommon::Nx2Profile::CountDmaRead(macro);
-    split.Drain(VideoCommon::DrainSite::MacroDmaRead);
+    // EXPERIMENT (macro-dma-narrow): wait only for what can have written the words in command
+    // order (gpu_split.h WaitForMemoryWriters); the back re-reads them where the drain would have
+    // and counts the reads that differ.
+    namespace Experiment = VideoCommon::Nx2Experiment;
+    const bool narrow = Experiment::On(Experiment::MacroDmaNarrow) &&
+                        !Tegra::Nx2CmdPageDiag::g_enabled && !VideoCommon::QueryDma::TraceEnabled();
+    if (narrow) {
+        split.WaitForMemoryWriters(VideoCommon::DrainSite::MacroDmaRead);
+    } else {
+        split.Drain(VideoCommon::DrainSite::MacroDmaRead);
+    }
     if (VideoCommon::QueryDma::TraceEnabled()) {
         split.Run(
             [this, macro, method, source, read_bytes] {
@@ -1559,14 +1583,25 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
             VideoCommon::DrainSite::MacroDmaFlush);
     }
     // Write out the reports held in the query cache, or the read returns stale occlusion counts.
-    split.Run(
-        [this, source, read_bytes] {
-            VideoCommon::QueryDma::FlushPending(memory_manager, *rasterizer, source, read_bytes);
-        },
-        VideoCommon::DrainSite::MacroDmaFlush);
+    if (!narrow ||
+        VideoCommon::QueryDma::MayHoldQueries(memory_manager, *rasterizer, source, read_bytes)) {
+        split.Run(
+            [this, source, read_bytes] {
+                VideoCommon::QueryDma::FlushPending(memory_manager, *rasterizer, source,
+                                                    read_bytes);
+            },
+            VideoCommon::DrainSite::MacroDmaFlush);
+    }
+    std::vector<u32> narrow_words;
+    if (narrow) {
+        narrow_words.resize(words);
+    }
     u32 changed{};
     for (u32 i = 0; i < words; ++i) {
         const u32 word = memory_manager.Read<u32>(source + u64{i} * sizeof(u32));
+        if (narrow) {
+            narrow_words[i] = word;
+        }
         if (method == 0x158) {
             fs.parameters.push_back(word);
         } else if (ram + i < native_data_ram.size()) {
@@ -1583,6 +1618,30 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
             gpu_written |= device && Tegra::Nx2IsGpuWritten(*device);
         }
         Tegra::Nx2CmdPageDiag::RecordDmaRead(source, words, changed, gpu_written);
+    }
+    if (narrow) {
+        Experiment::g_dma_narrowed.fetch_add(1, std::memory_order_relaxed);
+        split.DeferFunction([this, source, read_bytes, read = std::move(narrow_words)] {
+            if (memory_manager.IsMemoryDirty(source, read_bytes,
+                                             VideoCommon::CacheType::BufferCache) ||
+                VideoCommon::QueryDma::HasPendingQueries(memory_manager, *rasterizer, source,
+                                                         read_bytes)) {
+                Experiment::g_dma_unverified.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            std::vector<u32> drained(read.size());
+            memory_manager.ReadBlockUnsafe(source, drained.data(), read_bytes);
+            if (drained != read) {
+                const u64 differ =
+                    Experiment::g_dma_differ.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (differ <= 16) {
+                    LOG_WARNING(HW_GPU,
+                                "EXPERIMENT macro-dma-narrow: read of {} words at {:#x} differs "
+                                "from the drained read",
+                                read.size(), source);
+                }
+            }
+        });
     }
 }
 
