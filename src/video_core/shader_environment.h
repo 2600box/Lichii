@@ -23,27 +23,17 @@
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/frontend/ampere/instruction.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/native_lowering.h"
 
 namespace Tegra {
 class Memorymanager;
 }
 
-namespace VideoCommon {
+namespace VideoCommon::ShaderCacheV2 {
+struct ProgramRecord;
+}
 
-/// A native (Switch 2) program after capture and lowering to Maxwell code. The shader cache keeps
-/// it so the environments built for the program's pipelines don't capture and lower it again.
-struct LoweredNativeCode {
-    u64 native_program_key{};
-    /// Shader header, lowered instructions with Maxwell scheduling words, then the native
-    /// address map (what the environment's `code` used to be filled with).
-    std::vector<u64> code;
-    std::vector<Shader::Ampere::Instruction> trap_prefix;
-    /// Bytes of the native program that were read, header included.
-    size_t source_size{};
-    /// Constant buffer holding the texture handles if the program requires one, otherwise ~0U
-    /// (the engine's register value is used).
-    u32 texture_bound = ~0U;
-};
+namespace VideoCommon {
 
 class GenericEnvironment : public Shader::Environment {
 public:
@@ -98,6 +88,12 @@ public:
         return lowered_native;
     }
 
+    /// The v2 cache record of the native program this environment lowered (see
+    /// ShaderCacheV2::Enabled), once
+    [[nodiscard]] std::shared_ptr<const ShaderCacheV2::ProgramRecord> TakeProgramRecord() noexcept {
+        return std::move(program_record);
+    }
+
     /// False for a program with instructions outside what is cached, or with more values of a
     /// kind than a cache record holds
     [[nodiscard]] bool CanBeSerialized() const noexcept;
@@ -107,7 +103,7 @@ public:
     void Dump(u64 pipeline_hash, u64 shader_hash) override;
 
     /// Writes the environment, with the host's Shader::HostTranslateInfo::EnvironmentReadProperties
-    void Serialize(std::ofstream& file, u32 read_properties) const;
+    void Serialize(std::ostream& file, u32 read_properties) const;
 
     bool HasHLEMacroState() const override {
         return has_hle_engine_state;
@@ -125,6 +121,7 @@ protected:
                                                           bool geometry_stage);
     size_t native_source_size{};
     std::shared_ptr<const LoweredNativeCode> lowered_native;
+    std::shared_ptr<const ShaderCacheV2::ProgramRecord> program_record;
 
     Tegra::Texture::TICEntry ReadTextureInfo(GPUVAddr tic_addr, u32 tic_limit,
                                              bool via_header_index, u32 raw);
@@ -248,7 +245,7 @@ public:
     FileEnvironment(const FileEnvironment&) = delete;
 
     /// Reads an environment that must end before `end`, the end of the file
-    void Deserialize(std::ifstream& file, std::streampos end);
+    void Deserialize(std::istream& file, std::streampos end);
 
     [[nodiscard]] size_t MemorySize() const;
 
@@ -365,7 +362,28 @@ void LoadPipelines(std::stop_token stop_loading, const std::filesystem::path& fi
 
 /// The record a LoadPipelines callback has read: from `begin`, where its environment count is, to
 /// where `file` is now, after its key.
-[[nodiscard]] PipelineRecord ReadPipelineRecord(std::ifstream& file, u64 begin);
+[[nodiscard]] PipelineRecord ReadPipelineRecord(std::istream& file, u64 begin);
+
+/// The bytes SerializePipeline appends for a record, for a shader cache v2 record. Empty when an
+/// environment can't be serialized (see GenericEnvironment::CanBeSerialized).
+[[nodiscard]] std::vector<u8> SerializePipelinePayload(
+    std::span<const char> key, std::span<const GenericEnvironment* const> envs,
+    u32 read_properties);
+
+/// Reads one record held in memory (SerializePipelinePayload) as LoadPipelines reads one in a
+/// file: the callback reads the key. Throws std::ios_base::failure when the record is damaged or
+/// has bytes after its key.
+void ReadPipelinePayload(
+    std::span<const u8> payload,
+    Common::UniqueFunction<void, std::istream&, FileEnvironment>& load_compute,
+    Common::UniqueFunction<void, std::istream&, std::vector<FileEnvironment>>& load_graphics);
+
+/// Reads the records of a cache file in order, up to the first damaged one, without its lock and
+/// without ever changing or removing the file. False when it isn't a cache of this version.
+bool ReadPipelinesUnchanged(
+    const std::filesystem::path& filename, u32 cache_version,
+    Common::UniqueFunction<void, std::istream&, FileEnvironment> load_compute,
+    Common::UniqueFunction<void, std::istream&, std::vector<FileEnvironment>> load_graphics);
 
 /// Throws std::ios_base::failure, as for a damaged record, unless a graphics record's key has as
 /// many nonzero shader hashes as the record has environments: one is built from each.

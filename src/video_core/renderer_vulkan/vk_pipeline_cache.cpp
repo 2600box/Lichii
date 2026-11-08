@@ -14,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <span>
 #include <thread>
 #include <unordered_set>
@@ -55,9 +56,12 @@
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache_records.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/vk_shader_cache_v2.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/shader_cache.h"
+#include "video_core/shader_cache_v2/cache_file.h"
+#include "video_core/shader_cache_v2/records.h"
 #include "video_core/shader_environment.h"
 #include "video_core/shader_notify.h"
 #include "video_core/shader_warm/shader_warm_builder.h"
@@ -666,6 +670,11 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
     dynamic_features = {};
     dynamic_features.driver_id = device.GetDriverID();
     dynamic_features.driver_version = device.GetDriverVersion();
+    if (VideoCommon::ShaderCacheV2::Enabled()) {
+        // Keys without the driver, so that a driver update keeps the recorded pipelines
+        dynamic_features.driver_id = 0;
+        dynamic_features.driver_version = 0;
+    }
 
     // User granularity enforced in vulkan_device.cpp switch statement:
     //   Level 0: Core Dynamic States only
@@ -716,9 +725,6 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
 }
 
 namespace {
-// <title>/vulkan_used.bin: the graphics pipelines recent sessions used, as key hash + sessions
-// since the last use.
-constexpr u32 UsedPipelinesMagic = 0x31505545; // "EUP1"
 // Pipelines the last two sessions used are built at boot. Each holds ~0.45 MB of driver memory:
 // title 1 built 4,800 from eight sessions, 1.5 GB more than building them on first use (but that
 // stalled frames 4x as often), while one session of its title screen uses ~1,500.
@@ -735,29 +741,6 @@ u8 MaxUsedPipelineAge(const Device& device) {
         return UsedPipelinesMaxAgeMoltenVK;
     }
     return UsedPipelinesMaxAge;
-}
-
-std::unordered_map<u64, u8> LoadUsedPipelines(const std::filesystem::path& path, u8 max_age) {
-    std::unordered_map<u64, u8> used;
-    std::ifstream file{path, std::ios::binary};
-    u32 magic{}, count{};
-    if (!file.read(reinterpret_cast<char*>(&magic), sizeof(magic)) || magic != UsedPipelinesMagic ||
-        !file.read(reinterpret_cast<char*>(&count), sizeof(count))) {
-        return used;
-    }
-    used.reserve(count);
-    for (u32 i = 0; i < count; ++i) {
-        u64 hash{};
-        u8 age{};
-        if (!file.read(reinterpret_cast<char*>(&hash), sizeof(hash)) ||
-            !file.read(reinterpret_cast<char*>(&age), sizeof(age))) {
-            break;
-        }
-        if (age < max_age) { // lists saved with a longer window
-            used.emplace(hash, age);
-        }
-    }
-    return used;
 }
 
 // Without a list of the pipelines recent sessions used (the first boot with this cache, or a session
@@ -791,6 +774,9 @@ PipelineCache::~PipelineCache() {
         SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
                                      CACHE_VERSION);
     }
+    // After the records the serialization thread queued: its writer drains on destruction
+    shader_cache_v2 = nullptr;
+    cache_v2.reset();
     graphics_cache.clear();
     evicted_pipelines.clear();
 }
@@ -799,8 +785,25 @@ void PipelineCache::SaveUsedPipelines() {
     used_pipelines_saved = std::chrono::steady_clock::now();
     // A session too short to say what the game uses (a boot to the menu) keeps the old list.
     constexpr size_t MinimumUsed = 64;
-    if (used_pipelines_filename.empty() ||
+    if ((used_pipelines_filename.empty() && !cache_v2) ||
         used_this_session.size() + used_and_evicted.size() < MinimumUsed) {
+        return;
+    }
+    if (cache_v2) {
+        // This session's record, written by the cache's thread; older sessions keep theirs.
+        VideoCommon::ShaderCacheV2::UsedRecord record{.session_time = used_session_time};
+        for (const auto& [key, pipeline] : graphics_cache) {
+            if (used_this_session.contains(pipeline.get())) {
+                record.pipelines.push_back(key.Hash());
+            }
+        }
+        record.pipelines.insert(record.pipelines.end(), used_and_evicted.begin(),
+                                used_and_evicted.end());
+        std::ranges::sort(record.pipelines);
+        record.pipelines.erase(std::ranges::unique(record.pipelines).begin(),
+                               record.pipelines.end());
+        cache_v2->Writer().Append(VideoCommon::ShaderCacheV2::RecordKind::Used, used_session_key,
+                                  VideoCommon::ShaderCacheV2::EncodeUsed(record));
         return;
     }
     std::unordered_map<u64, u8> next;
@@ -985,6 +988,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
                                          CACHE_VERSION);
         }
+        shader_cache_v2 = nullptr;
+        cache_v2.reset();
     }
 
     namespace StutterTrace = VideoCommon::StutterTrace;
@@ -996,32 +1001,72 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         LOG_ERROR(Common_Filesystem, "Failed to create pipeline cache directories");
         return;
     }
-    pipeline_cache_filename =
-        VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan", CACHE_VERSION);
-    used_pipelines_filename =
-        VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used", CACHE_VERSION);
-    const auto carried = VideoCommon::CarryOverPipelineCache(
-        base_dir, "vulkan", VideoCommon::PipelineCacheMagic,
-        VideoCommon::CompatibleVulkanPipelineCacheVersions, CACHE_VERSION);
-    if (carried.version) {
-        // The used list goes with the pipelines it was saved beside, never one this version kept
-        // after its own cache was removed.
-        const auto carried_used =
-            VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used", *carried.version);
-        std::error_code migration_error;
-        if (std::filesystem::exists(carried_used, migration_error)) {
-            std::filesystem::copy_file(carried_used, used_pipelines_filename,
-                                       std::filesystem::copy_options::overwrite_existing,
-                                       migration_error);
-        } else {
-            std::filesystem::remove(used_pipelines_filename, migration_error);
+    namespace CacheV2 = VideoCommon::ShaderCacheV2;
+    std::optional<CacheV2::LogFile> log_v2;
+    if (CacheV2::Enabled()) {
+        pipeline_cache_filename = base_dir / CacheV2::FileName;
+        used_pipelines_filename.clear();
+        const auto migration = MigrateLegacyPipelineCache(base_dir, pipeline_cache_filename,
+                                                          MaxUsedPipelineAge(device));
+        if (migration.version) {
+            LOG_INFO(Render_Vulkan,
+                     "Shader cache v2 started from the version {} cache: {} graphics and {} "
+                     "compute pipelines ({} records collapsed), {} used-list entries",
+                     *migration.version, migration.graphics, migration.compute,
+                     migration.collapsed, migration.used);
+        } else if (migration.failed) {
+            LOG_WARNING(Render_Vulkan, "Couldn't start shader cache v2 from the older cache");
         }
-        LOG_INFO(Render_Vulkan, "Pipeline cache started from the version {} cache",
-                 *carried.version);
-    } else if (carried.failed) {
-        LOG_WARNING(Render_Vulkan, "Couldn't copy the older pipeline cache; this one starts empty");
+        cache_v2 = std::make_unique<CacheV2::Cache>(pipeline_cache_filename);
+        shader_cache_v2 = cache_v2.get();
+        // Without the lock: another emulator's appends are complete records or a cut-off tail.
+        log_v2.emplace(CacheV2::ReadLogFile(pipeline_cache_filename));
+        const CacheV2::LogStats& stats = log_v2->parsed.stats;
+        LOG_INFO(Render_Vulkan,
+                 "Shader cache v2: {} bytes, {} live records, {} superseded, {} tombstones, {} "
+                 "damaged headers, {} damaged records, {} bytes skipped, {} bytes cut off",
+                 stats.file_size, stats.live, stats.superseded, stats.tombstones,
+                 stats.bad_headers, stats.bad_payloads, stats.skipped_bytes,
+                 stats.torn_tail_bytes);
+        std::vector<u64> expired_sessions;
+        used_pipelines = UsedPipelinesFromLog(log_v2->parsed.live, MaxUsedPipelineAge(device),
+                                              expired_sessions);
+        for (const u64 session : expired_sessions) {
+            cache_v2->Writer().Append(CacheV2::RecordKind::Tombstone, session,
+                                      CacheV2::TombstonePayload(CacheV2::RecordKind::Used));
+        }
+        used_session_time = static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                 std::chrono::system_clock::now().time_since_epoch())
+                                                 .count());
+        used_session_key = used_session_time ^ std::random_device{}();
+    } else {
+        pipeline_cache_filename =
+            VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan", CACHE_VERSION);
+        used_pipelines_filename =
+            VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used", CACHE_VERSION);
+        const auto carried = VideoCommon::CarryOverPipelineCache(
+            base_dir, "vulkan", VideoCommon::PipelineCacheMagic,
+            VideoCommon::CompatibleVulkanPipelineCacheVersions, CACHE_VERSION);
+        if (carried.version) {
+            // The used list goes with the pipelines it was saved beside, never one this version kept
+            // after its own cache was removed.
+            const auto carried_used =
+                VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used", *carried.version);
+            std::error_code migration_error;
+            if (std::filesystem::exists(carried_used, migration_error)) {
+                std::filesystem::copy_file(carried_used, used_pipelines_filename,
+                                           std::filesystem::copy_options::overwrite_existing,
+                                           migration_error);
+            } else {
+                std::filesystem::remove(used_pipelines_filename, migration_error);
+            }
+            LOG_INFO(Render_Vulkan, "Pipeline cache started from the version {} cache",
+                     *carried.version);
+        } else if (carried.failed) {
+            LOG_WARNING(Render_Vulkan, "Couldn't copy the older pipeline cache; this one starts empty");
+        }
+        used_pipelines = LoadUsedPipelines(used_pipelines_filename, MaxUsedPipelineAge(device));
     }
-    used_pipelines = LoadUsedPipelines(used_pipelines_filename, MaxUsedPipelineAge(device));
     used_pipelines_saved = std::chrono::steady_clock::now();
     size_t skipped_pipelines = 0;
     size_t deferred_pipelines = 0;
@@ -1076,7 +1121,14 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         compute_envs;
     // Where each record read begins and ends, to remove those the load never chooses.
     u64 record_begin{VideoCommon::PipelineCacheMagic.size() + sizeof(CACHE_VERSION)};
-    const auto read_record{[&](std::ifstream& file) {
+    // In v2 the kind and key of each record read, which a record's index stands for
+    std::vector<std::pair<CacheV2::RecordKind, u64>> records_v2;
+    const auto read_record{[&](std::istream& file) {
+        if (log_v2) {
+            const u64 index{records_v2.size() - 1};
+            return VideoCommon::PipelineRecord{
+                .begin = index, .end = index + 1, .hash = records_v2.back().second};
+        }
         const auto record{VideoCommon::ReadPipelineRecord(file, record_begin)};
         record_begin = record.end;
         return record;
@@ -1088,7 +1140,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     if (device.IsKhrPipelineExecutablePropertiesEnabled()) {
         state.statistics = std::make_unique<PipelineStatistics>(device);
     }
-    const auto load_compute{[&](std::ifstream& file, FileEnvironment env) {
+    const auto load_compute{[&](std::istream& file, FileEnvironment env) {
         ++compute_records;
         ComputePipelineCacheKey key;
         file.read(reinterpret_cast<char*>(&key), sizeof(key));
@@ -1124,7 +1176,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         });
         ++state.total;
     }};
-    const auto load_graphics{[&](std::ifstream& file, std::vector<FileEnvironment> envs) {
+    const auto load_graphics{[&](std::istream& file, std::vector<FileEnvironment> envs) {
         ++graphics_records;
         GraphicsPipelineCacheKey key;
         file.read(reinterpret_cast<char*>(&key), sizeof(key));
@@ -1249,8 +1301,54 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         });
         ++state.total;
     }};
-    VideoCommon::LoadPipelines(stop_loading, pipeline_cache_filename, CACHE_VERSION, load_compute,
-                               load_graphics);
+    if (log_v2) {
+        Common::UniqueFunction<void, std::istream&, FileEnvironment> compute_v2{
+            [&](std::istream& file, FileEnvironment env) {
+                if (records_v2.back().first != CacheV2::RecordKind::Compute) {
+                    throw std::ios_base::failure("Compute pipeline in another kind of record");
+                }
+                load_compute(file, std::move(env));
+            }};
+        Common::UniqueFunction<void, std::istream&, std::vector<FileEnvironment>> graphics_v2{
+            [&](std::istream& file, std::vector<FileEnvironment> envs) {
+                if (records_v2.back().first != CacheV2::RecordKind::Graphics) {
+                    throw std::ios_base::failure("Graphics pipeline in another kind of record");
+                }
+                load_graphics(file, std::move(envs));
+            }};
+        try {
+            for (const CacheV2::LogRecord& record : log_v2->parsed.live) {
+                if (stop_loading.stop_requested()) {
+                    break;
+                }
+                if (record.kind == CacheV2::RecordKind::Program) {
+                    if (const auto stamp = CacheV2::ProgramStamp(record.payload)) {
+                        cache_v2->AddProgram(record.key, *stamp);
+                    }
+                    continue;
+                }
+                if (record.kind != CacheV2::RecordKind::Graphics &&
+                    record.kind != CacheV2::RecordKind::Compute) {
+                    continue;
+                }
+                records_v2.emplace_back(record.kind, record.key);
+                try {
+                    VideoCommon::ReadPipelinePayload(record.payload, compute_v2, graphics_v2);
+                } catch (const std::ios_base::failure& e) {
+                    // Intact, but not a record this build reads: it goes.
+                    LOG_ERROR(Common_Filesystem, "Shader cache v2 record {:016x}: {}", record.key,
+                              e.what());
+                    cache_v2->Writer().Append(CacheV2::RecordKind::Tombstone, record.key,
+                                              CacheV2::TombstonePayload(record.kind));
+                }
+            }
+        } catch (const std::bad_alloc& e) {
+            LOG_ERROR(Common_Filesystem, "Stopped loading shader cache v2: {}", e.what());
+        }
+    } else {
+        VideoCommon::LoadPipelines(stop_loading, pipeline_cache_filename, CACHE_VERSION,
+                                   load_compute, load_graphics);
+    }
     for (auto& [key, candidates] : compute_envs) {
         OrderComputeTranslations(candidates);
         queue_compute(key, std::move(candidates));
@@ -1284,7 +1382,24 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     for (const auto& duplicate : graphics_duplicates) {
         superseded_bytes += duplicate.record.end - duplicate.record.begin;
     }
-    if (!stop_loading.stop_requested() &&
+    if (log_v2) {
+        // The records the load never chooses go by tombstones, and the log is compacted once a
+        // quarter of it is records no load reads.
+        if (!stop_loading.stop_requested()) {
+            for (const auto* removed : {&state.incomplete, &state.copies}) {
+                for (const VideoCommon::PipelineRecord& record : *removed) {
+                    const auto& [kind, key] = records_v2[record.begin];
+                    cache_v2->Writer().Append(CacheV2::RecordKind::Tombstone, key,
+                                              CacheV2::TombstonePayload(kind));
+                }
+            }
+            const CacheV2::LogStats& stats = log_v2->parsed.stats;
+            if (stats.dead_bytes != 0 && stats.dead_bytes >= stats.file_size / 4) {
+                cache_v2->Writer().Compact();
+            }
+        }
+        log_v2.reset();
+    } else if (!stop_loading.stop_requested() &&
         (!state.incomplete.empty() ||
          (superseded_bytes != 0 && superseded_bytes >= record_begin / 8))) {
         auto removed{std::move(state.incomplete)};
@@ -2353,6 +2468,16 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline() {
                 env_ptrs.push_back(&envs[index]);
             }
         }
+        if (cache_v2) {
+            const std::vector<u8> payload{VideoCommon::SerializePipelinePayload(
+                std::span(reinterpret_cast<const char*>(&key), sizeof(key)), env_ptrs,
+                host_info.EnvironmentReadProperties())};
+            if (!payload.empty()) {
+                cache_v2->Writer().Append(VideoCommon::ShaderCacheV2::RecordKind::Graphics,
+                                          GraphicsRecordKey(key), payload);
+            }
+            return;
+        }
         SerializePipeline(key, env_ptrs, pipeline_cache_filename, CACHE_VERSION,
                           host_info.EnvironmentReadProperties());
     });
@@ -2397,8 +2522,18 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(const ComputePipe
         return entry;
     }
     serialization_thread.QueueWork([this, key, env_ = std::move(env)] {
-        SerializePipeline(key, std::array<const GenericEnvironment*, 1>{&env_},
-                          pipeline_cache_filename, CACHE_VERSION,
+        const std::array<const GenericEnvironment*, 1> envs{&env_};
+        if (cache_v2) {
+            const std::vector<u8> payload{VideoCommon::SerializePipelinePayload(
+                std::span(reinterpret_cast<const char*>(&key), sizeof(key)), envs,
+                host_info.EnvironmentReadProperties())};
+            if (!payload.empty()) {
+                cache_v2->Writer().Append(VideoCommon::ShaderCacheV2::RecordKind::Compute,
+                                          ComputeRecordKey(payload), payload);
+            }
+            return;
+        }
+        SerializePipeline(key, envs, pipeline_cache_filename, CACHE_VERSION,
                           host_info.EnvironmentReadProperties());
     });
     QueueVulkanPipelineCacheFlush();

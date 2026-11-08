@@ -104,6 +104,7 @@ add_executable(tests
     video_core/ampere_tennis_i2f.cpp
     video_core/ampere_tennis_tessellation.cpp
     video_core/pipeline_cache_files.cpp
+    video_core/shader_cache_v2.cpp
     video_core/shader_precache.cpp
     video_core/storage_binding_capacity.cpp
     video_core/native_indirect_reset.cpp
@@ -219,6 +220,28 @@ add_executable(update_checker_tests
     ../frontend_common/update_installer.cpp)
 target_link_libraries(update_checker_tests PRIVATE common Catch2::Catch2WithMain)
 add_test(NAME update_checker_tests COMMAND update_checker_tests)
+
+# A libFuzzer target for the shader cache v2 reader, where the compiler has libFuzzer. Built on
+# request: ninja shader_cache_v2_fuzzer, then shader_cache_v2_fuzzer <corpus directory>
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_FLAGS -fsanitize=fuzzer)
+check_cxx_source_compiles("
+    #include <cstddef>
+    #include <cstdint>
+    extern \"C\" int LLVMFuzzerTestOneInput(const std::uint8_t*, std::size_t) { return 0; }"
+    HAVE_LIBFUZZER)
+unset(CMAKE_REQUIRED_FLAGS)
+if (HAVE_LIBFUZZER)
+    add_executable(shader_cache_v2_fuzzer EXCLUDE_FROM_ALL
+        fuzz/shader_cache_v2_reader.cpp
+        ../video_core/shader_cache_v2/cache_format.cpp)
+    target_compile_options(shader_cache_v2_fuzzer PRIVATE -fsanitize=fuzzer,address,undefined)
+    target_link_options(shader_cache_v2_fuzzer PRIVATE -fsanitize=fuzzer,address,undefined)
+    target_link_libraries(shader_cache_v2_fuzzer PRIVATE common xxhash)
+    if (BOOST_NO_HEADERS)
+        target_link_libraries(shader_cache_v2_fuzzer PRIVATE Boost::crc)
+    endif()
+endif()
 
 if (NOT ANDROID)
     target_sources(tests PRIVATE input_common/joycon_subcommand_response.cpp)
