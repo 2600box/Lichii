@@ -2925,53 +2925,19 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         }
         return &new_image.aliased_images[alias_pointer->second];
     };
-    // Whether that copy writes every texel of the new image: a plain copy (same format) of every
-    // level and layer from its origin. Sparse and unbacked images still need RefreshContents to
-    // bind their memory.
-    const auto writes_whole_image = [&](const AliasedImage& aliased) {
-        const Image& source = slot_images[aliased.id];
-        if (new_image.info.type != ImageType::e2D || source.info.type != ImageType::e2D ||
-            source.info.format != new_image.info.format ||
-            source.info.astc_opaque != new_image.info.astc_opaque ||
-            True((source.flags | new_image.flags) & ImageFlagBits::UnwrittenSparse) ||
-            True(new_image.flags & (ImageFlagBits::SparseLayers | ImageFlagBits::SparseTiles |
-                                    ImageFlagBits::Unbacked))) {
-            return false;
-        }
-        const u32 block_width = VideoCore::Surface::DefaultBlockWidth(new_image.info.format);
-        const u32 block_height = VideoCore::Surface::DefaultBlockHeight(new_image.info.format);
-        if (can_rescale && (block_width > 1 || block_height > 1)) {
-            // CopyImage scales a rescaled copy's extent in blocks, which can round below the
-            // scaled image's size in blocks.
-            return false;
-        }
-        for (s32 level = 0; level < new_image.info.resources.levels; ++level) {
-            const Extent3D size = MipSize(new_image.info.size, level);
-            const u32 width = Common::DivCeil(size.width, block_width);
-            const u32 height = Common::DivCeil(size.height, block_height);
-            const bool covered = std::ranges::any_of(aliased.copies, [&](const ImageCopy& copy) {
-                return copy.dst_subresource.base_level == level &&
-                       copy.dst_subresource.base_layer == 0 &&
-                       copy.dst_subresource.num_layers >= new_image.info.resources.layers &&
-                       copy.dst_offset == Offset3D{} && copy.extent.width >= width &&
-                       copy.extent.height >= height;
-            });
-            if (!covered) {
-                return false;
-            }
-        }
-        return true;
-    };
     // Copies run oldest first. When one of them writes the whole image, the upload from guest
     // memory and the alias copies before it would be overwritten whole: neither is made. Ocarina
     // of Time resizes a shadow map every frame in parts of Kokiri Forest, at the same address:
     // each size is a new depth target and a new texture, both copied from older sizes, and their
-    // uploads took up to 17% of the GPU back thread there.
+    // uploads took up to 17% of the GPU back thread there. Only at 1x: a rescaled copy's extent is
+    // the scaled guest mip size, which can fall short of the host mip (a 5 px wide image at 2x:
+    // host mip 1 is 5 px, the copy 4).
     size_t first_copy = 0;
     bool copied_whole = false;
-    for (size_t index = join_copies_to_do.size(); index-- > 0;) {
+    for (size_t index = join_copies_to_do.size(); !can_rescale && index-- > 0;) {
         const AliasedImage* const aliased = alias_copy(join_copies_to_do[index]);
-        if (aliased != nullptr && writes_whole_image(*aliased)) {
+        if (aliased != nullptr &&
+            CopiesWriteWholeImage(new_image, slot_images[aliased->id], aliased->copies)) {
             first_copy = index;
             copied_whole = true;
             break;
