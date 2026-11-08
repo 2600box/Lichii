@@ -336,10 +336,13 @@ Shader::RuntimeInfo MakeRuntimeInfo(std::span<const Shader::IR::Program> program
     }
     info.force_early_z = key.state.early_z != 0;
     info.y_negate = key.state.y_negate != 0;
-    // Transform feedback would capture the scaled values, and indexed attribute reads in the
-    // fragment stage don't undo the scaling, so both keep native noperspective interpolation.
-    if (key.unique_hashes[5] != 0 &&
-        key.state.xfb_enabled == 0 && !programs[5].info.loads_indexed_attributes) {
+    // Transform feedback would capture the scaled values, a passthrough geometry shader doesn't
+    // scale the outputs it writes itself, and indexed attribute reads in the fragment stage don't
+    // undo the scaling, so all three keep native noperspective interpolation.
+    const bool geometry_passthrough{key.unique_hashes[4] != 0 &&
+                                    programs[4].is_geometry_passthrough};
+    if (key.unique_hashes[5] != 0 && !geometry_passthrough && key.state.xfb_enabled == 0 &&
+        !programs[5].info.loads_indexed_attributes) {
         const bool has_tess{key.unique_hashes[3] != 0};
         const bool last_pre_raster{
             (stage == Shader::Stage::VertexB && !has_tess && !has_geometry) ||
