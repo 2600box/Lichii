@@ -32,6 +32,9 @@ namespace {
 using VideoCore::Surface::PixelFormat;
 
 constexpr size_t SIZE_CAP = size_t{2} << 30;
+/// Larger sampled textures (terrain atlases, virtual texture pages) would use up SIZE_CAP
+/// before the scene passes are reached.
+constexpr size_t SAMPLED_SIZE_CAP = size_t{64} << 20;
 /// RecordingSampledTextures: a sampled capture is running.
 std::atomic<bool> recording_sampled{};
 constexpr size_t STAGING_BUDGET = size_t{256} << 20;
@@ -410,19 +413,30 @@ std::optional<std::pair<GPUVAddr, u32>> SampledKey(const FrameDump::Sampled& tex
 bool FrameDump::RecordSampled(const Sampled& texture, u32 index, std::string name,
                               std::string tags) {
     tags += SamplerJson(texture.sampler);
+    const char* skipped = "format";
     if (const auto target = MakeTarget(*texture.view, index)) {
-        return Record(*target, std::move(name), std::move(tags));
+        if (size_t{target->width} * target->height * target->depth * TexelBytes(*target) <=
+            SAMPLED_SIZE_CAP) {
+            return Record(*target, std::move(name), std::move(tags));
+        }
+        skipped = "size";
     }
     const Image& image = *texture.view->BackingImage();
     const auto& info = image.info;
     Enqueue({.tags = fmt::format(
-                 R"({{"name":"{}",{},"format":"{}","width":{},"height":{},"depth":{},"type":{},"gpu_addr":"{:#x}","skipped":"format"}})",
+                 R"({{"name":"{}",{},"format":"{}","width":{},"height":{},"depth":{},"type":{},"gpu_addr":"{:#x}","skipped":"{}"}})",
                  name, tags, info.format, info.size.width, info.size.height, info.size.depth,
-                 static_cast<u32>(info.type), image.gpu_addr)});
+                 static_cast<u32>(info.type), image.gpu_addr, skipped)});
     return false;
 }
 
-bool FrameDump::NoteSampled(std::span<const Sampled> textures) {
+bool FrameDump::NoteSampled(std::span<const Sampled> textures, std::span<const u64> shader_hashes) {
+    std::string shaders;
+    for (const u64 hash : shader_hashes) {
+        if (hash != 0) {
+            shaders += fmt::format("{}\"{:016x}\"", shaders.empty() ? "" : ",", hash);
+        }
+    }
     bool recorded = false;
     for (const Sampled& texture : textures) {
         const auto key = SampledKey(texture);
@@ -435,8 +449,8 @@ bool FrameDump::NoteSampled(std::span<const Sampled> textures) {
             texture, index,
             fmt::format("{:04}_pass{:03}_tex{:02}_s{}_tic{}", sequence++, pass_index, index,
                         texture.stage, texture.tic),
-            fmt::format(R"("kind":"sampled","pass":{},"draw":{},"stage":{},"tic":{},"index":{})",
-                        pass_index, draws - 1, texture.stage, texture.tic, index));
+            fmt::format(R"("kind":"sampled","pass":{},"draw":{},"stage":{},"tic":{},"index":{},"shaders":[{}])",
+                        pass_index, draws - 1, texture.stage, texture.tic, index, shaders));
     }
     return recorded;
 }

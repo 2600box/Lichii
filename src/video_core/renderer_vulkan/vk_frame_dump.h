@@ -138,7 +138,7 @@ public:
 
     /// Reads back the textures of the current draw not yet seen in this pass. Returns true when
     /// copies were recorded, which ends the current render pass.
-    bool NoteSampled(std::span<const Sampled> textures);
+    bool NoteSampled(std::span<const Sampled> textures, std::span<const u64> shader_hashes);
     /// Reads back the textures of the dispatch about to run not yet seen for this shader.
     void NoteDispatchSampled(u64 shader_hash, std::span<const Sampled> textures);
     /// Records the buffers of the current draw (shader hashes by program) or of the dispatch about
