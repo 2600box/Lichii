@@ -24,6 +24,7 @@
 #include "common/settings.h"
 #include "common/stb.h"
 #include "core/core.h"
+#include "core/core_timing.h"
 #include "core/debugger/nx2_debug_server.h"
 #include "core/debugger/nx2_debug_tools.h"
 #include "core/frontend/framebuffer_layout.h"
@@ -496,6 +497,27 @@ json SpeedLimit(ToolState&, const json& params) {
     return {{"previous", previous}, {"on", setting.GetValue()}};
 }
 
+json HostTiming(ToolState& state, const json& params) {
+    Core::Timing::CoreTiming& timing = state.system.CoreTiming();
+    const auto margin_us = [&timing] {
+        const s64 margin = timing.host_wait_margin_ns.load();
+        return margin < 0 ? s64{-1} : margin / 1000;
+    };
+    const json previous = {{"margin_us", margin_us()}, {"stats", timing.host_wait_stats.load()}};
+    if (params.contains("margin_us")) {
+        const s64 margin = params.at("margin_us").get<s64>();
+        if (margin < -1 || margin > 100'000) {
+            throw std::runtime_error{"margin_us must be -1 (WaitFor only) or 0 to 100000"};
+        }
+        timing.host_wait_margin_ns = margin < 0 ? -1 : margin * 1000;
+    }
+    if (params.contains("stats")) {
+        timing.host_wait_stats = params.at("stats").get<bool>();
+    }
+    return {{"previous", previous}, {"margin_us", margin_us()},
+            {"stats", timing.host_wait_stats.load()}};
+}
+
 json ReadMemory(ToolState& state, const json& params) {
     const u64 address = AddressParam(params, "address");
     const u64 size = ReadSize(params, address);
@@ -691,6 +713,7 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
         {"reject_shaders", handler(RejectShaders)},
         {"sample", handler(SampleThreads)},
         {"speed_limit", handler(SpeedLimit)},
+        {"host_timing", handler(HostTiming)},
         {"read_memory", handler(ReadMemory)},
         {"search_memory", handler(SearchMemory)},
         {"read_gpu_memory", handler(ReadGpuMemory)},

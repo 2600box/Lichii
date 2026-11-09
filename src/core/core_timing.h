@@ -147,6 +147,9 @@ public:
 
     void Reset();
 
+    /// Waits on `event` until next_time; see host_wait_margin_ns.
+    void WaitForEvent(s64 next_time);
+
     using heap_t = boost::heap::fibonacci_heap<CoreTiming::Event, boost::heap::compare<std::greater<>>>;
     heap_t event_queue;
     s64 global_timer = 0;
@@ -169,6 +172,12 @@ public:
     std::atomic<bool> wait_set{};
     std::atomic<bool> has_started{};
     bool is_multicore{};
+    /// Test switch (EDEN_NX2_HOSTTIMING_WAIT, debug server host_timing): when not negative, the
+    /// timer thread sleeps in the OS until this long before the next event and only waits the
+    /// rest with Event::WaitFor, which on x86 Windows keeps the thread running.
+    std::atomic<s64> host_wait_margin_ns{-1};
+    /// Logs the timer thread's waits once a second (EDEN_NX2_HOSTTIMING_STATS=1).
+    std::atomic<bool> host_wait_stats{};
 };
 
 /// Creates a core timing event with the given name and callback.
