@@ -354,15 +354,9 @@ struct DrawPacket {
 
     VideoCommon::GraphicsBufferPacket buffers;
 
-    /// A's uniform buffer, image and mesh emulation entries; B adds the storage and texel buffer
-    /// entries between them. Only the ranges below are valid.
-    std::vector<DescriptorUpdateEntry> entries;
-    std::array<Range, NUM_STAGES> uniform_entries{};
-    std::array<Range, NUM_STAGES> image_entries{}; ///< In image_source
-    Range mesh_entries{};
-    /// entries, or a delta draw's kept image entries (images_kept), which the packet doesn't copy.
-    const DescriptorUpdateEntry* image_source{};
-    bool images_kept{};
+    /// A writes the draw's descriptor entries into the descriptor queue and leaves these, counted
+    /// from its UpdateData, for B's storage and texel buffer entries of each stage.
+    std::array<Range, NUM_STAGES> buffer_entries{};
     u32 stages{}; ///< Stages B binds descriptors for
     std::array<u32, Shader::Backend::SPIRV::NUM_TEXTURE_AND_IMAGE_SCALING_WORDS> rescaling{};
     RenderAreaPushConstant render_area{};
@@ -373,15 +367,10 @@ struct DrawPacket {
     DynamicStatePacket dynamic;
 
     /// Bytes stage A wrote into the packet for this draw: the fields the draw uses, its lists
-    /// counted by their used entries. Kept image entries are referenced, not counted.
+    /// counted by their used entries.
     [[nodiscard]] u32 PayloadBytes() const {
         using Buffers = VideoCommon::GraphicsBufferPacket;
-        u32 num_entries = mesh_entries.second;
-        for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
-            num_entries += uniform_entries[stage].second;
-            num_entries += images_kept ? 0 : image_entries[stage].second;
-        }
-        size_t header = sizeof(DrawPacket) - sizeof(entries) - sizeof(buffers) - sizeof(dynamic) +
+        size_t header = sizeof(DrawPacket) - sizeof(buffers) - sizeof(dynamic) +
                         sizeof(Buffers) - sizeof(buffers.inline_indices) -
                         sizeof(buffers.vertex_streams) - sizeof(buffers.storage_buffers) -
                         sizeof(buffers.texture_buffers);
@@ -408,7 +397,7 @@ struct DrawPacket {
                       sizeof(buffers.count_buffer);
         }
         const size_t lists =
-            num_entries * sizeof(DescriptorUpdateEntry) + buffers.inline_indices.size() +
+            buffers.inline_indices.size() +
             buffers.vertex_streams.size() * sizeof(Buffers::VertexStream) +
             buffers.storage_buffers.size() * sizeof(Buffers::StorageBuffer) +
             buffers.texture_buffers.size() * sizeof(Buffers::TextureBuffer);

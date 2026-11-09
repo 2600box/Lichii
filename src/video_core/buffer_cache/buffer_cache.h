@@ -1587,8 +1587,10 @@ void BufferCache<P>::ReadGraphicsGeometry(GraphicsBufferPacket& packet) {
         packet.index_guest_size =
             (std::min)(static_cast<u32>(index_buffer.EndAddress() - index_buffer.StartAddress()),
                        index_buffer.first + index_buffer.count);
-        packet.inline_indices.assign(draw_state.inline_index_draw_indexes.begin(),
-                                     draw_state.inline_index_draw_indexes.end());
+        if (!draw_state.inline_index_draw_indexes.empty()) {
+            packet.inline_indices.assign(draw_state.inline_index_draw_indexes.begin(),
+                                         draw_state.inline_index_draw_indexes.end());
+        }
         // The index count is currently changed without updating the dirty flags.
         if (flags[Dirty::IndexBuffer]) {
             flags[Dirty::IndexBuffer] = false;
@@ -1734,18 +1736,8 @@ void BufferCache<P>::UpdateGraphicsUniformBuffers() {
 
 template <class P>
 void BufferCache<P>::UpdateGraphicsBuffers(const GraphicsBufferPacket& packet) {
-    {
-        Nx2Profile::Scope scope{Nx2Profile::Zone::PacketBind};
-        BindPacketBuffers(packet);
-    }
-    do {
-        channel_state->has_deleted_buffers = false;
-        DoUpdateGraphicsBuffers(packet);
-    } while (channel_state->has_deleted_buffers);
-}
-
-template <class P>
-void BufferCache<P>::BindPacketBuffers(const GraphicsBufferPacket& packet) {
+    // A buffer deletion also sets resolve and rebind bits, so A's index and vertex bindings go
+    // to the cache first; the other lists are bound and resolved from the packet below.
     if (packet.index_dirty) {
         channel_state->index_buffer = packet.index;
         channel_state->index_resolve = true;
@@ -1761,58 +1753,10 @@ void BufferCache<P>::BindPacketBuffers(const GraphicsBufferPacket& packet) {
     }
     channel_state->vertex_resolve |= packet.vertex_resolve;
     channel_state->vertex_rebind |= packet.vertex_rebind;
-    if (packet.transform_feedback) {
-        channel_state->transform_feedback_buffers = packet.transform_feedback_buffers;
-    }
-    if (packet.indirect) {
-        if (packet.indirect_count) {
-            channel_state->count_buffer_binding = packet.count_buffer;
-        }
-        channel_state->indirect_buffer_binding = packet.indirect_buffer;
-    }
-
-    auto storage = packet.storage_buffers.begin();
-    auto texture = packet.texture_buffers.begin();
-    for (u32 stage = 0; stage < NUM_STAGES; ++stage) {
-        if (((packet.storage_stages >> stage) & 1) != 0) {
-            UnbindGraphicsStorageBuffers(stage);
-            for (; storage != packet.storage_buffers.end() && storage->stage == stage; ++storage) {
-                const u32 ssbo_index = storage->index;
-                const bool already_enabled =
-                    ((channel_state->enabled_storage_buffers[stage] >> ssbo_index) & 1U) != 0;
-                if constexpr (requires { runtime.ShouldLimitDynamicStorageBuffers(); }) {
-                    if (runtime.ShouldLimitDynamicStorageBuffers() && !already_enabled) {
-                        const u32 max_bindings = runtime.GetMaxDynamicStorageBuffers();
-                        if (channel_state->total_graphics_storage_buffers >= max_bindings) {
-                            LOG_WARNING(HW_GPU,
-                                        "Skipping graphics storage buffer {} due to driver limit {}",
-                                        ssbo_index, max_bindings);
-                            continue;
-                        }
-                        ++channel_state->total_graphics_storage_buffers;
-                    }
-                }
-                channel_state->enabled_storage_buffers[stage] |= u64{1} << ssbo_index;
-                channel_state->written_storage_buffers[stage] |=
-                    u64{storage->is_written ? 1U : 0U} << ssbo_index;
-                channel_state->storage_buffers[stage][ssbo_index] = storage->binding;
-            }
-        }
-        if (((packet.texture_stages >> stage) & 1) != 0) {
-            UnbindGraphicsTextureBuffers(stage);
-            for (; texture != packet.texture_buffers.end() && texture->stage == stage; ++texture) {
-                const u32 tbo_index = texture->index;
-                channel_state->enabled_texture_buffers[stage] |= 1U << tbo_index;
-                channel_state->written_texture_buffers[stage] |=
-                    (texture->is_written ? 1U : 0U) << tbo_index;
-                if constexpr (SEPARATE_IMAGE_BUFFERS_BINDINGS) {
-                    channel_state->image_texture_buffers[stage] |=
-                        (texture->is_image ? 1U : 0U) << tbo_index;
-                }
-                channel_state->texture_buffers[stage][tbo_index] = texture->binding;
-            }
-        }
-    }
+    do {
+        channel_state->has_deleted_buffers = false;
+        DoUpdateGraphicsBuffers(packet);
+    } while (channel_state->has_deleted_buffers);
 }
 
 template <class P>
@@ -3158,12 +3102,64 @@ void BufferCache<P>::DoUpdateGraphicsBuffers(const GraphicsBufferPacket& packet)
         }
         UpdateVertexBuffers();
         UpdateTransformFeedbackBuffers(packet);
-        for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        // The stages whose lists the packet carries bind and resolve them from it; the others
+        // resolve the bindings they keep.
+        auto storage = packet.storage_buffers.begin();
+        auto texture = packet.texture_buffers.begin();
+        for (u32 stage = 0; stage < NUM_STAGES; ++stage) {
             if (packet.resolve_uniforms) {
                 UpdateUniformBuffers(stage);
             }
-            UpdateStorageBuffers(stage);
-            UpdateTextureBuffers(stage);
+            if (((packet.storage_stages >> stage) & 1) != 0) {
+                UnbindGraphicsStorageBuffers(stage);
+                for (; storage != packet.storage_buffers.end() && storage->stage == stage;
+                     ++storage) {
+                    const u32 ssbo_index = storage->index;
+                    const bool already_enabled =
+                        ((channel_state->enabled_storage_buffers[stage] >> ssbo_index) & 1U) != 0;
+                    if constexpr (requires { runtime.ShouldLimitDynamicStorageBuffers(); }) {
+                        if (runtime.ShouldLimitDynamicStorageBuffers() && !already_enabled) {
+                            const u32 max_bindings = runtime.GetMaxDynamicStorageBuffers();
+                            if (channel_state->total_graphics_storage_buffers >= max_bindings) {
+                                LOG_WARNING(
+                                    HW_GPU,
+                                    "Skipping graphics storage buffer {} due to driver limit {}",
+                                    ssbo_index, max_bindings);
+                                continue;
+                            }
+                            ++channel_state->total_graphics_storage_buffers;
+                        }
+                    }
+                    channel_state->enabled_storage_buffers[stage] |= u64{1} << ssbo_index;
+                    channel_state->written_storage_buffers[stage] |=
+                        u64{storage->is_written ? 1U : 0U} << ssbo_index;
+                    Binding& binding = channel_state->storage_buffers[stage][ssbo_index];
+                    binding = storage->binding;
+                    binding.buffer_id = FindBuffer(binding.device_addr, binding.size, false);
+                    ResolveMultiRangeStorage(binding, storage->is_written, graphics_segments);
+                }
+            } else {
+                UpdateStorageBuffers(stage);
+            }
+            if (((packet.texture_stages >> stage) & 1) != 0) {
+                UnbindGraphicsTextureBuffers(stage);
+                for (; texture != packet.texture_buffers.end() && texture->stage == stage;
+                     ++texture) {
+                    const u32 tbo_index = texture->index;
+                    channel_state->enabled_texture_buffers[stage] |= 1U << tbo_index;
+                    channel_state->written_texture_buffers[stage] |=
+                        (texture->is_written ? 1U : 0U) << tbo_index;
+                    if constexpr (SEPARATE_IMAGE_BUFFERS_BINDINGS) {
+                        channel_state->image_texture_buffers[stage] |=
+                            (texture->is_image ? 1U : 0U) << tbo_index;
+                    }
+                    TextureBufferBinding& binding = channel_state->texture_buffers[stage][tbo_index];
+                    binding = texture->binding;
+                    binding.buffer_id = FindBuffer(binding.device_addr, binding.size, false);
+                }
+            } else {
+                UpdateTextureBuffers(stage);
+            }
         }
         if (packet.indirect) {
             UpdateDrawIndirect(packet);
@@ -3226,15 +3222,16 @@ void BufferCache<P>::UpdateVertexBuffers() {
 
 template <class P>
 void BufferCache<P>::UpdateDrawIndirect(const GraphicsBufferPacket& packet) {
-    const auto update = [this](Binding& binding) {
+    const auto update = [this](Binding& binding, const Binding& read) {
+        binding = read;
         if (binding.buffer_id != NULL_BUFFER_ID) {
             binding.buffer_id = FindBuffer(binding.device_addr, binding.size, false);
         }
     };
     if (packet.indirect_count) {
-        update(channel_state->count_buffer_binding);
+        update(channel_state->count_buffer_binding, packet.count_buffer);
     }
-    update(channel_state->indirect_buffer_binding);
+    update(channel_state->indirect_buffer_binding, packet.indirect_buffer);
 }
 
 template <class P>
@@ -3288,7 +3285,9 @@ void BufferCache<P>::UpdateTransformFeedbackBuffers(const GraphicsBufferPacket& 
     if (!packet.transform_feedback) {
         return;
     }
-    for (Binding& binding : channel_state->transform_feedback_buffers) {
+    for (u32 index = 0; index < NUM_TRANSFORM_FEEDBACK_BUFFERS; ++index) {
+        Binding& binding = channel_state->transform_feedback_buffers[index];
+        binding = packet.transform_feedback_buffers[index];
         if (binding.buffer_id != NULL_BUFFER_ID) {
             binding.buffer_id = FindBuffer(binding.device_addr, binding.size, false);
         }

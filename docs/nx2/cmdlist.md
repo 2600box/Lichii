@@ -13,7 +13,7 @@ so B must not depend on the registers or dirty flags.
 |---|---|
 | Header | Sequence number (one per prepared draw, for stage 4's ordering), pipeline, framebuffer, `DrawParams` or a copy of the indirect parameters, mesh and mesh emulation counts |
 | Buffers (`VideoCommon::GraphicsBufferPacket`) | Index binding (when `Dirty::IndexBuffer` was set), index format, first, count and inline indexes; vertex streams to resolve or bind again with their strides; transform feedback bindings; storage and texture buffer bindings per stage, read from the constant buffers; indirect and count buffers; whether A uploaded buffer data |
-| Descriptors | The uniform buffer entries and image entries of each stage and the mesh emulation entries, as A resolved them; the rescaling and render area push constants. A delta draw that replays its pipeline's kept image entries carries only their ranges (`images_kept`) |
+| Descriptors | Where each stage's storage and texel buffer entries go in the descriptor queue's payload (A writes the other entries there itself); the rescaling and render area push constants |
 | Flags | Transform feedback (ends the render pass and counts streamed bytes), sampled render target under a pending fragment barrier, rescaling, the zpass counter enable |
 | Dynamic state | A presence mask and the values of each group whose dirty flag A took |
 
@@ -24,8 +24,8 @@ computes each group's values; A and the verify both call it.
 `DrawPacket::PayloadBytes` counts the bytes A wrote for the draw: the header fields the draw
 uses (no indirect parameters for a direct draw, no mesh, index, transform feedback or indirect
 fields where the draw has none), its lists by their used entries, and the dynamic state groups
-present. Kept image entries are referenced, not counted. EDEN_NX2_DRAW_PACKET_VERIFY logs the
-average.
+present. Descriptor entries go to the descriptor queue, not the packet. EDEN_NX2_DRAW_PACKET_VERIFY
+logs the average.
 
 ## Stage A
 
@@ -36,8 +36,11 @@ average.
 - `BufferCache::ReadGraphicsGeometry` reads the index, vertex, transform feedback and indirect
   buffers and takes `Dirty::IndexBuffer`, `Dirty::VertexBuffers` and `Dirty::VertexBuffer0+i`.
 - The uniform buffers are resolved (`UpdateGraphicsUniformBuffers`, with its own retry loop) and
-  bound: the stream buffer copies happen here, so they copy guest memory as it is at the draw. The
-  descriptor queue's capture mode writes their entries, and the image entries, into the packet.
+  bound: the stream buffer copies happen here, so they copy guest memory as it is at the draw.
+- A acquires the descriptor payload and writes the entries in place. Per stage: the uniform buffer
+  entries, room for the storage and texel buffer entries (`UpdateDescriptorQueue::Skip`, its range
+  in the packet), the image entries (a delta draw copies its pipeline's kept image entries). Then
+  the mesh emulation entries.
 - The dynamic state flags are taken and their groups read into the packet. When binding the
   pipeline in B will make the state enables dirty again (`Scheduler::RefreshesStateEnable`, after
   a pipeline without extended dynamic state), A takes them too, so they are recorded with this
@@ -49,10 +52,13 @@ average.
 own:
 
 1. Request the render pass end for transform feedback.
-2. Apply the packet's bindings to the buffer cache, resolve every buffer (retry loop), synchronize
-   and upload, and bind the index, vertex, transform feedback and indirect buffers.
-3. Acquire the descriptor payload. Per stage: the packet's uniform entries, the storage and texel
-   buffer entries (bound now), the packet's image entries. Then the mesh emulation entries.
+2. Resolve every buffer (retry loop): A's index and vertex bindings go to the buffer cache first;
+   the storage, texture, transform feedback and indirect bindings are bound and resolved from the
+   packet in the same pass. Then synchronize and upload, and bind the index, vertex, transform
+   feedback and indirect buffers.
+3. Per stage, write the storage and texel buffer entries (bound now) into the room A left
+   (`BeginFill`/`EndFill`). Another count than A left fails the draw in `ConfigureDraw`, as a
+   short payload did before.
 4. The post-copy barrier, the fragment barrier check, the render pass, pipeline, descriptor set
    and push constants (`ConfigureDraw`).
 5. The dynamic state records, the query counter enables and the draw command.
@@ -69,8 +75,9 @@ Stage 1 keeps these on GPUBack's shared state. Each is a stage 3/4 item.
   `NoteResolvedDraw`, `HasFragmentBarrier`, `RefreshesStateEnable`, and the uniform stream
   buffer's reuse tick.
 - After a submit between A and B, B reads the dynamic state from the registers and dirty flags.
-- A delta draw's image entries stay in the pipeline's kept entries until B adds them; once A runs
-  ahead, A must not replace them before B has read them.
+- A acquires and writes the guest descriptor queue's payload, and B fills the room A left in it.
+  Once A runs ahead, A must not acquire payload B hasn't recorded yet, and `TickFrame` must not
+  reuse it before B has.
 - B reads the page table for multi-range storage segments, and guest memory for uploads and uint8
   index widening.
 - A writes the vertex repack layout into the buffer cache runtime and the mesh emulation buffers

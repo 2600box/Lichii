@@ -355,18 +355,18 @@ private:
     template <typename Spec>
     bool ConfigureImpl(DrawPacket& packet);
 
-    /// Stage A: the descriptor entries added until FinishPrepare go to the packet.
-    void BeginDescriptorCapture(DrawPacket& packet);
-    [[nodiscard]] u32 CapturedEntries(const DrawPacket& packet) const noexcept {
-        return static_cast<u32>(guest_descriptor_queue.CaptureCursor() - packet.entries.data());
-    }
-    void CaptureUniformDescriptors(DrawPacket& packet, size_t stage);
-    void KeepImageDescriptors(size_t stage, const DrawPacket& packet);
+    /// Stage A writes the draw's descriptor entries into the payload this acquires.
+    void AcquireDescriptors();
+    /// Stage A: a stage's uniform buffer entries, then the entries left for B's storage and texel
+    /// buffers.
+    void WriteBufferDescriptors(DrawPacket& packet, size_t stage);
+    /// The image entries written since `first`, for delta draws.
+    void KeepImageDescriptors(size_t stage, u32 first);
     /// Stage A, after the images: the mesh emulation entries, render area and render targets.
     void FinishPrepare(DrawPacket& packet, std::span<const VideoCommon::ImageViewInOut> views);
     [[nodiscard]] RenderAreaPushConstant ReadRenderArea(u32 stages) const;
 
-    bool ConfigureDraw(const DrawPacket& packet);
+    bool ConfigureDraw(const DrawPacket& packet, size_t num_entries);
 
     void MakePipeline(VkRenderPass render_pass);
 
@@ -397,6 +397,7 @@ private:
     std::array<u32, 5> enabled_uniform_buffer_masks{};
     VideoCommon::UniformBufferSizes uniform_buffer_sizes{};
     u32 num_descriptor_entries{};
+    std::array<u32, NUM_STAGES> num_buffer_entries{}; ///< Storage and texel buffer entries
     size_t num_image_elements{};
     std::vector<SampledImage> sampled_images;
     u32 num_textures{};

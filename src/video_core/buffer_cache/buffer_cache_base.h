@@ -697,8 +697,6 @@ private:
 
     void UnbindGraphicsTextureBuffers(size_t stage);
 
-    void BindPacketBuffers(const GraphicsBufferPacket& packet);
-
     void BindHostIndexBuffer(const GraphicsBufferPacket& packet);
 
     void BindHostVertexBuffers();

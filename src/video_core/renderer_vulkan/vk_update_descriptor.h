@@ -107,22 +107,25 @@ public:
         *(payload_cursor++) = texel_buffer;
     }
 
-    /// Until EndCapture, entries go to `out` instead of the payload: stage A of a draw writes its
-    /// uniform buffer and image entries into the draw packet, which stage B adds with AddEntries.
-    void BeginCapture(DescriptorUpdateEntry* out, bool use_descriptor_buffer_) noexcept {
-        capture_saved = {payload_cursor, use_descriptor_buffer};
-        payload_cursor = out;
-        use_descriptor_buffer = supports_descriptor_buffer && use_descriptor_buffer_;
+    /// Leaves `count` entries for BeginFill and returns where they start, counted from UpdateData:
+    /// stage A of a draw leaves each stage's storage and texel buffer entries to stage B.
+    u32 Skip(u32 count) noexcept {
+        const u32 first = static_cast<u32>(UpdateCount());
+        payload_cursor += count;
+        return first;
     }
 
-    /// Where the next captured entry goes.
-    [[nodiscard]] DescriptorUpdateEntry* CaptureCursor() const noexcept {
-        return payload_cursor;
+    /// Until EndFill, entries go to those Skip left at `first`.
+    void BeginFill(u32 first) noexcept {
+        fill_end = payload_cursor;
+        payload_cursor = upload_start + first;
     }
 
-    void EndCapture() noexcept {
-        payload_cursor = capture_saved.cursor;
-        use_descriptor_buffer = capture_saved.use_descriptor_buffer;
+    /// Returns how many entries were written since BeginFill(first).
+    u32 EndFill(u32 first) noexcept {
+        const u32 written = static_cast<u32>(payload_cursor - (upload_start + first));
+        payload_cursor = fill_end;
+        return written;
     }
 
     /// Entries an earlier draw added (delta draws).
@@ -153,12 +156,9 @@ private:
     size_t frame_index{0};
     DescriptorUpdateEntry* payload_cursor = nullptr;
     DescriptorUpdateEntry* payload_start = nullptr;
-    const DescriptorUpdateEntry* upload_start = nullptr;
+    DescriptorUpdateEntry* upload_start = nullptr;
     std::unique_ptr<DescriptorUpdateEntry[]> payload;
-    struct {
-        DescriptorUpdateEntry* cursor{};
-        bool use_descriptor_buffer{};
-    } capture_saved;
+    DescriptorUpdateEntry* fill_end{};
     bool growth_disabled{};
     bool fallback_reported{};
 };

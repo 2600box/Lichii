@@ -68,14 +68,11 @@ TEST_CASE("Draw packet dynamic state counts the bytes of the groups it carries",
 TEST_CASE("Draw packets count their lists by the entries they use", "[draw_packet]") {
     Vulkan::DrawPacket packet;
     const u32 empty = packet.PayloadBytes();
-    packet.entries.resize(64);
+    packet.buffers.storage_buffers.reserve(64);
     REQUIRE(packet.PayloadBytes() == empty);
-    packet.uniform_entries[0] = {0, 2};
-    packet.image_entries[4] = {2, 3};
-    REQUIRE(packet.PayloadBytes() == empty + 5 * sizeof(Vulkan::DescriptorUpdateEntry));
     packet.buffers.storage_buffers.emplace_back();
-    REQUIRE(packet.PayloadBytes() == empty + 5 * sizeof(Vulkan::DescriptorUpdateEntry) +
-                                         sizeof(VideoCommon::GraphicsBufferPacket::StorageBuffer));
+    REQUIRE(packet.PayloadBytes() ==
+            empty + sizeof(VideoCommon::GraphicsBufferPacket::StorageBuffer));
 }
 
 } // namespace
