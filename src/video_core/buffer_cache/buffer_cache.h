@@ -901,8 +901,33 @@ void BufferCache<P>::NoteReadBack(DAddr begin, DAddr end, bool gpu_modified) {
 }
 
 template <class P>
+void BufferCache<P>::NoteReportPending(DAddr device_addr, u64 size) {
+    if constexpr (!IS_OPENGL && USE_MEMORY_MAPS) {
+        const DAddr page = Common::AlignDown(device_addr, DEVICE_PAGESIZE);
+        if (std::ranges::binary_search(read_back_pages, page, {}, &ReadBackPage::page)) {
+            pending_reports.push_back({device_addr, size, false});
+        }
+    }
+}
+
+template <class P>
+void BufferCache<P>::FinishReport(DAddr device_addr, u64 size) {
+    const auto it = std::ranges::find_if(pending_reports, [&](const PendingReport& report) {
+        return report.addr == device_addr && report.size == size;
+    });
+    if (it != pending_reports.end()) {
+        pending_reports.erase(it);
+    }
+}
+
+template <class P>
 void BufferCache<P>::NoteReadBackWrite(DAddr device_addr, u64 size) {
     if constexpr (!IS_OPENGL && USE_MEMORY_MAPS) {
+        for (PendingReport& report : pending_reports) {
+            if (report.addr < device_addr + size && device_addr < report.addr + report.size) {
+                report.rewritten = true;
+            }
+        }
         if (read_back_pages.empty()) {
             return;
         }
@@ -1116,6 +1141,14 @@ void BufferCache<P>::WriteReadDownloads(u64 tick, VideoCore::AsyncReadback::Land
             if (download.check) {
                 CheckReadDownload(*download.check, cpu_written, landed_by);
                 async_buffers_death_ring.push_back(download.check->staging);
+            }
+            // A query result older than these bytes lands over them later: they stay
+            // GPU-modified, for a later read to download again.
+            for (const PendingReport& report : pending_reports) {
+                if (report.rewritten) {
+                    download.clean_ranges.Subtract(report.addr, report.size);
+                    read_download_ranges.Subtract(report.addr, report.size);
+                }
             }
             download.clean_ranges.ForEach([&](DAddr start, DAddr end) {
                 gpu_modified_ranges.Subtract(start, end - start);

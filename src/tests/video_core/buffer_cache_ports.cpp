@@ -1475,6 +1475,67 @@ TEST_CASE("GPU writes to guest memory land the early downloads under them first"
     REQUIRE(ReadWord(f, 0x20040).preemtive);
 }
 
+namespace {
+/// A page read after each dispatch's write, which gets its next write's early download, and a
+/// query result to 0x20040 that the query cache writes at the report's fence.
+void ReportOnReadBackPage(Fixture& f, VideoCommon::BufferId id) {
+    for (u8 frame = 1; frame <= 2; ++frame) {
+        WriteByDispatch(f, id, 0x20000, 0x100, frame);
+        ReadWord(f, 0x20010);
+    }
+    f.cache->NoteReportPending(0x20040, 4);
+}
+
+/// The report's fence callback (QueryCacheBase::CounterReport) writes its result.
+void WriteReportResult(Fixture& f, u32 result) {
+    f.cache->FinishReadDownloads(0x20040, 4);
+    std::memcpy(f.bytes + 0x10040, &result, sizeof(result));
+    f.cache->FinishReport(0x20040, 4);
+}
+} // namespace
+
+TEST_CASE("A query result older than a GPU write it lands over leaves the write to be read again",
+          "[buffer_ports]") {
+    Fixture f;
+    const Nx2TitleScope nx2_title;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    ReportOnReadBackPage(f, id);
+    // A dispatch writes the result's words after the report, before its fence.
+    WriteByDispatch(f, id, 0x20000, 0x100, 3);
+    REQUIRE(Access::ReadDownloads(*f.cache) == 1);
+    SECTION("its early download landed by the result's own wait") {}
+    SECTION("its early download landed before, once the host GPU ran it") {
+        f.runtime.Complete(f.runtime.submitted_tick);
+        f.cache->NoteWorkRecorded(true);
+        REQUIRE(Access::ReadDownloads(*f.cache) == 0);
+        REQUIRE(f.bytes[0x10040] == 3);
+    }
+    WriteReportResult(f, 0xcafef00d);
+    // The dispatch's words are newer: the next read downloads them again.
+    REQUIRE_FALSE(ReadWord(f, 0x20040).preemtive);
+    REQUIRE(f.bytes[0x10040] == 3);
+    REQUIRE(f.bytes[0x10043] == 3);
+}
+
+TEST_CASE("A query result newer than the GPU writes under it stays in guest memory",
+          "[buffer_ports]") {
+    Fixture f;
+    const Nx2TitleScope nx2_title;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    // The dispatch writes the words before the report.
+    for (u8 frame = 1; frame <= 2; ++frame) {
+        WriteByDispatch(f, id, 0x20000, 0x100, frame);
+        ReadWord(f, 0x20010);
+    }
+    WriteByDispatch(f, id, 0x20000, 0x100, 3);
+    f.cache->NoteReportPending(0x20040, 4);
+    WriteReportResult(f, 0xcafef00d);
+    REQUIRE(ReadWord(f, 0x20040).preemtive);
+    u32 value{};
+    std::memcpy(&value, f.bytes + 0x10040, sizeof(value));
+    REQUIRE(value == 0xcafef00d);
+}
+
 TEST_CASE("Finished early downloads land a few draws later, or at the next dispatch",
           "[buffer_ports]") {
     Fixture f;
