@@ -119,6 +119,43 @@ TEST_CASE("ShaderPrecache: the marker matches only the same file and driver", "[
     REQUIRE_FALSE(marker->Matches(*ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53)));
 }
 
+TEST_CASE("ShaderPrecache: the marker matches only the same variant", "[video_core]") {
+    TempDir dir;
+    const auto warm = dir.path / "warm-graphics.bin";
+    WriteBytes(warm, "precache");
+    const u64 variant = 0xfedcba9876543210ULL;
+    const auto stamp = ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53, 3, 1, variant);
+    REQUIRE(stamp.has_value());
+    REQUIRE(ShaderWarm::WriteWarmMarker(warm, *stamp));
+
+    const auto marker = ShaderWarm::ReadWarmMarker(warm);
+    REQUIRE(marker.has_value());
+    REQUIRE(marker->variant == variant);
+    REQUIRE(marker->Matches(*ShaderWarm::CurrentWarmStamp(warm, 0, 0x1234, 0x2206, 53, 3, 1,
+                                                          variant)));
+    REQUIRE_FALSE(marker->Matches(*ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53, 3, 1,
+                                                                variant + 1)));
+    REQUIRE_FALSE(
+        marker->Matches(*ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53, 3, 1)));
+    REQUIRE(ShaderWarm::EmissionStamp() != 0);
+}
+
+TEST_CASE("ShaderPrecache: a marker written before the variant is not read", "[video_core]") {
+    TempDir dir;
+    const auto warm = dir.path / "warm-compute.bin";
+    WriteBytes(warm, "precache");
+    const auto stamp = ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53, 1, 0);
+    REQUIRE(stamp.has_value());
+    // The older format: every field up to the link mode, then the line end.
+    {
+        std::ofstream out(ShaderWarm::WarmMarkerPath(warm), std::ios::trunc);
+        out << stamp->size << ' ' << stamp->write_time << ' ' << stamp->entries << ' '
+            << stamp->driver << ' ' << stamp->device_id << ' ' << stamp->cache_version << ' '
+            << stamp->no_inline << ' ' << stamp->link_mode << '\n';
+    }
+    REQUIRE_FALSE(ShaderWarm::ReadWarmMarker(warm).has_value());
+}
+
 TEST_CASE("ShaderPrecache: precached pipelines are kept per driver", "[video_core]") {
     TempDir dir;
     const auto file = dir.path / "precache-graphics.bin";
