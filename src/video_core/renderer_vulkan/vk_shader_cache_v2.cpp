@@ -173,6 +173,7 @@ LegacyCacheMigration MigrateLegacyPipelineCache(const std::filesystem::path& dir
 
 std::optional<RekeyedRecord> RekeyPipelineRecord(RecordKind kind, std::span<const u8> payload,
                                                  const RelinkedPrograms& programs) {
+    bool replaced_any{};
     auto replaced = VideoCommon::ReplacePipelineCode(
         payload,
         [&](u64 shader_hash, u32 texture_bound) -> std::optional<VideoCommon::NativeCodeReplacement> {
@@ -182,15 +183,16 @@ std::optional<RekeyedRecord> RekeyPipelineRecord(RecordKind kind, std::span<cons
             }
             const auto& program = it->second.program;
             if (program.texture_bound != ~0U) {
+                replaced_any = true;
                 return VideoCommon::NativeCodeReplacement{program.lowered_code, program.texture_bound};
             }
             if (it->second.old_texture_bound != ~0U) {
                 return std::nullopt; // The engine's value was never recorded
             }
+            replaced_any = true;
             return VideoCommon::NativeCodeReplacement{program.lowered_code, texture_bound};
         });
-    if (std::ranges::all_of(replaced.shader_hashes,
-                            [](const auto& hashes) { return hashes.first == hashes.second; })) {
+    if (!replaced_any) {
         return std::nullopt;
     }
     RekeyedRecord record{.key = 0, .payload = std::move(replaced.payload)};
@@ -225,6 +227,43 @@ std::optional<RekeyedRecord> RekeyPipelineRecord(RecordKind kind, std::span<cons
     store(*key);
     record.key = GraphicsRecordKey(*key);
     return record;
+}
+
+RevalidatedPrograms RevalidateProgramRecords(std::vector<ShaderCacheV2::ProgramRecord> programs,
+                                             const ShaderCacheV2::ForEach& for_each) {
+    std::vector<std::optional<ShaderCacheV2::ProgramRecord>> relowered(programs.size());
+    const auto relower = [&](size_t index) {
+        try {
+            relowered[index] = ShaderCacheV2::RelowerProgramRecord(programs[index]);
+        } catch (const std::exception& e) {
+            LOG_DEBUG(Render_Vulkan, "Shader cache v2: program {:016x}: {}",
+                      programs[index].unique_hash, e.what());
+        }
+    };
+    if (for_each) {
+        for_each(programs.size(), relower);
+    } else {
+        for (size_t index = 0; index < programs.size(); ++index) {
+            relower(index);
+        }
+    }
+    RevalidatedPrograms result;
+    for (size_t index = 0; index < programs.size(); ++index) {
+        if (!relowered[index]) {
+            continue;
+        }
+        const ShaderCacheV2::ProgramRecord& program = programs[index];
+        if (relowered[index]->unique_hash == program.unique_hash &&
+            relowered[index]->texture_bound == program.texture_bound) {
+            result.unchanged.push_back(std::move(*relowered[index]));
+            continue;
+        }
+        result.relinked.emplace(program.unique_hash,
+                                RelinkedProgram{.old_unique_hash = program.unique_hash,
+                                                .old_texture_bound = program.texture_bound,
+                                                .program = std::move(*relowered[index])});
+    }
+    return result;
 }
 
 std::vector<ShaderCacheV2::LogAppend> RelinkPipelineRecords(

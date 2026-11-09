@@ -1529,11 +1529,6 @@ void PipelineCache::ReturnPools(std::shared_ptr<ShaderPools> pools) {
 
 void PipelineCache::StopBackgroundJobs() {
     scheduled_prebuild.reset();
-    if (revalidation) {
-        shader_jobs->Cancel(*revalidation);
-        revalidation->Wait();
-        revalidation.reset();
-    }
 }
 
 std::unique_ptr<GraphicsPipeline> PipelineCache::TranslateCachedGraphics(
@@ -1577,18 +1572,14 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     auto& jobs = *shader_jobs;
     const u32 read_properties = host_info.EnvironmentReadProperties();
 
-    // The boot builds (Soon), which Loading Shaders waits for, the background prebuild and the
-    // revalidation of other builds' programs (Background). A stopped load cancels all three; the
-    // workers stay for the game.
+    // The boot builds (Soon), which Loading Shaders waits for, and the background prebuild. A
+    // stopped load cancels both; the workers stay for the game.
     const VideoCommon::ShaderJobBatch boot = jobs.CreateBatch();
     scheduled_prebuild.emplace(jobs, PrebuildCaptureLimit);
-    revalidation.emplace(jobs.CreateBatch());
     const std::stop_callback cancel_load{
-        stop_loading, [&jobs, boot, prebuild = scheduled_prebuild->Batch(),
-                       revalidating = *revalidation] {
+        stop_loading, [&jobs, boot, prebuild = scheduled_prebuild->Batch()] {
             jobs.Cancel(boot);
             jobs.Cancel(prebuild);
-            jobs.Cancel(revalidating);
         }};
 
     struct {
@@ -1637,26 +1628,86 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     std::vector<PrecacheJob> precache_graphics;
     u64 precache_capture_bytes = 0;
     std::vector<CacheV2::ProgramRecord> stale_programs;
+    for (const CacheV2::LogRecord& record : log->parsed.live) {
+        if (record.kind != RecordKind::Program) {
+            continue;
+        }
+        const auto stamp = CacheV2::ProgramStamp(record.payload);
+        if (!stamp) {
+            continue;
+        }
+        cache_v2->AddProgram(record.key, *stamp);
+        if (*stamp != CacheV2::LoweringStamp()) {
+            if (auto program = CacheV2::DecodeProgram(record.payload)) {
+                stale_programs.push_back(std::move(*program));
+            }
+        }
+    }
+    // Programs another build recorded are lowered again before any of their pipelines is built:
+    // the records of those whose code or texture bound buffer changed move to this build's code
+    // (a pipeline key holds the code's hash alone, so one built from the old record would be hit
+    // with the new texture bound buffer). Their own records follow last, so that a load cut short
+    // does this again at the next boot.
+    std::vector<CacheV2::LogAppend> relinked_appends;
+    std::vector<CacheV2::LogRecord> relinked_records;
+    std::unordered_set<u64> replaced_records;
+    if (!stale_programs.empty() && !stop_loading.stop_requested()) {
+        const size_t stale_count = stale_programs.size();
+        CacheV2::ForEach for_each = [&jobs](size_t count, const std::function<void(size_t)>& task) {
+            VideoCommon::ParallelFor(jobs, count, task);
+        };
+        RevalidatedPrograms revalidated =
+            RevalidateProgramRecords(std::move(stale_programs), for_each);
+        relinked_appends =
+            RelinkPipelineRecords(log->parsed.live, revalidated.relinked,
+                                  [&stop_loading] { return stop_loading.stop_requested(); });
+        if (!stop_loading.stop_requested()) {
+            for (const CacheV2::LogAppend& append : relinked_appends) {
+                cache_v2->Writer().Append(append.kind, append.key, append.payload);
+                replaced_records.insert(append.key);
+                if (append.kind == RecordKind::Tombstone) {
+                    continue;
+                }
+                relinked_records.push_back({.kind = append.kind,
+                                            .flags = 0,
+                                            .key = append.key,
+                                            .offset = 0,
+                                            .payload = append.payload});
+            }
+            for (const CacheV2::ProgramRecord& program : revalidated.unchanged) {
+                cache_v2->RecordProgram(program);
+            }
+            for (const auto& [hash, relinked] : revalidated.relinked) {
+                cache_v2->RecordProgram(relinked.program);
+            }
+            LOG_INFO(Render_Vulkan,
+                     "Shader cache v2: {} programs of another build lowered again, {} to other "
+                     "code or texture bound buffer, {} pipeline records moved to it",
+                     stale_count, revalidated.relinked.size(), relinked_records.size());
+        }
+    }
+    std::vector<const CacheV2::LogRecord*> plan;
+    plan.reserve(log->parsed.live.size() + relinked_records.size());
+    for (const CacheV2::LogRecord& record : log->parsed.live) {
+        if (record.kind == RecordKind::Program ||
+            ((record.kind == RecordKind::Graphics || record.kind == RecordKind::Compute) &&
+             replaced_records.contains(record.key))) {
+            continue;
+        }
+        plan.push_back(&record);
+    }
+    for (const CacheV2::LogRecord& record : relinked_records) {
+        plan.push_back(&record);
+    }
+
     size_t graphics_records = 0;
     size_t compute_records = 0;
     size_t skipped_pipelines = 0;
     size_t queued_graphics = 0;
-    for (const CacheV2::LogRecord& record : log->parsed.live) {
+    for (const CacheV2::LogRecord* const planned : plan) {
+        const CacheV2::LogRecord& record = *planned;
         if (stop_loading.stop_requested()) {
             break;
-        }
-        if (record.kind == RecordKind::Program) {
-            const auto stamp = CacheV2::ProgramStamp(record.payload);
-            if (!stamp) {
-                continue;
-            }
-            cache_v2->AddProgram(record.key, *stamp);
-            if (*stamp != CacheV2::LoweringStamp()) {
-                if (auto program = CacheV2::DecodeProgram(record.payload)) {
-                    stale_programs.push_back(std::move(*program));
-                }
-            }
-            continue;
         }
         if (record.kind == RecordKind::Compute) {
             ++compute_records;
@@ -1833,9 +1884,7 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     }
     boot_graphics.clear();
 
-    // After the boot builds, so that they never wait behind these in the queue. With the
-    // precache, the prebuild waits for it as before.
-    RevalidatePrograms(log, std::move(stale_programs));
+    // With the precache, the prebuild starts after it.
     size_t deferred_pipelines = 0;
     const auto start_prebuild = [&] {
         for (PrebuildRecord& record : prebuild) {
@@ -1931,91 +1980,6 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
         start_prebuild();
         LOG_INFO(Render_Vulkan, "{} cached graphics pipelines admitted for background prebuild",
                  deferred_pipelines);
-    }
-}
-
-void PipelineCache::RevalidatePrograms(
-    std::shared_ptr<const VideoCommon::ShaderCacheV2::LogFile> log,
-    std::vector<VideoCommon::ShaderCacheV2::ProgramRecord> programs) {
-    namespace CacheV2 = VideoCommon::ShaderCacheV2;
-    if (programs.empty()) {
-        return;
-    }
-    LOG_INFO(Render_Vulkan, "Shader cache v2: lowering {} programs of another build again",
-             programs.size());
-    // The pipeline records of programs whose code changed are moved once all are lowered. Their
-    // own records follow last, so that a revalidation cut short is done again at the next boot.
-    struct Relinking {
-        std::shared_ptr<const CacheV2::LogFile> log;
-        std::mutex mutex;
-        RelinkedPrograms programs;
-        std::atomic<size_t> pending;
-    };
-    auto relinking = std::make_shared<Relinking>();
-    relinking->log = std::move(log);
-    relinking->pending = programs.size();
-    const auto relink = [this, relinking] {
-        shader_jobs->Submit(
-            {
-                .priority = VideoCommon::ShaderJobPriority::Background,
-                .cpu = [this, relinking](VideoCommon::ShaderJobContext& context) {
-                    const auto appends =
-                        RelinkPipelineRecords(relinking->log->parsed.live, relinking->programs,
-                                              [&context] { return context.StopRequested(); });
-                    if (context.StopRequested()) {
-                        return VideoCommon::ShaderDriverStage{};
-                    }
-                    size_t moved = 0;
-                    for (const CacheV2::LogAppend& append : appends) {
-                        cache_v2->Writer().Append(append.kind, append.key, append.payload);
-                        moved += append.kind != CacheV2::RecordKind::Tombstone ? 1 : 0;
-                    }
-                    for (const auto& [hash, relinked] : relinking->programs) {
-                        cache_v2->RecordProgram(relinked.program);
-                    }
-                    LOG_INFO(Render_Vulkan,
-                             "Shader cache v2: {} programs lower to other code in this build, {} "
-                             "pipeline records moved to it",
-                             relinking->programs.size(), moved);
-                    return VideoCommon::ShaderDriverStage{};
-                },
-            },
-            &*revalidation);
-    };
-    for (CacheV2::ProgramRecord& program : programs) {
-        shader_jobs->Submit(
-            {
-                .priority = VideoCommon::ShaderJobPriority::Background,
-                .cpu = [this, relinking, relink, program = std::move(program)](
-                           VideoCommon::ShaderJobContext& context) {
-                    std::optional<CacheV2::ProgramRecord> relowered;
-                    try {
-                        relowered = CacheV2::RelowerProgramRecord(program);
-                    } catch (const std::exception& e) {
-                        LOG_DEBUG(Render_Vulkan, "Shader cache v2: program {:016x}: {}",
-                                  program.unique_hash, e.what());
-                    }
-                    if (!relowered) {
-                        // Kept as it is: its pipeline records still match the programs it lowers
-                        // to in the build that recorded it.
-                    } else if (relowered->unique_hash == program.unique_hash) {
-                        cache_v2->RecordProgram(*relowered);
-                    } else {
-                        std::scoped_lock lock{relinking->mutex};
-                        relinking->programs.emplace(
-                            program.unique_hash,
-                            RelinkedProgram{.old_unique_hash = program.unique_hash,
-                                            .old_texture_bound = program.texture_bound,
-                                            .program = std::move(*relowered)});
-                    }
-                    if (relinking->pending.fetch_sub(1) == 1 && !relinking->programs.empty() &&
-                        !context.StopRequested()) {
-                        relink();
-                    }
-                    return VideoCommon::ShaderDriverStage{};
-                },
-            },
-            &*revalidation);
     }
 }
 

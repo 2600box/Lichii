@@ -69,22 +69,37 @@ struct RelinkedProgram {
 /// Programs by the unique hash their pipeline records use
 using RelinkedPrograms = std::unordered_map<u64, RelinkedProgram>;
 
+/// Programs of another build's lowering, lowered by this one
+struct RevalidatedPrograms {
+    /// Same code and texture bound buffer: only the stamp is new
+    std::vector<VideoCommon::ShaderCacheV2::ProgramRecord> unchanged;
+    /// Other code or another texture bound buffer
+    RelinkedPrograms relinked;
+};
+
+/// Lowers `programs` again, through `for_each` when given. A program this build can't lower is
+/// in neither list: its pipeline records still match the build that recorded it.
+[[nodiscard]] RevalidatedPrograms RevalidateProgramRecords(
+    std::vector<VideoCommon::ShaderCacheV2::ProgramRecord> programs,
+    const VideoCommon::ShaderCacheV2::ForEach& for_each = {});
+
 struct RekeyedRecord {
     u64 key;
     std::vector<u8> payload;
 };
 
-/// A graphics or compute record with the code of the relinked programs it uses replaced and its
-/// pipeline key moved to their new unique hashes, recorded values kept. Nullopt when it uses none
-/// of them, or a stage's texture bound buffer came from the engine and can't be told now. Throws
-/// std::ios_base::failure for a damaged record, as ReadPipelinePayload does.
+/// A graphics or compute record with the code and texture bound buffer of the relinked programs it
+/// uses replaced and its pipeline key moved to their new unique hashes, recorded values kept.
+/// Nullopt when it uses none of them, or a stage's texture bound buffer came from the engine and
+/// can't be told now. Throws std::ios_base::failure for a damaged record, as ReadPipelinePayload
+/// does.
 [[nodiscard]] std::optional<RekeyedRecord> RekeyPipelineRecord(
     VideoCommon::ShaderCacheV2::RecordKind kind, std::span<const u8> payload,
     const RelinkedPrograms& programs);
 
 /// The records that move the graphics and compute records among `live` to the relinked
-/// programs they use: each one's new record, then a tombstone for it. Damaged records are left
-/// alone. Stops early once `stop` is true.
+/// programs they use: each one's new record, then a tombstone for it when its key moved. Damaged
+/// records are left alone. Stops early once `stop` is true.
 [[nodiscard]] std::vector<VideoCommon::ShaderCacheV2::LogAppend> RelinkPipelineRecords(
     std::span<const VideoCommon::ShaderCacheV2::LogRecord> live, const RelinkedPrograms& programs,
     const std::function<bool()>& stop = {});

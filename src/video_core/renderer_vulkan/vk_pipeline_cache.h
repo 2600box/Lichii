@@ -216,13 +216,7 @@ private:
                                                               PipelineStatistics* statistics,
                                                               bool& incomplete);
 
-    /// Lowers the programs another build recorded again, in the background: records of those
-    /// whose code is unchanged get this build's stamp; the pipeline records of the others move to
-    /// their new code and hashes (RelinkPipelineRecords).
-    void RevalidatePrograms(std::shared_ptr<const VideoCommon::ShaderCacheV2::LogFile> log,
-                            std::vector<VideoCommon::ShaderCacheV2::ProgramRecord> programs);
-
-    /// Cancels the v2 prebuild and revalidation and waits for their running stages
+    /// Cancels the v2 prebuild and waits for its running stages
     void StopBackgroundJobs();
 
     void SerializeVulkanPipelineCache(const std::filesystem::path& filename,
@@ -276,7 +270,6 @@ private:
     /// and the precache threads. Declared before the pipelines, whose builds it runs.
     std::optional<VideoCommon::ShaderJobScheduler> shader_jobs;
     std::optional<ScheduledPrebuild<GraphicsPipelineCacheKey, GraphicsPipeline>> scheduled_prebuild;
-    std::optional<VideoCommon::ShaderJobBatch> revalidation;
 
     GraphicsPipelineCacheKey graphics_key{};
     GraphicsPipeline* current_pipeline{};

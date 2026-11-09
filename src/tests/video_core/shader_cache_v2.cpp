@@ -874,6 +874,73 @@ TEST_CASE("Shader cache v2: pipeline records move to the code a program lowers t
     REQUIRE(Vulkan::RelinkPipelineRecords(log.live, programs, [] { return true; }).empty());
 }
 
+
+TEST_CASE("Shader cache v2: a program whose texture bound buffer alone moved is relinked",
+          "[video_core][shader_cache_v2]") {
+    V2::ProgramRecord current = LowerTestProgram(PlainProgram, false, 0x2000);
+    V2::ProgramRecord unchanged = current;
+    unchanged.lowering_stamp ^= 1;
+    V2::ProgramRecord moved = current;
+    moved.lowering_stamp ^= 1;
+    moved.texture_bound = current.texture_bound == 5 ? 4 : 5;
+    V2::ProgramRecord migrated = unchanged;
+    migrated.native.clear();
+
+    const Vulkan::RevalidatedPrograms revalidated =
+        Vulkan::RevalidateProgramRecords({unchanged, moved, migrated});
+    REQUIRE(revalidated.unchanged.size() == 1);
+    REQUIRE(revalidated.unchanged[0].lowering_stamp == V2::LoweringStamp());
+    REQUIRE(revalidated.relinked.size() == 1);
+    const Vulkan::RelinkedProgram& relinked = revalidated.relinked.at(moved.unique_hash);
+    REQUIRE(relinked.program.unique_hash == moved.unique_hash);
+    REQUIRE(relinked.old_texture_bound == moved.texture_bound);
+    REQUIRE(relinked.program.texture_bound == current.texture_bound);
+
+    // Same code, so the same pipeline keys. A compute record's key covers its payload.
+    V2::ProgramRecord old_program = current;
+    old_program.texture_bound = 5;
+    V2::ProgramRecord new_program = current;
+    new_program.texture_bound = 6;
+    const NativeTestEnvironment old_fragment{Shader::Stage::Fragment, old_program.lowered_code, 5};
+    const NativeTestEnvironment new_fragment{Shader::Stage::Fragment, new_program.lowered_code, 6};
+    const NativeTestEnvironment old_compute{Shader::Stage::Compute, old_program.lowered_code, 5};
+    const NativeTestEnvironment new_compute{Shader::Stage::Compute, new_program.lowered_code, 6};
+    const auto payload = [](const auto& key, const VideoCommon::GenericEnvironment& env) {
+        const std::array<const VideoCommon::GenericEnvironment*, 1> envs{&env};
+        return VideoCommon::SerializePipelinePayload(KeyBytes(key), envs, ReadProperties);
+    };
+    const auto graphics_key = TestGraphicsKey(current.unique_hash, 0);
+    const auto compute_key = TestComputeKey(current.unique_hash);
+    const auto graphics = payload(graphics_key, old_fragment);
+    const auto compute = payload(compute_key, old_compute);
+    std::vector<u8> bytes;
+    const auto header = V2::EncodeFileHeader(1);
+    bytes.assign(header.begin(), header.end());
+    const u64 graphics_record = Vulkan::GraphicsRecordKey(graphics_key);
+    const u64 compute_record = Vulkan::ComputeRecordKey(compute);
+    V2::EncodeRecord(bytes, RecordKind::Graphics, graphics_record, graphics);
+    V2::EncodeRecord(bytes, RecordKind::Compute, compute_record, compute);
+    const V2::ParsedLog log = V2::ParseLog(bytes);
+    REQUIRE(log.live.size() == 2);
+
+    Vulkan::RelinkedPrograms programs;
+    programs.emplace(current.unique_hash,
+                     Vulkan::RelinkedProgram{.old_unique_hash = current.unique_hash,
+                                             .old_texture_bound = 5,
+                                             .program = new_program});
+    const auto appends = Vulkan::RelinkPipelineRecords(log.live, programs);
+    const auto new_compute_payload = payload(compute_key, new_compute);
+    REQUIRE(appends.size() == 3);
+    REQUIRE(appends[0] == V2::LogAppend{RecordKind::Graphics, graphics_record,
+                                        payload(graphics_key, new_fragment)});
+    REQUIRE(appends[1] == V2::LogAppend{RecordKind::Compute,
+                                        Vulkan::ComputeRecordKey(new_compute_payload),
+                                        new_compute_payload});
+    REQUIRE(appends[2] == V2::LogAppend{RecordKind::Tombstone, compute_record,
+                                        V2::TombstonePayload(RecordKind::Compute)});
+    REQUIRE(Vulkan::PipelineRecordKey<Vulkan::ComputePipelineCacheKey>(appends[1].payload)
+                ->unique_hash == current.unique_hash);
+}
 TEST_CASE("Shader cache v2: an older Vulkan cache and its used list are migrated",
           "[video_core][shader_cache_v2]") {
     TempDir temp;
