@@ -11,7 +11,6 @@
 #include <thread>
 
 #include "common/common_types.h"
-#include "video_core/nx2.h"
 #include "video_core/nx2_async_readback.h"
 
 namespace VideoCore {
@@ -30,15 +29,17 @@ struct RasterizerDownloadArea {
 /// the GPU's side first finishes those it overlaps (FinishRead), so none lands over it later.
 inline std::atomic<u32> g_read_downloads{};
 
+/// Tegra::Nx2MayBeGpuWritten on Switch 2 titles, true otherwise. Defined in gpu.cpp: nx2.h can't
+/// be included here, since the Qt frontend reaches this header and its `slots` macro breaks it.
+[[nodiscard]] bool MayHoldGpuWrites(DAddr addr, u64 size);
+
 /// Whether such a download may still land over [addr, addr + size): what a write to guest memory
 /// from the GPU's side asks before FinishRead, on any thread, without the buffer cache's lock.
 /// The downloads take only GPU-modified bytes, and Switch 2 titles mark their pages
 /// (Tegra::Nx2MayBeGpuWritten): writes to other pages skip the lock, which the GPU thread holds
 /// for nearly every command.
 [[nodiscard]] inline bool ReadDownloadsMayCover(DAddr addr, u64 size) {
-    return g_read_downloads.load(std::memory_order_acquire) != 0 &&
-           (!Tegra::g_nx2_ampere.load(std::memory_order_relaxed) ||
-            Tegra::Nx2MayBeGpuWritten(addr, size));
+    return g_read_downloads.load(std::memory_order_acquire) != 0 && MayHoldGpuWrites(addr, size);
 }
 
 /// What DownloadLanding publishes.
