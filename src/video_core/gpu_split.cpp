@@ -341,6 +341,11 @@ bool GpuSplit::WaitForWrites(const Tegra::MemoryManager& memory, GPUVAddr addres
                    DrainSite::MacroDmaWrites);
 }
 
+bool GpuSplit::WaitForSyncedWritersOld() {
+    return WaitFor(std::min({last_writer_position, last_sync_position, write_position}),
+                   DrainSite::ListWriters);
+}
+
 bool GpuSplit::WaitForSyncedWriters() {
     return WaitFor(std::min(synced_writer_position, write_position), DrainSite::ListWriters);
 }
