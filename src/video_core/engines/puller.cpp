@@ -148,8 +148,10 @@ bool Puller::ResumeAcquire(DmaPusher& dma_pusher) {
     // counting those made the count odd ("suspended") at random, so submit-time snapshots were
     // thrown away for about half of all entries (CommandList::snapshot_suspensions).
     if (pending_acquire) {
-        VideoCommon::Nx2AcquireTest::Stats::Get().Acquire(std::chrono::steady_clock::now() -
-                                                          pending_acquire->since);
+        VideoCommon::Nx2AcquireTest::Stats::Get().Acquire(
+            std::chrono::steady_clock::now() - pending_acquire->since,
+            VideoCommon::Nx2AcquireTest::g_stats &&
+                VideoCommon::Nx2AcquireTest::InFirstPage(pending_acquire->address));
         pending_acquire.reset();
         dma_pusher.suspensions.fetch_add(1, std::memory_order_release);
         Nx2SemaphoreWaiters::Get().Remove(this);
@@ -255,8 +257,10 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
         const auto properties = g_nx2_ampere && (regs.semaphore_trigger & (1U << 24)) != 0
                                     ? VideoCommon::QueryPropertiesFlags::IsAFence
                                     : VideoCommon::QueryPropertiesFlags::HasTimeout;
-        const GPUVAddr mirror = g_nx2_ampere ? Nx2SemaphoreMirror(sequence_address) : 0;
+        const GPUVAddr mirror = g_nx2_ampere && VideoCommon::Nx2AcquireTest::g_mirror
+                                    ? Nx2SemaphoreMirror(sequence_address) : 0;
         if (mirror != 0) {
+            VideoCommon::Nx2AcquireTest::Stats::Get().Mirrored();
             LOG_DEBUG(HW_GPU, "Switch 2 semaphore {:#x}={:#x} mirrored to {:#x}", sequence_address, payload, mirror);
         }
         OnBack([rasterizer = dma_pusher.rasterizer, sequence_address, mirror, properties, payload] {
@@ -296,6 +300,11 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
         ReleaseFences(dma_pusher);
         if (!waiters.Latched(this) && !acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address))) {
             pending_acquire = acquire;
+            if (VideoCommon::Nx2AcquireTest::g_stats &&
+                VideoCommon::Nx2AcquireTest::InFirstPage(acquire.address)) {
+                VideoCommon::Nx2AcquireTest::Stats::Get().FirstPageSuspend(
+                    acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address + 0x1000)));
+            }
             dma_pusher.suspensions.fetch_add(1, std::memory_order_release);
             VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireWaits, 1);
         } else {
