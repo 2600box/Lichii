@@ -1800,6 +1800,8 @@ size_t PipelineCache::PrecacheGraphicsWarm(u64 title_id, size_t num_threads, siz
         std::atomic<size_t> failed_builds{};
         /// Builds the driver refused: worth another precache, unlike entries that cannot be built.
         std::atomic<size_t> driver_failures{};
+        /// Left out on purpose: vertex programs that read their position input.
+        std::atomic<size_t> skipped_builds{};
         size_t read{}; ///< Entries taken from the file (under the mutex)
         std::streamoff position{};
     };
@@ -1882,8 +1884,12 @@ size_t PipelineCache::PrecacheGraphicsWarm(u64 title_id, size_t num_threads, siz
                     } catch (const std::exception& e) {
                         LOG_DEBUG(Render_Vulkan, "Shader precache: {}", e.what());
                     }
-                    (result == WarmResult::Built ? reader.built : reader.failed_builds)
-                        .fetch_add(1);
+                    if (result == WarmResult::Skipped) {
+                        reader.skipped_builds.fetch_add(1);
+                    } else {
+                        (result == WarmResult::Built ? reader.built : reader.failed_builds)
+                            .fetch_add(1);
+                    }
                     if (result == WarmResult::DriverFailed) {
                         reader.driver_failures.fetch_add(1);
                     }
@@ -1904,7 +1910,7 @@ size_t PipelineCache::PrecacheGraphicsWarm(u64 title_id, size_t num_threads, siz
                 break;
             }
             if (callback) {
-                const size_t done = reader.built + reader.failed_builds;
+                const size_t done = reader.built + reader.failed_builds + reader.skipped_builds;
                 // The builder's recorded count, or else an estimate from the bytes read.
                 size_t total = known_total;
                 if (total == 0) {
@@ -1933,9 +1939,10 @@ size_t PipelineCache::PrecacheGraphicsWarm(u64 title_id, size_t num_threads, siz
     }
     LOG_INFO(Render_Vulkan,
              "Shader precache: graphics programs {}, {} built, {} failed ({} by the driver), "
-             "{:.1f} s",
+             "{} skipped (vertex reads its position input), {:.1f} s",
              stop_loading.stop_requested() ? "stopped" : (skipped ? "skipped" : "finished"),
              reader.built.load(), reader.failed_builds.load(), reader.driver_failures.load(),
+             reader.skipped_builds.load(),
              std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count());
     return reader.built;
 }
@@ -2362,10 +2369,11 @@ PipelineCache::WarmResult PipelineCache::WarmGraphicsLibraries(
         return WarmResult::Unbuildable;
     }
     pools.ReleaseContents();
-    const auto pipeline{
-        CreateGraphicsPipeline(pools, key, envs, nullptr, false, nullptr, nullptr, true)};
+    bool skipped = false;
+    const auto pipeline{CreateGraphicsPipeline(pools, key, envs, nullptr, false, nullptr, nullptr,
+                                               true, &skipped)};
     if (!pipeline) {
-        return WarmResult::Unbuildable;
+        return skipped ? WarmResult::Skipped : WarmResult::Unbuildable;
     }
     return pipeline->Failed() ? WarmResult::DriverFailed : WarmResult::Built;
 }
@@ -2676,7 +2684,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     ShaderPools& pools, const GraphicsPipelineCacheKey& key,
     std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
     bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools,
-    ParallelTranslation* parallel, bool libraries_only) try {
+    ParallelTranslation* parallel, bool libraries_only, bool* warm_skipped) try {
     auto hash = key.Hash();
     LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);
     // Declared before the programs, whose IR they hold
@@ -2971,6 +2979,17 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                 "Binding {} storage buffers ({} for mesh fallback) to a descriptor set limited to {}",
                 storage_buffers + auxiliary_buffers, auxiliary_buffers, set_limit);
         }
+    }
+    // Warm-up only: a vertex program that reads its own position input makes SPIR-V with a
+    // BuiltIn Position input, which a vertex shader may not have (VUID-Position-Position-04319).
+    // RADV crashes compiling it (radv_nir_lower_vs_inputs), and a driver crash cannot be caught.
+    // Generic scans of game files find such programs. The game's own pipelines are not affected.
+    if (libraries_only && uses_vertex_b && programs[1].stage == Shader::Stage::VertexB &&
+        programs[1].info.loads.AnyComponent(Shader::IR::Attribute::PositionX)) {
+        if (warm_skipped != nullptr) {
+            *warm_skipped = true;
+        }
+        return nullptr;
     }
     // Graphics pipeline libraries (EDEN_NX2_GPL). Left on the monolithic route: task and mesh
     // pipelines, transform feedback, a static rasterizer discard, and stages whose texture or
