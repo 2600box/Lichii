@@ -1292,6 +1292,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
     if (!IsBuilt()) {
         // Wait for the pipeline to be built
         scheduler.Record([this](vk::CommandBuffer) {
+            const VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::PipelineWait};
             const auto begin = std::chrono::steady_clock::now();
             build->Wait(!worker_only_build);
             hold_time_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
