@@ -63,3 +63,17 @@ TEST_CASE("Nx2MarkGpuWritten marks exactly the pages a range touches", "[video_c
     CHECK(Tegra::g_nx2_gpu_written_pages.back().load() == u64{7} << 61);
     Tegra::Nx2ClearGpuWrittenPages();
 }
+
+TEST_CASE("Every semaphore region is kept, past the first 32", "[video_core][nx2]") {
+    Tegra::Nx2ClearSemaphoreRegions();
+    for (u64 region = 0; region < 140; ++region) {
+        Tegra::Nx2AddSemaphoreRegion(0x40000000 + region * 0x2000);
+    }
+    Tegra::Nx2AddSemaphoreRegion(0x40000000);
+    CHECK(Tegra::g_nx2_semaphore_regions.size() == 140);
+    Tegra::Nx2RemoveSemaphoreRegion(0x40000000 + 139 * 0x2000);
+    CHECK(Tegra::g_nx2_semaphore_regions.size() == 139);
+    CHECK_FALSE(Tegra::g_nx2_semaphore_regions.contains(0x40000000 + 139 * 0x2000));
+    Tegra::Nx2ClearSemaphoreRegions();
+    CHECK(Tegra::g_nx2_semaphore_regions.empty());
+}
