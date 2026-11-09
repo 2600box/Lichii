@@ -1221,13 +1221,17 @@ void GraphicsPipeline::FinishPrepare(DrawPacket& packet,
         }
     }
     packet.render_area = ReadRenderArea(packet.stages);
-    packet.buffers.buffers_uploaded = std::exchange(buffer_cache.any_buffer_uploaded, false);
+    // With stage B on its own thread the flag is B's: A uploads no buffer data.
+    packet.buffers.buffers_uploaded =
+        !VideoCommon::DrawStages::g_threaded && std::exchange(buffer_cache.any_buffer_uploaded, false);
     {
         Profile::Scope scope{Profile::Zone::RenderTargets};
         texture_cache.UpdateRenderTargets(false);
         texture_cache.CheckFeedbackLoop(views);
+        // With stage B on its own thread the fragment barrier is B's: B checks it.
         packet.samples_render_target =
-            scheduler.HasFragmentBarrier() && texture_cache.SamplesRenderTarget(views);
+            (VideoCommon::DrawStages::g_threaded || scheduler.HasFragmentBarrier()) &&
+            texture_cache.SamplesRenderTarget(views);
     }
     packet.framebuffer = texture_cache.GetFramebuffer();
     packet.is_rescaling = texture_cache.IsRescaling();

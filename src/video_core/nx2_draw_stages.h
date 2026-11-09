@@ -110,6 +110,7 @@ inline void Enter(Stage stage) {
 }
 
 /// Stage 4: hands the packets in flight to B and waits until B consumed them, counting `site`
+/// when it waits, then records what A captured since its last packet while B is idle
 /// (nx2_back_stages.cpp; JoinB is the inline check).
 void JoinNow(Join site);
 /// Stage 4: packets A committed that B has not consumed yet.
@@ -149,7 +150,7 @@ inline Counters g_counters;
 
 /// A join point: in stage 4 the caller waits for stage B. Here it counts.
 inline void Count(Join site) {
-    if (g_counting) {
+    if (g_counting || g_threaded) {
         g_counters.joins[static_cast<size_t>(site)].fetch_add(1, std::memory_order_relaxed);
     }
 }
@@ -172,7 +173,7 @@ public:
         }
         if (!g_threaded) {
             Count(site);
-        } else if (t_draw_thread && PacketsInFlight()) {
+        } else if (t_draw_thread) {
             JoinNow(site);
         }
         previous = std::exchange(t_stage, Stage::Outside);
@@ -200,7 +201,8 @@ inline void NoteFrontWait(DrainSite site) {
 
 /// Read slots, so a binding that stays the same costs one compare.
 inline constexpr u32 IndexSlot = 0;
-inline constexpr u32 SlotCount = 1 + 32 + 5 * 64 + 5 * 32;
+inline constexpr u32 UniformSlots = 5 * 18;
+inline constexpr u32 SlotCount = 1 + 32 + 5 * 64 + 5 * 32 + UniformSlots;
 [[nodiscard]] constexpr u32 VertexSlot(u32 index) {
     return 1 + index;
 }
@@ -209,6 +211,10 @@ inline constexpr u32 SlotCount = 1 + 32 + 5 * 64 + 5 * 32;
 }
 [[nodiscard]] constexpr u32 TexelSlot(size_t stage, u32 index) {
     return 33 + 5 * 64 + static_cast<u32>(stage) * 32 + index;
+}
+/// Stage 4: the uniform buffers B binds from the cache, by their order in the draw.
+[[nodiscard]] constexpr u32 UniformSlot(u32 order) {
+    return 33 + 5 * 64 + 5 * 32 + (order < UniformSlots ? order : UniformSlots - 1);
 }
 
 /// The device ranges stage B read for the last Window packets, standing in for the packets in

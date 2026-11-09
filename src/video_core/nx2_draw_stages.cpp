@@ -251,7 +251,7 @@ void NoteGpuWriteImpl(Join site, const Tegra::MemoryManager& memory, GPUVAddr ad
 }
 
 std::string FormatJoins(u64 window_ns) {
-    if (!g_counting || !t_draw_thread || window_ns == 0) {
+    if (!(g_counting || g_threaded) || !t_draw_thread || window_ns == 0) {
         return {};
     }
     const auto rate = [window_ns](std::atomic<u64>& counter) {

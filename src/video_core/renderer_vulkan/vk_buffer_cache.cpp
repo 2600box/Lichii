@@ -416,13 +416,18 @@ BufferCacheRuntime::BufferCacheRuntime(const Device& device_, MemoryAllocator& m
 u32 BufferCacheRuntime::SetVertexRepackLayout(const Tegra::Engines::Maxwell3D::Regs& regs,
                                             bool dynamic_input) {
     const u32 old_mask = vertex_repack_mask;
-    const bool input_supported = VertexRepackInputSupported(dynamic_input, static_vertex_repack);
-    vertex_repack_mask = vertex_repack_pass && input_supported ? VertexRepackMask(regs) : 0;
+    vertex_repack_mask = VertexRepackMaskFor(regs, dynamic_input);
     if (vertex_repack_mask != old_mask) {
         LOG_DEBUG(Render_Vulkan, "Vertex repack selection: mask={:#x}, dynamic_input={}",
                   vertex_repack_mask, dynamic_input);
     }
     return old_mask ^ vertex_repack_mask;
+}
+
+u32 BufferCacheRuntime::VertexRepackMaskFor(const Tegra::Engines::Maxwell3D::Regs& regs,
+                                            bool dynamic_input) const {
+    const bool input_supported = VertexRepackInputSupported(dynamic_input, static_vertex_repack);
+    return vertex_repack_pass && input_supported ? VertexRepackMask(regs) : 0;
 }
 
 StagingBufferRef BufferCacheRuntime::UploadStagingBuffer(size_t size) {

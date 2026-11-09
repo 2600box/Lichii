@@ -351,6 +351,8 @@ struct DrawPacket {
     u32 mesh_emulation_vertices_per_group{}; ///< 0 unless an emulated mesh draw
     VkBuffer mesh_emulation_indirect_buffer{};
     VkDeviceSize mesh_emulation_indirect_offset{};
+    /// With stage B on its own thread: the vertex streams the runtime repacks for the draw.
+    u32 vertex_repack_mask{};
 
     VideoCommon::GraphicsBufferPacket buffers;
 

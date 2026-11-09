@@ -19,6 +19,7 @@
 #include "video_core/control/channel_state_cache.h"
 #include "video_core/engines/maxwell_dma.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/nx2_back_stages.h"
 #include "video_core/oot_network.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_vulkan/blit_image.h"
@@ -30,6 +31,7 @@
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_query_cache.h"
 #include "video_core/renderer_vulkan/vk_render_pass_cache.h"
+#include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_frame_dump.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
@@ -226,6 +228,69 @@ private:
     /// again.
     void VerifyDrawPacket(const DrawPacket& packet);
 
+    /// The draw commands of Draw and DrawIndirect, from the packet (stage B).
+    void RecordDirectDraw(const DrawPacket& packet);
+    void RecordIndirectDraw(const DrawPacket& packet);
+
+    /// Stage 4 (EDEN_NX2_BACK_STAGES=1): stage B on its own thread. A fills the slot it holds
+    /// with the draw's packet and the commands it captures, and hands it over at the draw's end.
+    struct BackSlot {
+        DrawPacket packet;
+        Scheduler::PacketList list;
+        bool indirect{};
+        u64 committed{}; ///< The packet's position in the ring
+        /// EDEN_NX2_BACK_STAGES_VERIFY: the device ranges B reads (begin, size, hash at A).
+        std::vector<std::array<u64, 3>> reads;
+    };
+    void StartBackStages();
+    void StopBackStages();
+    /// Stage A: notes what B reads for the slot, hands it to B and takes the next.
+    void CommitBackSlot(bool indirect);
+    /// After a join, with B idle: records the commands A captured since its last packet.
+    void SpliceCapturedCommands();
+    /// Stage B's thread.
+    void ConsumeBackSlot(u32 index);
+    void RecordBackDraw(BackSlot& slot);
+    /// Stage A: the ranges B reads for the packet, so writes over them join while it is in
+    /// flight (and their hashes for EDEN_NX2_BACK_STAGES_VERIFY).
+    void NoteBackReads(BackSlot& slot);
+    /// Stage B, EDEN_NX2_BACK_STAGES_VERIFY: the packet's order and the pages it reads.
+    void VerifyBackReads(const BackSlot& slot);
+    /// Stage A, B on its own thread: the repacked vertex buffers as of the draw being prepared.
+    [[nodiscard]] u32 RepackedVertexBuffers() const {
+        return back_ring ? back_repack_mask : buffer_cache_runtime.RepackedVertexBuffers();
+    }
+
+    /// Stage A's view of the scheduler state B records with (cmdlist-plan ruling 4): what the
+    /// packets A handed over bound, until A asks for a change in its lists or uses the scheduler.
+    struct BackView {
+        const GraphicsPipeline* pipeline{};
+        const Framebuffer* framebuffer{};
+        bool needs_state_enable_refresh{};
+        u64 render_pass{}; ///< Changes where a packet draws into another target
+        u64 changes{};     ///< Scheduler::AViewChanges at the last packet
+
+        /// Scheduler::RefreshesStateEnable as B will see it.
+        [[nodiscard]] bool RefreshesStateEnable(const GraphicsPipeline* next) const;
+        /// A packet drawing with `next` into `target` was handed over.
+        void Bind(const GraphicsPipeline* next, const Framebuffer* target);
+    };
+    [[nodiscard]] u64 RenderPassSerialOfA() const {
+        return back_ring ? back_view.render_pass + Scheduler::AViewChanges()
+                         : scheduler.RenderPassSerial();
+    }
+    [[nodiscard]] bool RenderPassActiveOfA() const {
+        return back_ring ? back_view.framebuffer != nullptr &&
+                               back_view.changes == Scheduler::AViewChanges()
+                         : scheduler.IsRenderPassActive();
+    }
+    [[nodiscard]] const GraphicsPipeline* BoundPipelineOfA() const {
+        if (!back_ring) {
+            return scheduler.BoundGraphicsPipeline();
+        }
+        return back_view.changes == Scheduler::AViewChanges() ? back_view.pipeline : nullptr;
+    }
+
     void FrameDumpPass(const Framebuffer* framebuffer);
     /// EDEN_NX2_PENDING_WRITE_TRACE: logs bound buffer ranges with collected, unapplied CPU writes.
     void TracePendingCpuWrites(bool compute, std::span<const u64> shader_hashes);
@@ -313,6 +378,30 @@ private:
     /// The draw the back thread is preparing, reused for its lists' capacity.
     DrawPacket draw_packet;
     u64 draw_sequence{};
+    std::unique_ptr<VideoCommon::DrawStages::BackRing> back_ring;
+    std::unique_ptr<BackSlot[]> back_slots;
+    BackSlot* back_slot{}; ///< The slot stage A fills
+    std::thread::id back_owner{};
+    bool back_splicing{};
+    u64 back_resets_seen{};
+    u32 back_repack_mask{};
+    /// Stage A: the device range B reads for each read slot as of the latest packet.
+    std::array<std::pair<u64, u64>, VideoCommon::DrawStages::SlotCount> back_held{};
+    std::vector<u32> back_active; ///< Read slots in back_held with a range
+    BackView back_view;
+    /// Stage B: the latest value of each dynamic state group A took.
+    DynamicStatePacket back_dynamic;
+    u64 back_b_resets{}; ///< Stage B: its own submits it recorded the dynamic state again after
+    /// Stage B: EDEN_NX2_BACK_STAGES_VERIFY results and the ring's 10 s report.
+    struct {
+        u64 next{};
+        u64 packets{};
+        u64 ranges{};
+        u64 differing{};
+        u64 out_of_order{};
+        u32 logged{};
+        std::chrono::steady_clock::time_point last_report{};
+    } back_verify;
     struct {
         u64 draws{};
         u64 differing{};

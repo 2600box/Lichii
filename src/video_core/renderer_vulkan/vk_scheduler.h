@@ -28,6 +28,7 @@
 #include "common/polyfill_thread.h"
 #include "common/settings.h"
 #include "video_core/gpu_split.h"
+#include "video_core/nx2_back_stages.h"
 #include "video_core/nx2_draw_stages.h"
 #include "video_core/renderer_vulkan/fragment_barrier_state.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
@@ -124,6 +125,9 @@ public:
         std::source_location location = std::source_location::current());
 
     void DeferFragmentBarrier() {
+        if (DeferToList(SpliceOp::DeferFragmentBarrier)) {
+            return;
+        }
         fragment_barrier.Defer(state.renderpass != VK_NULL_HANDLE);
     }
 
@@ -199,6 +203,67 @@ public:
     /// Draw packets, stage A (docs/nx2/cmdlist.md): until SpliceCommandList, recorded commands
     /// go to the draw's command list. A submit or dispatch records the list first.
     void BeginCommandList();
+    /// Stage 4 (EDEN_NX2_BACK_STAGES=1, stage B on its own thread): the commands stage A records
+    /// for a packet, with the scheduler state changes A asked for between them. B applies those
+    /// where A asked for them as it splices the list.
+    struct PacketList;
+    enum class SpliceOp : u8 {
+        EndRenderPass,         ///< RequestOutsideRenderPassOperationContext
+        FlushDeferredClear,
+        InvalidateState,       ///< The scheduler's part (A took the state tracker's)
+        DeferFragmentBarrier,
+        DispatchWork,
+    };
+    struct ListOp {
+        u32 index; ///< Applied before the command with this index
+        SpliceOp op;
+    };
+    /// Stage A, B on its own thread: the change goes to the packet's list (false otherwise).
+    bool DeferToList(SpliceOp op);
+    /// The calling thread (stage A) records into `list`; null records into the scheduler.
+    static void CaptureInto(PacketList* list) noexcept {
+        t_capture = list;
+    }
+    [[nodiscard]] static PacketList* Capturing() noexcept {
+        return t_capture;
+    }
+    /// Stage B, or stage A while B is idle: records `list` in order and empties it.
+    void SpliceList(PacketList& list);
+    /// Stage A: changes its lists asked for that may end the render pass or unbind the pipeline,
+    /// and its direct uses of the scheduler.
+    [[nodiscard]] static u64 AViewChanges() noexcept {
+        return t_a_changes;
+    }
+    /// Submits stage B's thread made: A takes the state tracker's part of each (the command
+    /// buffer state it holds), B the scheduler's.
+    [[nodiscard]] u64 BackResets() const noexcept {
+        return back_resets.load(std::memory_order_acquire);
+    }
+
+    /// With stage B on its own thread, on stage A's thread: waits until B consumed every packet
+    /// (a join at `site`), then records into the scheduler directly while it lives.
+    class DirectScope {
+    public:
+        explicit DirectScope(VideoCommon::DrawStages::Join site)
+            : join{site, VideoCommon::DrawStages::g_threaded && t_capture != nullptr} {
+            if (VideoCommon::DrawStages::g_threaded) {
+                saved = std::exchange(t_capture, nullptr);
+                t_a_changes += saved != nullptr ? 1 : 0;
+            }
+        }
+        ~DirectScope() {
+            if (saved != nullptr) {
+                t_capture = saved;
+            }
+        }
+        DirectScope(const DirectScope&) = delete;
+        DirectScope& operator=(const DirectScope&) = delete;
+
+    private:
+        VideoCommon::DrawStages::JoinScope join;
+        PacketList* saved{};
+    };
+
     /// Stage B: records the draw's command list, in order, ahead of its own commands.
     void SpliceCommandList() {
         capturing = false;
@@ -225,6 +290,10 @@ public:
             VideoCommon::DrawStages::Count(VideoCommon::DrawStages::Join::AListFull);
             SpliceCommands();
             (void)command_list->Record(command);
+            return;
+        }
+        if (VideoCommon::DrawStages::g_threaded && t_capture != nullptr) {
+            Capture(command);
             return;
         }
         VideoCommon::DrawStages::Expect(VideoCommon::DrawStages::Stage::B, "Scheduler::Record");
@@ -278,6 +347,8 @@ public:
     /// wait for the recording thread to submit the tick instead, and give up after 20 ms (it may
     /// be waiting for them).
     void Wait(u64 tick, double target_fps = 0.0, bool may_flush = true) {
+        // Stage A's flushes go to B in its packets: B submitted them once it is idle.
+        const DirectScope direct{VideoCommon::DrawStages::Join::Fence};
         const bool trace = Common::DkbFrameTrace::Enabled() && target_fps > 0.0;
         const auto trace_start = trace ? std::chrono::steady_clock::now()
                                        : std::chrono::steady_clock::time_point{};
@@ -517,6 +588,13 @@ private:
     /// Records the command list into the chunk (a join when stage A is still capturing).
     void SpliceCommands();
 
+    void ApplySpliceOp(const ListOp& op);
+    /// The scheduler's part of InvalidateState.
+    void InvalidateRecordingState();
+
+    template <typename T>
+    void Capture(T& command);
+
     /// One identity per command type, for EDEN_NX2_CMDLIST_VERIFY.
     template <typename T>
     static uintptr_t CommandTag() {
@@ -625,6 +703,11 @@ private:
     State state;
     u64 recording_epoch = 0;
 
+    static inline thread_local PacketList* t_capture{};
+    static inline thread_local u64 t_a_changes{};
+    std::atomic<u64> back_resets{};
+    std::chrono::steady_clock::time_point list_verify_report{};
+
     u32 num_renderpass_images = 0;
     std::array<VkImage, 9> renderpass_images{};
     std::array<VkImageSubresourceRange, 9> renderpass_image_ranges{};
@@ -648,6 +731,36 @@ private:
 template <typename T>
 bool Scheduler::TypedCommand<T>::MoveTo(CommandChunk& chunk) {
     return chunk.Record(command);
+}
+
+struct Scheduler::PacketList {
+    PacketList() : commands{std::make_unique<CommandChunk>()} {}
+
+    [[nodiscard]] bool Empty() const noexcept {
+        return count == 0 && ops.empty();
+    }
+
+    std::unique_ptr<CommandChunk> commands;
+    u32 count{}; ///< Commands in `commands`
+    std::vector<ListOp> ops;
+    /// EDEN_NX2_CMDLIST_VERIFY: what was recorded, in order.
+    std::vector<CommandListVerifyEntry> pending;
+};
+
+template <typename T>
+void Scheduler::Capture(T& command) {
+    const uintptr_t tag = cmdlist_verify ? CommandTag<std::remove_cvref_t<T>>() : 0;
+    const u64 hash = cmdlist_verify ? HashCommand(command) : 0;
+    if (!t_capture->commands->Record(command)) {
+        // A join splices the list while B is idle.
+        ++cmdlist_stats.full_joins;
+        VideoCommon::DrawStages::JoinB(VideoCommon::DrawStages::Join::AListFull);
+        (void)t_capture->commands->Record(command);
+    }
+    if (cmdlist_verify) {
+        t_capture->pending.push_back({tag, hash, t_capture->count});
+    }
+    ++t_capture->count;
 }
 
 } // namespace Vulkan

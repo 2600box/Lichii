@@ -204,8 +204,16 @@ void BackRing::Loop(std::stop_token stop_token) {
 }
 
 void JoinNow(Join site) {
-    Count(site);
-    g_ring->Join();
+    if (g_ring == nullptr) {
+        return;
+    }
+    if (g_ring->InFlight()) {
+        Count(site);
+        g_ring->Join();
+    }
+    if (g_after_join != nullptr) {
+        g_after_join(g_after_join_argument);
+    }
 }
 
 bool PacketsInFlight() {

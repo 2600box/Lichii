@@ -176,6 +176,46 @@ line logs:
 - draws, and how many of them had a list, with the commands those lists held;
 - joins by a submit or dispatch, and by a full list.
 
+## Stage B on its own thread (stage 4, test only)
+
+`EDEN_NX2_BACK_STAGES=1` runs stage B on a thread of its own (`GPUStageB`) while the split's back
+draws. It is off by default; off, the draw runs both stages inline as in stage 3. The rasterizer
+starts the ring at the back's first draw and stops it if another thread draws.
+
+- Stage A fills a packet slot and records everything else into the slot's command list
+  (`Scheduler::PacketList`): uploads, copies, clears, barriers. Render pass ends, deferred clears,
+  the scheduler's part of an invalidate, deferred fragment barriers and dispatches go into the
+  list as splice ops, which B applies in place as it splices.
+- A hands packets over in batches of 32 (`BackRing`, 64 slots), or at once at a join. B spins
+  3 µs, then sleeps on a futex. A blocks when the ring is full.
+- B records each packet holding the buffer cache's lock: it splices the list, sets the vertex
+  repack layout from the packet, binds buffers and descriptors, records the dynamic state, and
+  records the draw. B keeps a running copy of the dynamic state and records all of it after a
+  submit of its own.
+- A keeps the state tracker. Fast draws read A's view of the scheduler (`BackView`): the
+  pipeline and framebuffer of the packets A handed over, until A changes the scheduler state.
+- Uniform buffers: A streams the small ones at the draw. The rest go to B in `uniform_binds`,
+  with their device address.
+- Joins wait until B has consumed every packet, then splice A's open list:
+  - the buffer cache's lock, and any direct scheduler use: submits, waits, render pass requests
+    and deferred clears;
+  - clears, compute, queries and conditional rendering, fences, flushes, frames, copies,
+    channels, barriers and the idle hook;
+  - a descriptor payload wrap;
+  - writes over a range a packet in flight reads (A notes those ranges at each packet);
+  - draws a diagnostic reads (render trace, frame dump, fast draw verify, pending write trace,
+    indirect read-back, native capture, Ocarina DLSS tracking). Those draws run both stages on A.
+- The split counts the back's position for the front's waits only once B has recorded the
+  packets made before it. A drain hands the open batch over at once.
+- `EDEN_NX2_SPLIT_CHECK` accepts scheduler use from B's thread.
+
+`EDEN_NX2_BACK_STAGES_VERIFY=1` makes A hash each range B reads (its first 256 KiB). B hashes
+the range again before it records the packet and checks that packets arrive in order. B logs the
+first 16 differences. Every 10 s a `Back stages verify` line gives the packets, the ranges
+checked, those that changed after A built the packet, and the packets out of order. A
+`Back stages` line gives the ring's hand-overs, joins, full-ring waits, A's wait time, and B's
+sleeps and busy time. With `EDEN_NX2_GPU_PROFILE`, the profile line counts the joins by site.
+
 ## Verify
 
 `EDEN_NX2_DRAW_PACKET_VERIFY=1` resolves each draw again from the live registers between A and B

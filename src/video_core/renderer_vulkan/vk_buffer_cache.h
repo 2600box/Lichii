@@ -117,6 +117,13 @@ public:
 
     /// Returns the mask of bindings whose repacked state changed.
     u32 SetVertexRepackLayout(const Tegra::Engines::Maxwell3D::Regs& regs, bool dynamic_input);
+    /// The bindings SetVertexRepackLayout would repack (stage A, with B on its own thread).
+    [[nodiscard]] u32 VertexRepackMaskFor(const Tegra::Engines::Maxwell3D::Regs& regs,
+                                          bool dynamic_input) const;
+    /// Stage B on its own thread: the bindings stage A selected for the draw.
+    void SetVertexRepackMask(u32 mask) {
+        vertex_repack_mask = mask;
+    }
 
     bool IsVertexRepacked(u32 binding) const {
         return (vertex_repack_mask & (1U << binding)) != 0;

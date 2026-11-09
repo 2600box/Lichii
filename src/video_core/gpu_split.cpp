@@ -27,6 +27,7 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_back_stages.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_draw_stages.h"
@@ -60,6 +61,11 @@ void GpuSplit::CheckOwner(const char* where) {
     }
     const DWORD thread = GetCurrentThreadId();
     if (thread == g_back_thread_id.load(std::memory_order_relaxed)) {
+        return;
+    }
+    // Stage B's thread (EDEN_NX2_BACK_STAGES=1) records the back's draws.
+    if (DrawStages::g_threaded && !DrawStages::t_draw_thread &&
+        DrawStages::t_stage == DrawStages::Stage::B) {
         return;
     }
     static std::atomic<u32> reports{};
@@ -626,17 +632,32 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
             if ((read_position - last_store >= 4096 ||
                  read_position >= wait_target.load(std::memory_order_relaxed)) &&
                 read_position != available) {
-                consumed.store(read_position, std::memory_order_seq_cst);
+                StoreConsumed(read_position);
                 last_store = read_position;
-                NotifyFront();
             }
         }
-        consumed.store(read_position, std::memory_order_seq_cst);
-        NotifyFront();
+        StoreConsumed(read_position);
     }
     back_running.store(false, std::memory_order_seq_cst);
     front_wake.fetch_add(1, std::memory_order_seq_cst);
     front_wake.notify_all();
+}
+
+void GpuSplit::StoreConsumed(u64 position) {
+    if (DrawStages::BackRing* const ring = DrawStages::g_ring) {
+        // With stage B on its own thread the front's waits count B's position: entries are
+        // consumed once B recorded the packets they made, and what the back holds goes to B now.
+        ring->Publish();
+        ring->Mark(position);
+        return;
+    }
+    consumed.store(position, std::memory_order_seq_cst);
+    NotifyFront();
+}
+
+void GpuSplit::NoteStageBConsumed(u64 position) {
+    consumed.store(position, std::memory_order_seq_cst);
+    NotifyFront();
 }
 
 void GpuSplit::ReportAcquire() {

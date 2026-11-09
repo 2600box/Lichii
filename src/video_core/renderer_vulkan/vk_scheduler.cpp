@@ -165,6 +165,8 @@ Scheduler::~Scheduler() {
 
 u64 Scheduler::Flush(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
                      std::source_location location) {
+    // With stage B on its own thread a submit waits for B: the ticks stay in submission order.
+    const DirectScope direct{VideoCommon::DrawStages::Join::ASubmit};
     if (state.renderpass) {
         CountRenderPassEnd(location.file_name(), location.line());
     }
@@ -238,6 +240,7 @@ bool Scheduler::WaitSubmitted(u64 tick) {
 
 void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
                        std::source_location location) {
+    const DirectScope direct{VideoCommon::DrawStages::Join::ASubmit};
     if (state.renderpass) {
         CountRenderPassEnd(location.file_name(), location.line());
     }
@@ -262,6 +265,7 @@ void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
 }
 
 void Scheduler::WaitWorker() {
+    const DirectScope direct{VideoCommon::DrawStages::Join::Flush};
     DispatchWork();
 
     // Ensure the queue is drained.
@@ -283,6 +287,9 @@ void Scheduler::MarkFrameEnd(u64 frame) {
 void Scheduler::DispatchWork() {
     if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
         VideoCommon::GpuSplit::CheckOwner("Scheduler::DispatchWork");
+    }
+    if (DeferToList(SpliceOp::DispatchWork)) {
+        return;
     }
     const VideoCommon::DrawStages::JoinScope join{VideoCommon::DrawStages::Join::ASubmit,
                                                   capturing};
@@ -396,6 +403,7 @@ void Scheduler::RealizeDeferredClear() {
 
 bool Scheduler::DeferColorClear(const Framebuffer* framebuffer, u32 rt_slot,
                                 const VkClearValue& value) {
+    const DirectScope direct{VideoCommon::DrawStages::Join::ADeferredClear};
     const VideoCommon::DrawStages::JoinScope join{
         VideoCommon::DrawStages::Join::ADeferredClear,
         VideoCommon::DrawStages::In(VideoCommon::DrawStages::Stage::A)};
@@ -413,6 +421,7 @@ bool Scheduler::DeferColorClear(const Framebuffer* framebuffer, u32 rt_slot,
 }
 
 bool Scheduler::DeferDepthStencilClear(const Framebuffer* framebuffer, const VkClearValue& value) {
+    const DirectScope direct{VideoCommon::DrawStages::Join::ADeferredClear};
     const VideoCommon::DrawStages::JoinScope join{
         VideoCommon::DrawStages::Join::ADeferredClear,
         VideoCommon::DrawStages::In(VideoCommon::DrawStages::Stage::A)};
@@ -430,6 +439,9 @@ bool Scheduler::DeferDepthStencilClear(const Framebuffer* framebuffer, const VkC
 }
 
 void Scheduler::FlushDeferredClear() {
+    if (DeferToList(SpliceOp::FlushDeferredClear)) {
+        return;
+    }
     if (deferred_clear.framebuffer == nullptr) {
         return;
     }
@@ -441,6 +453,7 @@ void Scheduler::FlushDeferredClear() {
 }
 
 void Scheduler::RequestRenderpass(const Framebuffer* framebuffer, std::source_location location) {
+    const DirectScope direct{VideoCommon::DrawStages::Join::ASchedulerUse};
     VideoCommon::DrawStages::Expect(VideoCommon::DrawStages::Stage::B, "RequestRenderpass");
     if (deferred_clear.framebuffer == framebuffer) {
         RealizeDeferredClear();
@@ -470,6 +483,9 @@ void Scheduler::RequestRenderpass(const Framebuffer* framebuffer, std::source_lo
 }
 
 void Scheduler::RequestOutsideRenderPassOperationContext(std::source_location location) {
+    if (DeferToList(SpliceOp::EndRenderPass)) {
+        return;
+    }
     const VideoCommon::DrawStages::JoinScope join{
         VideoCommon::DrawStages::Join::ARenderPassEnd,
         state.renderpass && VideoCommon::DrawStages::In(VideoCommon::DrawStages::Stage::A)};
@@ -483,7 +499,9 @@ bool Scheduler::UpdateGraphicsPipeline(GraphicsPipeline* pipeline) {
     if (state.graphics_pipeline == pipeline) {
         if (pipeline && pipeline->UsesExtendedDynamicState() &&
             state.needs_state_enable_refresh) {
-            state_tracker.InvalidateStateEnableFlag();
+            if (!VideoCommon::DrawStages::g_threaded) {
+                state_tracker.InvalidateStateEnableFlag();
+            }
             state.needs_state_enable_refresh = false;
         }
         return false;
@@ -498,7 +516,11 @@ bool Scheduler::UpdateGraphicsPipeline(GraphicsPipeline* pipeline) {
     if (!pipeline->UsesExtendedDynamicState()) {
         state.needs_state_enable_refresh = true;
     } else if (state.needs_state_enable_refresh) {
-        state_tracker.InvalidateStateEnableFlag();
+        // With stage B on its own thread A took the state enables already (its view of
+        // RefreshesStateEnable): the state tracker is A's.
+        if (!VideoCommon::DrawStages::g_threaded) {
+            state_tracker.InvalidateStateEnableFlag();
+        }
         state.needs_state_enable_refresh = false;
     }
 
@@ -946,6 +968,11 @@ void Scheduler::SpliceCommands() {
 }
 
 void Scheduler::NoteRecorded(uintptr_t tag, u64 hash) {
+    if (VideoCommon::DrawStages::g_threaded) {
+        // Each packet's list is checked as it is spliced (Capture); B's own commands go in as
+        // recorded.
+        return;
+    }
     const u64 sequence = cmdlist_stats.recorded++;
     if (capturing) {
         cmdlist_stats.pending.push_back({tag, hash, sequence});
@@ -971,11 +998,117 @@ void Scheduler::AllocateNewContext() {
 }
 
 void Scheduler::InvalidateState() {
+    namespace DrawStages = VideoCommon::DrawStages;
+    if (DrawStages::g_threaded) {
+        if (t_capture != nullptr) {
+            state_tracker.InvalidateCommandBufferState();
+            (void)DeferToList(SpliceOp::InvalidateState);
+            return;
+        }
+        if (!DrawStages::t_draw_thread && DrawStages::t_stage == DrawStages::Stage::B) {
+            InvalidateRecordingState();
+            back_resets.fetch_add(1, std::memory_order_release);
+            return;
+        }
+    }
+    InvalidateRecordingState();
+    state_tracker.InvalidateCommandBufferState();
+}
+
+void Scheduler::InvalidateRecordingState() {
     ++recording_epoch;
     state.graphics_pipeline = nullptr;
     state.rescaling_defined = false;
     state.descriptor_buffer_bound = false;
-    state_tracker.InvalidateCommandBufferState();
+}
+
+bool Scheduler::DeferToList(SpliceOp op) {
+    if (!VideoCommon::DrawStages::g_threaded || t_capture == nullptr) {
+        return false;
+    }
+    if (op == SpliceOp::EndRenderPass || op == SpliceOp::FlushDeferredClear ||
+        op == SpliceOp::InvalidateState) {
+        ++t_a_changes;
+    }
+    t_capture->ops.push_back({t_capture->count, op});
+    return true;
+}
+
+void Scheduler::ApplySpliceOp(const ListOp& list_op) {
+    switch (list_op.op) {
+    case SpliceOp::EndRenderPass:
+        EndRenderPass();
+        break;
+    case SpliceOp::FlushDeferredClear:
+        if (deferred_clear.framebuffer != nullptr) {
+            RealizeDeferredClear();
+            EndRenderPass();
+        }
+        break;
+    case SpliceOp::InvalidateState:
+        InvalidateRecordingState();
+        break;
+    case SpliceOp::DeferFragmentBarrier:
+        fragment_barrier.Defer(state.renderpass != VK_NULL_HANDLE);
+        break;
+    case SpliceOp::DispatchWork:
+        DispatchWork();
+        break;
+    }
+}
+
+void Scheduler::SpliceList(PacketList& list) {
+    PacketList* const saved = std::exchange(t_capture, nullptr);
+    size_t next_op = 0;
+    u32 index = 0;
+    const auto apply_ops = [&](u32 position) {
+        while (next_op < list.ops.size() && list.ops[next_op].index <= position) {
+            ApplySpliceOp(list.ops[next_op++]);
+        }
+    };
+    list.commands->TakeAll([&](Command& command) {
+        apply_ops(index);
+        if (!command.MoveTo(*chunk)) {
+            DispatchWork();
+            (void)command.MoveTo(*chunk);
+        }
+        if (cmdlist_verify) {
+            const bool known = index < list.pending.size();
+            if ((!known || list.pending[index].tag != command.Tag()) &&
+                cmdlist_stats.differences++ < 16) {
+                LOG_ERROR(Render_Vulkan,
+                          "Command list verify: packet command {} of {} changed type when "
+                          "spliced",
+                          index, list.count);
+            }
+            ++cmdlist_stats.inserted;
+        }
+        ++index;
+    });
+    apply_ops(index);
+    if (cmdlist_verify) {
+        if (index != list.count && cmdlist_stats.differences++ < 16) {
+            LOG_ERROR(Render_Vulkan, "Command list verify: spliced {} of {} recorded commands",
+                      index, list.count);
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now - list_verify_report >= std::chrono::seconds{10}) {
+            list_verify_report = now;
+            LOG_INFO(Render_Vulkan,
+                     "Command list verify (stage B thread): {} commands checked, {} differ, {} "
+                     "lists ({} commands), {} joins by a full list",
+                     cmdlist_stats.inserted, cmdlist_stats.differences, cmdlist_stats.lists,
+                     cmdlist_stats.commands, cmdlist_stats.full_joins);
+        }
+    }
+    if (index != 0) {
+        ++cmdlist_stats.lists;
+        cmdlist_stats.commands += index;
+    }
+    list.count = 0;
+    list.ops.clear();
+    list.pending.clear();
+    t_capture = saved;
 }
 
 void Scheduler::EndPendingOperations() {
