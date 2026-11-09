@@ -1098,6 +1098,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     if (CacheV2::Enabled()) {
         pipeline_cache_filename = base_dir / CacheV2::FileName;
         used_pipelines_filename.clear();
+        V2BootTrace("migrate");
         const auto migration = MigrateLegacyPipelineCache(base_dir, pipeline_cache_filename,
                                                           MaxUsedPipelineAge(device));
         if (migration.version) {
@@ -1109,16 +1110,20 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         } else if (migration.failed) {
             LOG_WARNING(Render_Vulkan, "Couldn't start shader cache v2 from the older cache");
         }
+        V2BootTrace("cache");
         cache_v2 = std::make_unique<CacheV2::Cache>(pipeline_cache_filename);
         shader_cache_v2 = cache_v2.get();
+        V2BootTrace("open");
         pipeline_binaries = PipelineBinaries::Open(device, base_dir);
         // Without the lock: another emulator's appends are complete records or a cut-off tail.
         // The payload hashes are checked on the shader job workers.
+        V2BootTrace("read");
         log_v2 = std::make_shared<CacheV2::LogFile>(CacheV2::ReadLogFile(
             pipeline_cache_filename,
             [this](size_t count, const std::function<void(size_t)>& task) {
                 VideoCommon::ParallelFor(*shader_jobs, count, task);
             }));
+        V2BootTrace("programs");
         cache_v2->LoadPrograms(log_v2->parsed.live);
         const CacheV2::LogStats& stats = log_v2->parsed.stats;
         LOG_INFO(Render_Vulkan,
@@ -1128,6 +1133,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
                  stats.bad_headers, stats.bad_payloads, stats.skipped_bytes,
                  stats.torn_tail_bytes);
         std::vector<u64> expired_sessions;
+        V2BootTrace("used");
         used_pipelines = UsedPipelinesFromLog(log_v2->parsed.live, MaxUsedPipelineAge(device),
                                               expired_sessions);
         for (const u64 session : expired_sessions) {
@@ -1569,6 +1575,7 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     namespace StutterTrace = VideoCommon::StutterTrace;
     using CacheV2::RecordKind;
     using VideoCommon::ShaderJobPriority;
+    V2BootTrace("load_pipelines");
     auto& jobs = *shader_jobs;
     const u32 read_properties = host_info.EnvironmentReadProperties();
 
@@ -1884,6 +1891,7 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     }
     boot_graphics.clear();
 
+    V2BootTrace("planned");
     // With the precache, the prebuild starts after it.
     size_t deferred_pipelines = 0;
     const auto start_prebuild = [&] {
@@ -1919,7 +1927,9 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
         callback(VideoCore::LoadCallbackStage::Build, state.built, state.total);
         state.has_loaded = true;
     }
+    V2BootTrace("boot_wait");
     boot.Wait();
+    V2BootTrace("boot_done");
 
     std::vector<DuplicateGraphicsRecord> no_duplicates;
     AddIncompleteGraphics(state.incomplete_graphics, no_duplicates, disk_pipelines,

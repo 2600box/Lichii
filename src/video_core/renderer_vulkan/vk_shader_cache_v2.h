@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <functional>
@@ -16,6 +18,18 @@
 #include "video_core/shader_cache_v2/records.h"
 
 namespace Vulkan {
+
+/// Test only (never merges): a flushed line per v2 boot step to EDEN_NX2_V2_BOOT_TRACE's file
+inline void V2BootTrace(const char* step) {
+    static std::FILE* const file = [] {
+        const char* const path = std::getenv("EDEN_NX2_V2_BOOT_TRACE");
+        return path ? std::fopen(path, "a") : nullptr;
+    }();
+    if (file) {
+        std::fprintf(file, "%s\n", step);
+        std::fflush(file);
+    }
+}
 
 struct GraphicsPipelineCacheKey;
 

@@ -12,6 +12,7 @@
 #include "video_core/renderer_vulkan/vk_pipeline_binaries.h"
 #include "video_core/shader_cache_v2/cache.h"
 #include "video_core/vulkan_common/vulkan_device.h"
+#include "video_core/renderer_vulkan/vk_shader_cache_v2.h"
 
 namespace Vulkan {
 namespace {
@@ -183,6 +184,7 @@ std::unique_ptr<PipelineBinaries> PipelineBinaries::Open(const Device& device,
         !dld.vkGetPipelineBinaryDataKHR || !dld.vkReleaseCapturedPipelineDataKHR) {
         return nullptr;
     }
+    V2BootTrace("open_key");
     VkPipelineBinaryKeyKHR global_key{.sType = VK_STRUCTURE_TYPE_PIPELINE_BINARY_KEY_KHR};
     std::optional<std::vector<u8>> global_key_bytes;
     if (dld.vkGetPipelineKeyKHR(*device.GetLogical(), nullptr, &global_key) != VK_SUCCESS ||
@@ -190,6 +192,7 @@ std::unique_ptr<PipelineBinaries> PipelineBinaries::Open(const Device& device,
         LOG_WARNING(Render_Vulkan, "Driver blobs: the driver gives no global pipeline key");
         return nullptr;
     }
+    V2BootTrace("open_identity");
     ShaderCacheV2::DeviceIdentity identity{
         .vendor_id = device.GetVendorID(),
         .device_id = device.GetDeviceID(),
@@ -198,6 +201,7 @@ std::unique_ptr<PipelineBinaries> PipelineBinaries::Open(const Device& device,
         .global_key = std::move(*global_key_bytes),
     };
     std::ranges::copy(device.GetPipelineCacheUUID(), identity.pipeline_cache_uuid.begin());
+    V2BootTrace("open_store");
     auto binaries = std::make_unique<PipelineBinaries>(
         device, directory / ShaderCacheV2::DriverFileName, identity);
     if (binaries->store.Discarded() == ShaderCacheV2::DriverBlobDiscard::OtherIdentity) {
@@ -208,6 +212,7 @@ std::unique_ptr<PipelineBinaries> PipelineBinaries::Open(const Device& device,
     if (!binaries->store.Active()) {
         return nullptr;
     }
+    V2BootTrace("open_done");
     const ShaderCacheV2::DriverBlobCounts counts = binaries->store.Counts();
     LOG_INFO(Render_Vulkan,
              "Driver blobs (VK_KHR_pipeline_binary): {} pipelines stored for this driver ({} "
@@ -254,6 +259,7 @@ vk::Pipeline PipelineBinaries::Create(const CreateInfo& ci, VkPipelineCache cach
     };
     VkPipelineBinaryKeyKHR pipeline_key{.sType = VK_STRUCTURE_TYPE_PIPELINE_BINARY_KEY_KHR};
     std::optional<std::vector<u8>> driver_key;
+    V2BootTrace("create_key");
     if (dld.vkGetPipelineKeyKHR(handle, &key_info, &pipeline_key) != VK_SUCCESS ||
         !(driver_key = KeyBytes(pipeline_key))) {
         return CreateNormally(logical, ci, cache);
@@ -283,6 +289,7 @@ vk::Pipeline PipelineBinaries::Create(const CreateInfo& ci, VkPipelineCache cach
     VkPipeline pipeline = VK_NULL_HANDLE;
     // A capturing build takes no pipeline cache either
     // (VUID-vkCreateGraphicsPipelines-pNext-09617).
+    V2BootTrace("create_capture");
     if (CreateRaw(dld, handle, capture_ci, VK_NULL_HANDLE, &pipeline) != VK_SUCCESS) {
         if (pipeline != VK_NULL_HANDLE) {
             dld.vkDestroyPipeline(handle, pipeline, nullptr);
@@ -291,6 +298,7 @@ vk::Pipeline PipelineBinaries::Create(const CreateInfo& ci, VkPipelineCache cach
         return CreateNormally(logical, ci, cache);
     }
     StutterTrace::CountDriverBuild(StutterTrace::DriverBuild::Compiled);
+    V2BootTrace("create_captured");
     if (auto captured = Capture(dld, handle, pipeline)) {
         captured->pipeline_key = std::move(*driver_key);
         store.Store(kind, key, ShaderCacheV2::EncodeBinaries(*captured));
