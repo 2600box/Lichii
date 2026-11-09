@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <QButtonGroup>
 #include <QCheckBox>
+#include <QEventLoop>
 #include <QGuiApplication>
 #include <QProgressDialog>
 #include <QRadioButton>
@@ -111,7 +112,8 @@ void UserDataMigrator::ShowMigrationPrompt(QMainWindow* main_window) {
 
     QAbstractButton* button = migration_prompt.clickedButton();
 
-    if (button->text() == QObject::tr("No")) {
+    // Esc or closing the window rejects the dialog without a clicked button, the same as No.
+    if (button == nullptr || button->text() == QObject::tr("No")) {
         return ShowMigrationCancelledMessage(main_window);
     }
 
@@ -149,19 +151,24 @@ void UserDataMigrator::MigrateUserData(QMainWindow* main_window, const bool clea
 
     thread->connect(thread, &QThread::started, worker, &MigrationWorker::process);
 
+    // Esc closes the progress dialog without stopping the worker, so wait for the worker itself.
+    QEventLoop loop;
+
     thread->connect(worker, &MigrationWorker::finished, progress,
-                    [=, this](const QString& success_text, const std::string& path) {
+                    [=, this, &loop](const QString& success_text, const std::string& path) {
                         progress->close();
                         QMessageBox::information(main_window, QObject::tr("Migration"),
                                                  success_text, QMessageBox::Ok);
 
                         migrated = true;
                         thread->quit();
+                        loop.quit();
                     });
 
     thread->connect(worker, &MigrationWorker::finished, worker, &QObject::deleteLater);
     thread->connect(thread, &QThread::finished, thread, &QObject::deleteLater);
 
     thread->start();
-    progress->exec();
+    progress->show();
+    loop.exec();
 }
