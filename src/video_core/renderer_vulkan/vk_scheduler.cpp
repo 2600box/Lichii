@@ -486,6 +486,11 @@ bool Scheduler::UpdateGraphicsPipeline(GraphicsPipeline* pipeline) {
     return true;
 }
 
+bool Scheduler::RefreshesStateEnable(const GraphicsPipeline* pipeline) const {
+    return pipeline != nullptr && state.needs_state_enable_refresh &&
+           pipeline->UsesExtendedDynamicState();
+}
+
 bool Scheduler::UpdateRescaling(bool is_rescaling, bool mesh_layout) {
     if (state.rescaling_defined && is_rescaling == state.is_rescaling &&
         mesh_layout == state.mesh_layout) {

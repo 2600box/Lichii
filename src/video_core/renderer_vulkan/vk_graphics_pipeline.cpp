@@ -1113,6 +1113,11 @@ bool GraphicsPipeline::PrepareDelta(DrawPacket& packet) {
         kept_image_entries.clear();
     }
     BeginDescriptorCapture(packet);
+    if (replay_images) {
+        // B adds the kept entries themselves; the packet carries only their ranges.
+        packet.image_source = kept_image_entries.data();
+        packet.images_kept = true;
+    }
     for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
         if (!configured_stages[stage]) {
             continue;
@@ -1121,19 +1126,16 @@ bool GraphicsPipeline::PrepareDelta(DrawPacket& packet) {
             Profile::Scope scope{Profile::Zone::BindStageBuffers};
             CaptureUniformDescriptors(packet, stage);
         }
+        if (replay_images) {
+            packet.image_entries[stage] = kept_image_ranges[stage];
+            continue;
+        }
         Profile::Scope scope{Profile::Zone::PushDescriptors};
         const u32 first_entry = CapturedEntries(packet);
-        if (replay_images) {
-            const auto [first, count] = kept_image_ranges[stage];
-            guest_descriptor_queue.AddEntries({kept_image_entries.data() + first, count});
-        } else {
-            PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
-                                 rescaling, samplers_it, views_it);
-        }
+        PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage], rescaling,
+                             samplers_it, views_it);
         packet.image_entries[stage] = {first_entry, CapturedEntries(packet) - first_entry};
-        if (!replay_images) {
-            KeepImageDescriptors(stage, packet);
-        }
+        KeepImageDescriptors(stage, packet);
     }
     if (replay_images) {
         rescaling.Assign(kept_rescaling);
@@ -1168,21 +1170,19 @@ bool GraphicsPipeline::PrepareDelta(DrawPacket& packet) {
     return true;
 }
 
-void GraphicsPipeline::BeginDescriptorCapture(DrawPacket& packet) {
+inline void GraphicsPipeline::BeginDescriptorCapture(DrawPacket& packet) {
     if (packet.entries.size() < num_descriptor_entries) {
         packet.entries.resize(num_descriptor_entries);
     }
     packet.uniform_entries = {};
     packet.image_entries = {};
     packet.mesh_entries = {};
+    packet.image_source = packet.entries.data();
+    packet.images_kept = false;
     guest_descriptor_queue.BeginCapture(packet.entries.data(), uses_descriptor_buffer);
 }
 
-u32 GraphicsPipeline::CapturedEntries(const DrawPacket& packet) const noexcept {
-    return static_cast<u32>(guest_descriptor_queue.CaptureCursor() - packet.entries.data());
-}
-
-void GraphicsPipeline::CaptureUniformDescriptors(DrawPacket& packet, size_t stage) {
+inline void GraphicsPipeline::CaptureUniformDescriptors(DrawPacket& packet, size_t stage) {
     const u32 first_entry = CapturedEntries(packet);
     buffer_cache.BindHostGraphicsUniformBuffers(stage);
     packet.uniform_entries[stage] = {first_entry, CapturedEntries(packet) - first_entry};
@@ -1224,7 +1224,7 @@ void GraphicsPipeline::FinishPrepare(DrawPacket& packet,
     packet.is_rescaling = texture_cache.IsRescaling();
 }
 
-RenderAreaPushConstant GraphicsPipeline::ReadRenderArea(u32 stages) const {
+inline RenderAreaPushConstant GraphicsPipeline::ReadRenderArea(u32 stages) const {
     RenderAreaPushConstant render_area;
     for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
         if (((stages >> stage) & 1) == 0 || !stage_infos[stage].uses_render_area) {
@@ -1317,7 +1317,9 @@ bool GraphicsPipeline::Record(const DrawPacket& packet) {
             Profile::Scope scope{Profile::Zone::BindStageBuffers};
             buffer_cache.BindHostStageBuffers(stage);
         }
-        add_entries(packet.image_entries[stage]);
+        if (const auto [first, count] = packet.image_entries[stage]; count != 0) {
+            guest_descriptor_queue.AddEntries({packet.image_source + first, count});
+        }
     }
     add_entries(packet.mesh_entries);
     if (packet.buffers.buffers_uploaded || buffer_cache.any_buffer_uploaded) {

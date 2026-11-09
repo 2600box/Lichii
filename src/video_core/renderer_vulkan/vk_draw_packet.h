@@ -346,6 +346,7 @@ struct DrawPacket {
     bool mesh_draw{};
     DrawParams params{};
     Tegra::Engines::Maxwell3D::DrawManager::IndirectParams indirect{};
+    /// Written for mesh draws only.
     u32 mesh_emulation_groups{};
     u32 mesh_emulation_vertices_per_group{}; ///< 0 unless an emulated mesh draw
     VkBuffer mesh_emulation_indirect_buffer{};
@@ -357,8 +358,11 @@ struct DrawPacket {
     /// entries between them. Only the ranges below are valid.
     std::vector<DescriptorUpdateEntry> entries;
     std::array<Range, NUM_STAGES> uniform_entries{};
-    std::array<Range, NUM_STAGES> image_entries{};
+    std::array<Range, NUM_STAGES> image_entries{}; ///< In image_source
     Range mesh_entries{};
+    /// entries, or a delta draw's kept image entries (images_kept), which the packet doesn't copy.
+    const DescriptorUpdateEntry* image_source{};
+    bool images_kept{};
     u32 stages{}; ///< Stages B binds descriptors for
     std::array<u32, Shader::Backend::SPIRV::NUM_TEXTURE_AND_IMAGE_SCALING_WORDS> rescaling{};
     RenderAreaPushConstant render_area{};
@@ -368,17 +372,41 @@ struct DrawPacket {
 
     DynamicStatePacket dynamic;
 
-    /// Bytes of what the packet carries for B, its lists counted by their used entries.
+    /// Bytes stage A wrote into the packet for this draw: the fields the draw uses, its lists
+    /// counted by their used entries. Kept image entries are referenced, not counted.
     [[nodiscard]] u32 PayloadBytes() const {
         using Buffers = VideoCommon::GraphicsBufferPacket;
         u32 num_entries = mesh_entries.second;
         for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
-            num_entries += uniform_entries[stage].second + image_entries[stage].second;
+            num_entries += uniform_entries[stage].second;
+            num_entries += images_kept ? 0 : image_entries[stage].second;
         }
-        const size_t header = sizeof(DrawPacket) - sizeof(entries) - sizeof(buffers) -
-                              sizeof(dynamic) + sizeof(Buffers) - sizeof(buffers.inline_indices) -
-                              sizeof(buffers.vertex_streams) - sizeof(buffers.storage_buffers) -
-                              sizeof(buffers.texture_buffers);
+        size_t header = sizeof(DrawPacket) - sizeof(entries) - sizeof(buffers) - sizeof(dynamic) +
+                        sizeof(Buffers) - sizeof(buffers.inline_indices) -
+                        sizeof(buffers.vertex_streams) - sizeof(buffers.storage_buffers) -
+                        sizeof(buffers.texture_buffers);
+        header -= is_indirect ? sizeof(params) : sizeof(indirect);
+        if (!mesh_draw) {
+            header -= sizeof(mesh_emulation_groups) + sizeof(mesh_emulation_vertices_per_group) +
+                      sizeof(mesh_emulation_indirect_buffer) +
+                      sizeof(mesh_emulation_indirect_offset);
+        }
+        if (!buffers.is_indexed) {
+            header -= sizeof(buffers.index_format) + sizeof(buffers.index_format_size) +
+                      sizeof(buffers.index_first) + sizeof(buffers.index_count) +
+                      sizeof(buffers.index_guest_size);
+        }
+        if (!buffers.index_dirty) {
+            header -= sizeof(buffers.index);
+        }
+        if (!buffers.transform_feedback) {
+            header -= sizeof(buffers.transform_feedback_layouts) +
+                      sizeof(buffers.transform_feedback_buffers);
+        }
+        if (!buffers.indirect) {
+            header -= sizeof(buffers.indirect_count) + sizeof(buffers.indirect_buffer) +
+                      sizeof(buffers.count_buffer);
+        }
         const size_t lists =
             num_entries * sizeof(DescriptorUpdateEntry) + buffers.inline_indices.size() +
             buffers.vertex_streams.size() * sizeof(Buffers::VertexStream) +

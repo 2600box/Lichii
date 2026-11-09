@@ -357,7 +357,9 @@ private:
 
     /// Stage A: the descriptor entries added until FinishPrepare go to the packet.
     void BeginDescriptorCapture(DrawPacket& packet);
-    [[nodiscard]] u32 CapturedEntries(const DrawPacket& packet) const noexcept;
+    [[nodiscard]] u32 CapturedEntries(const DrawPacket& packet) const noexcept {
+        return static_cast<u32>(guest_descriptor_queue.CaptureCursor() - packet.entries.data());
+    }
     void CaptureUniformDescriptors(DrawPacket& packet, size_t stage);
     void KeepImageDescriptors(size_t stage, const DrawPacket& packet);
     /// Stage A, after the images: the mesh emulation entries, render area and render targets.

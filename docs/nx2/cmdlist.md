@@ -13,7 +13,7 @@ so B must not depend on the registers or dirty flags.
 |---|---|
 | Header | Sequence number (one per prepared draw, for stage 4's ordering), pipeline, framebuffer, `DrawParams` or a copy of the indirect parameters, mesh and mesh emulation counts |
 | Buffers (`VideoCommon::GraphicsBufferPacket`) | Index binding (when `Dirty::IndexBuffer` was set), index format, first, count and inline indexes; vertex streams to resolve or bind again with their strides; transform feedback bindings; storage and texture buffer bindings per stage, read from the constant buffers; indirect and count buffers; whether A uploaded buffer data |
-| Descriptors | The uniform buffer entries and image entries of each stage and the mesh emulation entries, as A resolved them; the rescaling and render area push constants |
+| Descriptors | The uniform buffer entries and image entries of each stage and the mesh emulation entries, as A resolved them; the rescaling and render area push constants. A delta draw that replays its pipeline's kept image entries carries only their ranges (`images_kept`) |
 | Flags | Transform feedback (ends the render pass and counts streamed bytes), sampled render target under a pending fragment barrier, rescaling, the zpass counter enable |
 | Dynamic state | A presence mask and the values of each group whose dirty flag A took |
 
@@ -21,8 +21,11 @@ The dynamic state is a delta, not a register snapshot: a group is present only w
 `Touch*` flag (or the state tracker's check) fired. `ReadDynamicGroup` in `vk_rasterizer.cpp`
 computes each group's values; A and the verify both call it.
 
-`DrawPacket::PayloadBytes` counts what a packet carries, its lists by their used entries.
-EDEN_NX2_DRAW_PACKET_VERIFY logs the average.
+`DrawPacket::PayloadBytes` counts the bytes A wrote for the draw: the header fields the draw
+uses (no indirect parameters for a direct draw, no mesh, index, transform feedback or indirect
+fields where the draw has none), its lists by their used entries, and the dynamic state groups
+present. Kept image entries are referenced, not counted. EDEN_NX2_DRAW_PACKET_VERIFY logs the
+average.
 
 ## Stage A
 
@@ -35,7 +38,10 @@ EDEN_NX2_DRAW_PACKET_VERIFY logs the average.
 - The uniform buffers are resolved (`UpdateGraphicsUniformBuffers`, with its own retry loop) and
   bound: the stream buffer copies happen here, so they copy guest memory as it is at the draw. The
   descriptor queue's capture mode writes their entries, and the image entries, into the packet.
-- The dynamic state flags are taken and their groups read into the packet.
+- The dynamic state flags are taken and their groups read into the packet. When binding the
+  pipeline in B will make the state enables dirty again (`Scheduler::RefreshesStateEnable`, after
+  a pipeline without extended dynamic state), A takes them too, so they are recorded with this
+  draw as before the split.
 
 ## Stage B
 
@@ -52,13 +58,19 @@ own:
 5. The dynamic state records, the query counter enables and the draw command.
 
 If B can't record the draw, it still records the dynamic state, so the flags A took are not lost.
+If a submit happened since A (the scheduler's tick moved), the new command buffer has no dynamic
+state, so B takes every group again before it records them.
 
 ## State B still shares
 
 Stage 1 keeps these on GPUBack's shared state. Each is a stage 3/4 item.
 
 - A reads scheduler state: the fast draw's `TakeReusableDraw`/`DeltaStillHolds` and
-  `NoteResolvedDraw`, `HasFragmentBarrier`, and the uniform stream buffer's reuse tick.
+  `NoteResolvedDraw`, `HasFragmentBarrier`, `RefreshesStateEnable`, and the uniform stream
+  buffer's reuse tick.
+- After a submit between A and B, B reads the dynamic state from the registers and dirty flags.
+- A delta draw's image entries stay in the pipeline's kept entries until B adds them; once A runs
+  ahead, A must not replace them before B has read them.
 - B reads the page table for multi-range storage segments, and guest memory for uploads and uint8
   index widening.
 - A writes the vertex repack layout into the buffer cache runtime and the mesh emulation buffers

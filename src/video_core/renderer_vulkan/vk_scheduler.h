@@ -158,6 +158,9 @@ public:
     /// Update the pipeline to the current execution context.
     bool UpdateGraphicsPipeline(GraphicsPipeline* pipeline);
 
+    /// Whether UpdateGraphicsPipeline(pipeline) would make the state enable flag dirty.
+    [[nodiscard]] bool RefreshesStateEnable(const GraphicsPipeline* pipeline) const;
+
     /// Worker thread only: whether the bound graphics pipeline failed to build, so the draws
     /// recorded after it must be dropped instead of reaching the driver without a pipeline.
     void SetGraphicsPipelineMissing(bool missing) {

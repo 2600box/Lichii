@@ -1415,10 +1415,12 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, u32 instance_count, Func&& d
         }
     }
     packet.mesh_draw = mesh_draw;
-    packet.mesh_emulation_groups = mesh_emulation_groups;
-    packet.mesh_emulation_vertices_per_group = mesh_emulation_vertices_per_group;
-    packet.mesh_emulation_indirect_buffer = mesh_emulation_indirect.buffer;
-    packet.mesh_emulation_indirect_offset = mesh_emulation_indirect.offset;
+    if (mesh_draw) {
+        packet.mesh_emulation_groups = mesh_emulation_groups;
+        packet.mesh_emulation_vertices_per_group = mesh_emulation_vertices_per_group;
+        packet.mesh_emulation_indirect_buffer = mesh_emulation_indirect.buffer;
+        packet.mesh_emulation_indirect_offset = mesh_emulation_indirect.offset;
+    }
     if (is_indirect) {
         packet.indirect = maxwell3d->draw_manager.indirect_state;
     } else {
@@ -1430,10 +1432,16 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, u32 instance_count, Func&& d
         UNIMPLEMENTED_IF(maxwell3d->regs.IsShaderConfigEnabled(Maxwell::ShaderType::TessellationInit) ||
                          maxwell3d->regs.IsShaderConfigEnabled(Maxwell::ShaderType::Tessellation));
     }
+    // B binds the pipeline after A took the dynamic state: when that bind makes the state enables
+    // dirty again, A takes them now so B records them with the draw, as before the split.
+    if (scheduler.RefreshesStateEnable(pipeline)) {
+        state_tracker.InvalidateStateEnableFlag();
+    }
     {
         Profile::Scope scope{Profile::Zone::DynamicState};
         UpdateDynamicStates(pipeline, packet.dynamic);
     }
+    const u64 prepared_tick = scheduler.CurrentTick();
     if (DrawPacketVerify()) {
         VerifyDrawPacket(packet);
     }
@@ -1495,6 +1503,10 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, u32 instance_count, Func&& d
 
     {
         Profile::Scope scope{Profile::Zone::DynamicState};
+        // A submit since A reset the command buffer's dynamic state: take all of it again.
+        if (scheduler.CurrentTick() != prepared_tick) {
+            UpdateDynamicStates(pipeline, packet.dynamic);
+        }
         RecordDynamicStates(packet.dynamic);
     }
 

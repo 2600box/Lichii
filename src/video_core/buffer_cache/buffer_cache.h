@@ -1600,7 +1600,11 @@ void BufferCache<P>::ReadGraphicsGeometry(GraphicsBufferPacket& packet) {
     const bool resolve_vertex_buffers = flags[Dirty::VertexBuffers];
     flags[Dirty::VertexBuffers] = false;
     u32& bound = channel_state->vertex_streams_bound;
-    for (u32 index = 0; index < NUM_VERTEX_BUFFERS; ++index) {
+    // Without Dirty::VertexBuffers only the streams that bind a buffer can take their flag.
+    const u32 streams =
+        resolve_vertex_buffers ? static_cast<u32>((u64{1} << NUM_VERTEX_BUFFERS) - 1) : bound;
+    for (u32 mask = streams; mask != 0; mask &= mask - 1) {
+        const u32 index = static_cast<u32>(std::countr_zero(mask));
         if (!flags[Dirty::VertexBuffer0 + index]) {
             continue;
         }
