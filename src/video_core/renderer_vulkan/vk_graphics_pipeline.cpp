@@ -1019,7 +1019,11 @@ bool GraphicsPipeline::ConfigureImpl(DrawPacket& packet) {
     }
     {
         Profile::Scope scope{Profile::Zone::UpdateBuffers};
-        buffer_cache.UpdateGraphicsUniformBuffers();
+        // With stage B on its own thread A resolves no buffers: B binds the uniform buffers A
+        // does not stream (StageGraphicsUniformBuffers).
+        if (!VideoCommon::DrawStages::g_threaded) {
+            buffer_cache.UpdateGraphicsUniformBuffers();
+        }
     }
 
     AcquireDescriptors();
@@ -1101,7 +1105,11 @@ bool GraphicsPipeline::PrepareDelta(DrawPacket& packet) {
     }
     {
         Profile::Scope scope{Profile::Zone::UpdateBuffers};
-        buffer_cache.UpdateGraphicsUniformBuffers();
+        // With stage B on its own thread A resolves no buffers: B binds the uniform buffers A
+        // does not stream (StageGraphicsUniformBuffers).
+        if (!VideoCommon::DrawStages::g_threaded) {
+            buffer_cache.UpdateGraphicsUniformBuffers();
+        }
     }
     RescalingPushConstant rescaling;
     const VideoCommon::SamplerId* samplers_it{delta_samplers.data()};
@@ -1182,7 +1190,11 @@ inline void GraphicsPipeline::AcquireDescriptors() {
 }
 
 inline void GraphicsPipeline::WriteBufferDescriptors(DrawPacket& packet, size_t stage) {
-    buffer_cache.BindHostGraphicsUniformBuffers(stage);
+    if (VideoCommon::DrawStages::g_threaded) {
+        buffer_cache.StageGraphicsUniformBuffers(stage, packet.buffers);
+    } else {
+        buffer_cache.BindHostGraphicsUniformBuffers(stage);
+    }
     const u32 count = num_buffer_entries[stage];
     packet.buffer_entries[stage] = {guest_descriptor_queue.Skip(count), count};
 }
@@ -1299,20 +1311,28 @@ bool GraphicsPipeline::Record(const DrawPacket& packet) {
     }
     // The storage and texel buffer entries go where A left them. Another count than A left fails
     // the draw in ConfigureDraw, as it did when the entries were added in order.
-    size_t num_entries = guest_descriptor_queue.UpdateCount();
+    size_t num_entries = packet.descriptor_count;
     {
         Profile::Scope entries_scope{Profile::Zone::PacketEntries};
+        GuestDescriptorQueue& queue = buffer_cache.runtime.StageDescriptorQueue();
+        DescriptorUpdateEntry* const data = packet.descriptor_data;
+        for (const auto& bind : packet.buffers.uniform_binds) {
+            queue.BeginFill(data, bind.entry, uses_descriptor_buffer);
+            (void)buffer_cache.BindStagedUniformBuffer(bind);
+            const u32 written = queue.EndFill(data, bind.entry);
+            ASSERT(written <= 1);
+        }
         for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
             if (((packet.stages >> stage) & 1) == 0) {
                 continue;
             }
             const auto [first, count] = packet.buffer_entries[stage];
-            guest_descriptor_queue.BeginFill(first);
+            queue.BeginFill(data, first, uses_descriptor_buffer);
             {
                 Profile::Scope scope{Profile::Zone::BindStageBuffers};
                 buffer_cache.BindHostStageBuffers(stage);
             }
-            num_entries = num_entries + guest_descriptor_queue.EndFill(first) - count;
+            num_entries = num_entries + queue.EndFill(data, first) - count;
         }
     }
     if (packet.buffers.buffers_uploaded || buffer_cache.any_buffer_uploaded) {
@@ -1336,7 +1356,7 @@ bool GraphicsPipeline::ConfigureDraw(const DrawPacket& packet, size_t num_entrie
                      num_descriptor_entries, num_entries);
         return false;
     }
-    const void* const descriptor_data{guest_descriptor_queue.UpdateData()};
+    const void* const descriptor_data{packet.descriptor_data};
 
     VkDeviceSize descriptor_buffer_offset{};
     u32 descriptor_buffer_chunk{};

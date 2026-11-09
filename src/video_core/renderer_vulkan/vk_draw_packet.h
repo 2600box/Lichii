@@ -357,6 +357,8 @@ struct DrawPacket {
     /// A writes the draw's descriptor entries into the descriptor queue and leaves these, counted
     /// from its UpdateData, for B's storage and texel buffer entries of each stage.
     std::array<Range, NUM_STAGES> buffer_entries{};
+    DescriptorUpdateEntry* descriptor_data{}; ///< A's UpdateData for the draw
+    u32 descriptor_count{};                   ///< Entries A left there, B's included
     u32 stages{}; ///< Stages B binds descriptors for
     std::array<u32, Shader::Backend::SPIRV::NUM_TEXTURE_AND_IMAGE_SCALING_WORDS> rescaling{};
     RenderAreaPushConstant render_area{};

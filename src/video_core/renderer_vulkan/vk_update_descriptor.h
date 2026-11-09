@@ -117,18 +117,26 @@ public:
         return first;
     }
 
-    /// Until EndFill, entries go to those Skip left at `first`.
-    void BeginFill(u32 first) noexcept {
+    /// Until EndFill, entries go to those Skip left at `first`, counted from `data` (the
+    /// UpdateData of the draw they belong to), in the mode the draw acquired them with. With
+    /// stage B on its own thread this is B's queue, filling A's payload.
+    void BeginFill(DescriptorUpdateEntry* data, u32 first, bool use_descriptor_buffer_) noexcept {
         VideoCommon::DrawStages::Expect(VideoCommon::DrawStages::Stage::B, "descriptor BeginFill");
+        use_descriptor_buffer = supports_descriptor_buffer && use_descriptor_buffer_;
         fill_end = payload_cursor;
-        payload_cursor = upload_start + first;
+        payload_cursor = data + first;
     }
 
-    /// Returns how many entries were written since BeginFill(first).
-    u32 EndFill(u32 first) noexcept {
-        const u32 written = static_cast<u32>(payload_cursor - (upload_start + first));
+    /// Returns how many entries were written since BeginFill(data, first).
+    u32 EndFill(DescriptorUpdateEntry* data, u32 first) noexcept {
+        const u32 written = static_cast<u32>(payload_cursor - (data + first));
         payload_cursor = fill_end;
         return written;
+    }
+
+    /// Stage A: the draw's entries, for stage B (UpdateData without const).
+    [[nodiscard]] DescriptorUpdateEntry* DrawEntries() const noexcept {
+        return upload_start;
     }
 
     /// Entries an earlier draw added (delta draws).

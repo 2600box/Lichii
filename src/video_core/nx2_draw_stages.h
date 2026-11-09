@@ -46,6 +46,22 @@ enum class Join : u32 {
     ABufferChange,  ///< Stage A creates or deletes a buffer (uniform resolve)
     ABufferUpload,  ///< Stage A uploads buffer data (uniform sync)
     BDynamicState,  ///< Stage B takes the dynamic state from the registers after a submit
+    // With stage B on its own thread (EDEN_NX2_BACK_STAGES=1), where the thread that draws waits
+    // for B:
+    ABufferLock,     ///< It takes the buffer cache's lock (B uses the cache under it)
+    ASchedulerUse,   ///< It uses the scheduler outside a packet's command list
+    ADescriptorWrap, ///< Its descriptor payload wraps or grows while B may still read it
+    Clear,
+    Compute,
+    QueryCache, ///< Query cache work: reports, counters, conditional rendering
+    Fence,      ///< Fences, sync points and synchronous operations
+    Flush,      ///< FlushAll, FlushCommands, WaitForIdle
+    Frame,      ///< TickFrame
+    Copy,       ///< Surface copies, DrawTexture, inline uploads, DMA buffer operations
+    Channel,
+    Barrier,     ///< Fragment and tiled cache barriers
+    IdleHook,    ///< The split's idle hook (deferred submits)
+    Diagnostics, ///< Draws a diagnostic reads B's result of (frame dump, indirect trace)
     Count,
 };
 
@@ -58,6 +74,11 @@ inline constexpr std::array<const char*, JoinCount> join_names{
     "A list full",   "A render pass ends", "A deferred clears",
     "A scheduler reads", "A buffer changes", "A buffer uploads",
     "B dynamic state after a submit",
+    "A buffer cache lock", "A scheduler use", "A descriptor wrap",
+    "clears",        "compute",            "query cache",
+    "fences",        "flushes",            "frames",
+    "copies",        "channels",           "barriers",
+    "idle hook",     "diagnostics",
 };
 
 /// Whether the stage marker and the join counters run, as of Configure.

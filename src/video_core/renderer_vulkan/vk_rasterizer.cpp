@@ -763,14 +763,30 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
       guest_descriptor_queue(device, UpdateDescriptorQueue::GUEST_FRAME_PAYLOAD_SIZE,
                              device.IsExtDescriptorBufferSupported()),
       compute_pass_descriptor_queue(device, UpdateDescriptorQueue::COMPUTE_FRAME_PAYLOAD_SIZE),
+      back_staging_pool(VideoCommon::DrawStages::BackStagesRequested()
+                            ? std::make_unique<StagingBufferPool>(device, memory_allocator,
+                                                                  scheduler)
+                            : nullptr),
+      back_compute_pass_descriptor_queue(
+          back_staging_pool ? std::make_unique<ComputePassDescriptorQueue>(
+                                  device, UpdateDescriptorQueue::COMPUTE_FRAME_PAYLOAD_SIZE)
+                            : nullptr),
+      back_descriptor_queue(back_staging_pool
+                                ? std::make_unique<GuestDescriptorQueue>(
+                                      device, 1, device.IsExtDescriptorBufferSupported())
+                                : nullptr),
       descriptor_buffer_ring(device, memory_allocator),
       blit_image(device, scheduler, state_tracker, descriptor_pool), render_pass_cache(device),
       texture_cache_runtime{
           device,     scheduler,         memory_allocator, staging_pool,
           blit_image, render_pass_cache, descriptor_pool,  compute_pass_descriptor_queue},
       texture_cache(texture_cache_runtime, device_memory),
-      buffer_cache_runtime(device, memory_allocator, scheduler, staging_pool,
-                           guest_descriptor_queue, compute_pass_descriptor_queue, descriptor_pool),
+      buffer_cache_runtime(device, memory_allocator, scheduler,
+                           back_staging_pool ? *back_staging_pool : staging_pool, staging_pool,
+                           guest_descriptor_queue,
+                           back_compute_pass_descriptor_queue ? *back_compute_pass_descriptor_queue
+                                                              : compute_pass_descriptor_queue,
+                           descriptor_pool),
       buffer_cache(device_memory, buffer_cache_runtime),
       query_cache_runtime(this, device_memory, buffer_cache, device, memory_allocator, scheduler,
                           staging_pool, compute_pass_descriptor_queue, descriptor_pool, texture_cache),
@@ -782,6 +798,9 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
       fence_manager(*this, gpu, texture_cache, buffer_cache, query_cache, device, scheduler),
       frame_dump(device, memory_allocator, scheduler) {
     VideoCommon::DrawStages::Configure();
+    if (back_descriptor_queue) {
+        buffer_cache_runtime.SetStageDescriptorQueue(*back_descriptor_queue);
+    }
     scheduler.SetQueryCache(query_cache);
     buffer_cache.SetPendingCpuWrites(
         [this](const std::function<void(DAddr, size_t)>& callback) {
@@ -1455,6 +1474,8 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, u32 instance_count, Func&& d
     if (DrawPacketVerify()) {
         VerifyDrawPacket(packet);
     }
+    packet.descriptor_data = guest_descriptor_queue.DrawEntries();
+    packet.descriptor_count = static_cast<u32>(guest_descriptor_queue.UpdateCount());
 
     // Stage B: records the draw from the packet alone.
     scheduler.SpliceCommandList();
@@ -3675,6 +3696,10 @@ void RasterizerVulkan::TickFrame() {
     descriptor_buffer_ring.TickFrame();
     fence_manager.TickFrame();
     staging_pool.TickFrame();
+    if (back_staging_pool) {
+        back_compute_pass_descriptor_queue->TickFrame();
+        back_staging_pool->TickFrame();
+    }
     {
         std::scoped_lock lock{texture_cache.mutex};
         texture_cache.TickFrame();

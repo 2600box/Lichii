@@ -251,6 +251,11 @@ private:
     DescriptorPool descriptor_pool;
     GuestDescriptorQueue guest_descriptor_queue;
     ComputePassDescriptorQueue compute_pass_descriptor_queue;
+    /// With EDEN_NX2_BACK_STAGES=1 (stage B on its own thread), B's own staging pool, the
+    /// descriptor queue of the buffer cache's passes and the queue B fills A's entries through.
+    std::unique_ptr<StagingBufferPool> back_staging_pool;
+    std::unique_ptr<ComputePassDescriptorQueue> back_compute_pass_descriptor_queue;
+    std::unique_ptr<GuestDescriptorQueue> back_descriptor_queue;
     DescriptorBufferRing descriptor_buffer_ring;
     BlitImageHelper blit_image;
     RenderPassCache render_pass_cache;

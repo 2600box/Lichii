@@ -2656,6 +2656,120 @@ void BufferCache<P>::BindHostGraphicsUniformBuffers(size_t stage) {
 }
 
 template <class P>
+void BufferCache<P>::StageGraphicsUniformBuffers(size_t stage, GraphicsBufferPacket& packet) {
+    DrawStages::Expect(DrawStages::Stage::A, "StageGraphicsUniformBuffers");
+    if constexpr (!IS_OPENGL) {
+        u32 binding_index = 0;
+        ForEachEnabledBit(channel_state->enabled_uniform_buffer_masks[stage], [&](u32 index) {
+            const u32 bank_size = (*channel_state->uniform_buffer_sizes)[stage][index];
+            const Binding& binding = channel_state->uniform_buffers[stage][index];
+            if (index == 17 && maxwell3d->root_tables.loaded && binding.size == 0) {
+                // The root table's words come from the registers.
+                BindHostGraphicsUniformBuffer(stage, index, binding_index, true);
+                return;
+            }
+            const DAddr device_addr = binding.device_addr;
+            const u32 size = (std::min)(binding.size, bank_size);
+            const u32 entry = runtime.GuestDescriptorEntry();
+            if (device_addr == 0 || size == 0 ||
+                size > channel_state->uniform_buffer_skip_cache_size) {
+                packet.uniform_binds.push_back({
+                    .entry = entry,
+                    .size = size,
+                    .device_addr = device_addr,
+                    .streamed = false,
+                    .native_bank = bank_size == 0x10000,
+                });
+                runtime.SkipGuestDescriptorEntry();
+                return;
+            }
+            // The inline path of BindHostGraphicsUniformBuffer: the stream copy reads guest memory
+            // as it is at the draw. B binds the cached buffer instead if the range turns out to be
+            // GPU-modified.
+            channel_state->fast_bound_uniform_buffers[stage] |= 1u << binding_index;
+            channel_state->uniform_buffer_binding_sizes[stage][binding_index] = size;
+            bool streamed = false;
+            if constexpr (VideoCommon::StreamUniformReusable<Runtime>) {
+                if (VideoCommon::UniformStreamReuseEnabled()) {
+                    streamed = VideoCommon::BindSmallUniformReusing(
+                        runtime, device_memory, stage, index, binding_index, device_addr, size);
+                }
+            }
+            if (!streamed) {
+                const std::span<u8> span =
+                    runtime.BindMappedUniformBuffer(stage, binding_index, size);
+                device_memory.ReadBlockUnsafe(device_addr, span.data(), size);
+            }
+            packet.uniform_binds.push_back({
+                .entry = entry,
+                .size = size,
+                .device_addr = device_addr,
+                .streamed = true,
+                .native_bank = false,
+            });
+        });
+    }
+}
+
+template <class P>
+bool BufferCache<P>::BindStagedUniformBuffer(const GraphicsBufferPacket::UniformBind& bind) {
+    DrawStages::Expect(DrawStages::Stage::B, "BindStagedUniformBuffer");
+    // As BindHostGraphicsUniformBuffer decides, with the memory tracker as of B: the stream copy
+    // A made stays unless the range is GPU-modified and its buffer offset aligned.
+    if (bind.streamed && !memory_tracker.IsRegionGpuModified(bind.device_addr, bind.size)) {
+        return false;
+    }
+    if constexpr (!IS_OPENGL) {
+        const DAddr device_addr = bind.device_addr;
+        const u32 size = bind.size;
+        BufferId buffer_id = NULL_BUFFER_ID;
+        if (device_addr != 0) {
+            BufferOperations([&] { buffer_id = FindBuffer(device_addr, size, false); });
+        }
+        Buffer& buffer = slot_buffers[buffer_id];
+        TouchBuffer(buffer, buffer_id);
+        const bool has_host_buffer = buffer_id != NULL_BUFFER_ID;
+        const u32 offset = has_host_buffer ? buffer.Offset(device_addr) : 0;
+        if (has_host_buffer && bind.native_bank && size != 0 && gpu_memory != nullptr &&
+            gpu_memory->UsesNativeTiling() &&
+            (Nx2Perf::Verify() || !native_indirect_uniforms_this_frame.contains(device_addr)) &&
+            !memory_tracker.IsRegionGpuModified(device_addr, size) &&
+            native_indirect_uniforms_this_frame.insert(device_addr).second) {
+            u64 mapped_size = 0;
+            while (mapped_size < size &&
+                   device_memory.template GetPointer<u8>(device_addr + mapped_size) != nullptr) {
+                mapped_size +=
+                    Core::DEVICE_PAGESIZE - ((device_addr + mapped_size) & Core::DEVICE_PAGEMASK);
+            }
+            const u64 upload_size = (std::min<u64>)(mapped_size, size);
+            if (upload_size != 0) {
+                std::array<BufferCopy, 1> copies{BufferCopy{
+                    .src_offset = 0,
+                    .dst_offset = offset,
+                    .size = upload_size,
+                }};
+                UploadMemory(buffer, upload_size, upload_size, copies);
+            }
+        }
+        const u32 alignment = runtime.GetUniformBufferAlignment();
+        const bool unaligned = has_host_buffer && alignment > 1 && (offset % alignment) != 0;
+        if (bind.streamed && (unaligned || !has_host_buffer)) {
+            return false;
+        }
+        if (unaligned) {
+            // Streamed as the inline path does, but from guest memory as it is now.
+            const std::span<u8> span = runtime.BindStagedStreamUniform(size);
+            device_memory.ReadBlockUnsafe(device_addr, span.data(), size);
+            return true;
+        }
+        SynchronizeBuffer(buffer, device_addr, size);
+        buffer.MarkUsage(offset, size);
+        runtime.BindUniformBuffer(buffer, offset, size);
+    }
+    return true;
+}
+
+template <class P>
 void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 binding_index, bool needs_bind) {
     ++channel_state->uniform_cache_shots[0];
     // Bank 24 (root table 0, NVN2's push constants) is read from bank 17, which such games do not

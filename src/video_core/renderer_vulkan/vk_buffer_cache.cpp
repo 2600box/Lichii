@@ -375,11 +375,13 @@ private:
 
 BufferCacheRuntime::BufferCacheRuntime(const Device& device_, MemoryAllocator& memory_allocator_,
                                        Scheduler& scheduler_, StagingBufferPool& staging_pool_,
+                                       StagingBufferPool& uniform_pool_,
                                        GuestDescriptorQueue& guest_descriptor_queue_,
                                        ComputePassDescriptorQueue& compute_pass_descriptor_queue,
                                        DescriptorPool& descriptor_pool)
     : device{device_}, memory_allocator{memory_allocator_}, scheduler{scheduler_},
-      staging_pool{staging_pool_}, guest_descriptor_queue{guest_descriptor_queue_},
+      staging_pool{staging_pool_}, uniform_pool{uniform_pool_},
+      guest_descriptor_queue{guest_descriptor_queue_},
       quad_index_pass(device, scheduler, descriptor_pool, staging_pool,
                       compute_pass_descriptor_queue),
       multi_range_buffers(device_) {
@@ -693,7 +695,7 @@ bool BufferCacheRuntime::BindMultiRangeStorageBuffer(u64 key, bool is_written) {
         PostCopyBarrier();
         multi_range_buffers.MarkGathered(key);
     }
-    guest_descriptor_queue.AddBuffer(ref.handle, ref.address, 0, ref.size);
+    stage_descriptor_queue->AddBuffer(ref.handle, ref.address, 0, ref.size);
     return true;
 }
 
