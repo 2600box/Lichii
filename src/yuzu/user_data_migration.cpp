@@ -15,6 +15,7 @@
 #include "yuzu/migration_dialog.h"
 
 // Needs to be included at the end due to https://bugreports.qt.io/browse/QTBUG-73263
+#include <algorithm>
 #include <filesystem>
 #include <QButtonGroup>
 #include <QCheckBox>
@@ -76,6 +77,13 @@ void UserDataMigrator::ShowMigrationPrompt(QMainWindow* main_window) {
 
     if (found.empty()) {
         return;
+    }
+
+    // Lichii used Eden's directory before it had its own, so a shader cache there is its own.
+    if (std::ranges::any_of(found, [](const Emulator& emu) {
+            return emu.e_user_dir == Common::FS::LegacyEdenDir;
+        })) {
+        clear_shaders->setChecked(false);
     }
 
     // makes my life easier
