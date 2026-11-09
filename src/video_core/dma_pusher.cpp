@@ -6,8 +6,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
 #include <span>
 #include <utility>
 #include <vector>
@@ -113,11 +115,27 @@ bool DmaPusher::Step() {
     // are written and the memory not yet reused: copy them here. EDEN_NX2_RESNAPSHOT=0: off.
     if (ResnapshotEnabled() && suspensions.load(std::memory_order_relaxed) != suspensions_before) {
         const u64 now = suspensions.load(std::memory_order_acquire);
+        // Only after a release the game wrote. One the emulated GPU wrote comes when the GPU
+        // thread gets to it, maybe long after the game wrote these commands, and the game may
+        // have reused the memory since (Ocarina of Time: channel 2's semaphore values a frame
+        // ahead, other commands in place of channel 1's).
+        const bool reread = !(OnlyAfterCpuReleases() && puller.LastResumeByGpu());
         for (CommandList& list : dma_pushbuffer) {
-            if (!list.submitted_offsets.empty()) {
-                RefreshSnapshot(list, now);
+            if (list.submitted_offsets.empty()) {
+                continue;
+            }
+            if (reread) {
+                RefreshSnapshot(list, now, "after a semaphore wait");
+            } else {
+                list.snapshot_suspensions = now;
+                RefreshDeferredEntries(list);
             }
         }
+        // And the lists submitted but not queued here yet. Copied when queued instead, they were
+        // copied up to half a second after the submit at the start of Ocarina of Time gameplay
+        // (the GPU thread building pipelines), when the game had refilled the memory for a later
+        // frame: misread headers, entries waiting for words that never came, then a freeze.
+        CopyInTransitAgain(now, reread);
     }
 
     CommandList& command_list = dma_pushbuffer.front();
@@ -225,9 +243,10 @@ bool DmaPusher::Step() {
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
         }
         // Resume and GPU-written entries need live words, even after a flush cleared dirty state.
-        const bool submitted = (command_list.snapshot_suspensions & 1) == 0 &&
-                               command_list.snapshot_suspensions ==
-                                   suspensions.load(std::memory_order_acquire) &&
+        const bool submitted = (KeepSubmitCopies() ||
+                                ((command_list.snapshot_suspensions & 1) == 0 &&
+                                 command_list.snapshot_suspensions ==
+                                     suspensions.load(std::memory_order_acquire))) &&
                                VideoCommon::CanUseSubmittedCommands(
             command_resume_offset != 0,
             dma_pushbuffer_subindex < command_list.submitted_offsets.size() &&
@@ -636,18 +655,212 @@ void DmaPusher::CallMultiMethod(const u32* base_start, u32 num_methods) {
     }
 }
 
-void DmaPusher::RefreshSnapshot(CommandList& list, u64 now) {
+void DmaPusher::CopySubmittedWords(CommandList& entries) {
+    size_t words = 0;
+    for (const auto& entry : entries.command_lists) {
+        words += entry.size;
+    }
+    // Under the lock a resume copies the lists in transit again with: this copy is either after
+    // the resume or in in_transit for it.
+    const std::scoped_lock lock{in_transit_mutex};
+    // Before the copy: a suspension during it must count as one after it.
+    entries.snapshot_suspensions = suspensions.load(std::memory_order_acquire);
+    entries.submitted_words.resize(words);
+    entries.submitted_offsets.reserve(entries.command_lists.size());
+    size_t offset = 0;
+    for (u32 i = 0; i < entries.command_lists.size(); ++i) {
+        const auto& entry = entries.command_lists[i];
+        entries.submitted_offsets.push_back(static_cast<u32>(offset));
+        // GMMU maps run on the GPU thread (GPU::MapInOrder): an entry on addresses a queued map
+        // changes would copy as zeros (Pokopia's first lists). Push copies it after the map instead.
+        const u64 bytes = static_cast<u64>(entry.size) * sizeof(u32);
+        if (system.GPU().IsMapPending(entry.addr, bytes)) {
+            entries.deferred_entries.push_back(i);
+        } else {
+            memory_manager.ReadBlockUnsafe(entry.addr, entries.submitted_words.data() + offset,
+                                           entry.size * sizeof(u32));
+        }
+        offset += entry.size;
+    }
+    entries.submitted_at = std::chrono::steady_clock::now();
+    entries.submit_sequence = ++last_submit_sequence;
+    if (ResnapshotEnabled()) {
+        in_transit.push_back(InTransitList{
+            .submit_sequence = entries.submit_sequence,
+            .entries = std::vector<CommandListHeader>(entries.command_lists.begin(),
+                                                      entries.command_lists.end()),
+            .offsets = entries.submitted_offsets,
+            .deferred_entries = entries.deferred_entries,
+            .words = words,
+        });
+    }
+}
+
+void DmaPusher::CopyInTransitAgain(u64 now, bool reread) {
+    const std::scoped_lock lock{in_transit_mutex};
+    const auto time = std::chrono::steady_clock::now();
+    for (InTransitList& list : in_transit) {
+        list.current = true;
+        if (!reread) {
+            list.suspensions = now;
+            continue;
+        }
+        list.newer.resize(list.words);
+        for (u32 i = 0; i < list.entries.size(); ++i) {
+            // Its map may still be queued; Push copies it after the map.
+            if (std::ranges::binary_search(list.deferred_entries, i)) {
+                continue;
+            }
+            memory_manager.ReadBlockUnsafe(list.entries[i].addr, list.newer.data() + list.offsets[i],
+                                           list.entries[i].size * sizeof(u32));
+        }
+        list.copied = true;
+        list.suspensions = now;
+        list.copied_at = time;
+    }
+}
+
+void DmaPusher::TakeInTransitCopy(CommandList& list) {
+    InTransitList taken;
+    {
+        const std::scoped_lock lock{in_transit_mutex};
+        // Older lists never come (nvhost-gpu failed the submit after the copy).
+        while (!in_transit.empty() && in_transit.front().submit_sequence < list.submit_sequence) {
+            in_transit.pop_front();
+        }
+        if (in_transit.empty() || in_transit.front().submit_sequence != list.submit_sequence) {
+            return;
+        }
+        taken = std::move(in_transit.front());
+        in_transit.pop_front();
+    }
+    if (!taken.current) {
+        return;
+    }
+    if (!taken.copied || taken.newer.size() != list.submitted_words.size()) {
+        list.snapshot_suspensions = taken.suspensions;
+        return;
+    }
+    const u64 old_count = list.snapshot_suspensions;
+    u32 changed_entries = 0;
+    u64 changed_words = 0;
+    size_t first_changed = list.command_lists.size();
+    const bool trace = SnapshotTraceEnabled();
+    if (trace) {
+        for (size_t i = 0; i < list.command_lists.size() && i < list.submitted_offsets.size(); ++i) {
+            const u32 offset = list.submitted_offsets[i];
+            const u32 size = static_cast<u32>(list.command_lists[i].size);
+            if (offset + size > taken.newer.size()) {
+                continue;
+            }
+            const CommandHeader* const before = list.submitted_words.data() + offset;
+            const CommandHeader* const after = taken.newer.data() + offset;
+            u32 differ = 0;
+            for (u32 j = 0; j < size; ++j) {
+                differ += before[j].argument != after[j].argument ? 1 : 0;
+            }
+            if (differ != 0) {
+                ++changed_entries;
+                changed_words += differ;
+                first_changed = (std::min)(first_changed, i);
+            }
+        }
+    }
+    list.submitted_words.swap(taken.newer);
+    list.snapshot_suspensions = taken.suspensions;
+    if (trace) {
+        NoteRecopy(list, "on its way, after a semaphore wait", old_count, taken.suspensions,
+                   changed_entries, changed_words, first_changed, taken.copied_at);
+    }
+}
+
+void DmaPusher::RefreshSnapshot(CommandList& list, u64 now, const char* reason) {
+    const u64 old_count = list.snapshot_suspensions;
     list.snapshot_suspensions = now;
+    const bool trace = SnapshotTraceEnabled();
+    u32 changed_entries = 0;
+    u64 changed_words = 0;
+    size_t first_changed = list.command_lists.size();
     for (size_t i = 0; i < list.command_lists.size() && i < list.submitted_offsets.size(); ++i) {
         const CommandListHeader& entry = list.command_lists[i];
         const u32 offset = list.submitted_offsets[i];
         if (offset + entry.size > list.submitted_words.size()) {
             continue;
         }
-        memory_manager.ReadBlockUnsafe(entry.addr, list.submitted_words.data() + offset,
-                                       entry.size * sizeof(u32));
+        CommandHeader* const words = list.submitted_words.data() + offset;
+        if (!trace) {
+            memory_manager.ReadBlockUnsafe(entry.addr, words, entry.size * sizeof(u32));
+            continue;
+        }
+        recopy_scratch.resize(entry.size);
+        memory_manager.ReadBlockUnsafe(entry.addr, recopy_scratch.data(), entry.size * sizeof(u32));
+        u32 differ = 0;
+        for (u32 j = 0; j < entry.size; ++j) {
+            differ += words[j].argument != recopy_scratch[j] ? 1 : 0;
+        }
+        if (differ != 0) {
+            ++changed_entries;
+            changed_words += differ;
+            first_changed = (std::min)(first_changed, i);
+            std::memcpy(words, recopy_scratch.data(), entry.size * sizeof(u32));
+        }
     }
     list.deferred_entries.clear();
+    if (trace) {
+        NoteRecopy(list, reason, old_count, now, changed_entries, changed_words, first_changed);
+    }
+}
+
+void DmaPusher::NoteRecopy(const CommandList& list, const char* reason, u64 old_count, u64 now,
+                           u32 changed_entries, u64 changed_words, size_t first_changed,
+                           std::chrono::steady_clock::time_point copied_at) {
+    const auto time = copied_at == std::chrono::steady_clock::time_point{}
+                          ? std::chrono::steady_clock::now()
+                          : copied_at;
+    const float age_ms =
+        list.submitted_at == std::chrono::steady_clock::time_point{}
+            ? -1.0f
+            : std::chrono::duration<float, std::milli>(time - list.submitted_at).count();
+    if (static std::atomic<u32> logged{};
+        changed_entries != 0 && logged.fetch_add(1, std::memory_order_relaxed) < 400) {
+        LOG_INFO(HW_GPU,
+                 "Channel {} copied a command list again {}, {:.1f} ms after it was submitted "
+                 "(suspension count {} -> {}): {} of {} entries ({} words) changed, the first "
+                 "entry {} at {:#x}",
+                 channel_state.bind_id, reason, age_ms, old_count, now, changed_entries,
+                 list.command_lists.size(), changed_words, first_changed,
+                 u64{list.command_lists[first_changed].addr});
+    }
+    // Every 10 s (GPU thread): how many copies were taken again, how late, and how many changed.
+    struct Stats {
+        u64 copies;
+        u64 changed;
+        u64 changed_entries;
+        float max_age_ms;
+        float max_changed_age_ms;
+        std::chrono::steady_clock::time_point since;
+    };
+    thread_local Stats stats{};
+    if (stats.since == std::chrono::steady_clock::time_point{}) {
+        stats.since = time;
+    }
+    ++stats.copies;
+    stats.max_age_ms = (std::max)(stats.max_age_ms, age_ms);
+    if (changed_entries != 0) {
+        ++stats.changed;
+        stats.changed_entries += changed_entries;
+        stats.max_changed_age_ms = (std::max)(stats.max_changed_age_ms, age_ms);
+    }
+    const float seconds = std::chrono::duration<float>(time - stats.since).count();
+    if (seconds >= 10.0f) {
+        LOG_INFO(HW_GPU,
+                 "Command lists copied again in {:.0f} s: {} (latest {:.1f} ms after submit), {} "
+                 "changed {} entries (latest {:.1f} ms after submit)",
+                 seconds, stats.copies, stats.max_age_ms, stats.changed, stats.changed_entries,
+                 stats.max_changed_age_ms);
+        stats = Stats{};
+        stats.since = time;
+    }
 }
 
 void DmaPusher::RefreshDeferredEntries(CommandList& list) {

@@ -9,6 +9,8 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <shared_mutex>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -127,36 +129,24 @@ inline void Nx2ClearGpuWrittenPages() {
     return false;
 }
 
-inline constexpr size_t Nx2MaxSemaphoreRegions = 32;
-inline std::array<std::atomic<u64>, Nx2MaxSemaphoreRegions> g_nx2_semaphore_regions{}; // starts
+inline std::shared_mutex g_nx2_semaphore_regions_mutex;
+inline std::unordered_set<u64> g_nx2_semaphore_regions; // starts
 
 inline void Nx2AddSemaphoreRegion(u64 start) {
-    for (auto& region : g_nx2_semaphore_regions) {
-        if (region.load() == start) {
-            return;
-        }
-    }
-    for (auto& region : g_nx2_semaphore_regions) {
-        u64 expected = 0;
-        if (region.compare_exchange_strong(expected, start)) {
-            return;
-        }
-    }
+    std::unique_lock lock{g_nx2_semaphore_regions_mutex};
+    g_nx2_semaphore_regions.insert(start);
 }
 
 /// The region's memory was destroyed: stop mirroring into it.
 inline void Nx2RemoveSemaphoreRegion(u64 start) {
-    for (auto& region : g_nx2_semaphore_regions) {
-        u64 expected = start;
-        region.compare_exchange_strong(expected, 0);
-    }
+    std::unique_lock lock{g_nx2_semaphore_regions_mutex};
+    g_nx2_semaphore_regions.erase(start);
 }
 
 /// A new emulation session starts: no queue has a region yet.
 inline void Nx2ClearSemaphoreRegions() {
-    for (auto& region : g_nx2_semaphore_regions) {
-        region.store(0);
-    }
+    std::unique_lock lock{g_nx2_semaphore_regions_mutex};
+    g_nx2_semaphore_regions.clear();
 }
 
 // Switch 2 sparse regions (nx2:gpu 214, word 7 bit 0x200: title 1's terrain texture arrays and

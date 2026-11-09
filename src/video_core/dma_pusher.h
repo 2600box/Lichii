@@ -8,10 +8,13 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <mutex>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 #include <boost/container/small_vector.hpp>
 #include <deque>
@@ -128,9 +131,14 @@ struct CommandList final {
     /// DmaPusher::Push copies them after the map, and until then they read memory.
     std::vector<u32> deferred_entries;
     /// DmaPusher::suspensions when the words were copied. A list copied during a suspension, or
-    /// that waited behind one, reads memory instead: games write the commands it runs before they
-    /// release the acquire.
+    /// that waited behind one, is copied again when the channel resumes, also on its way to the
+    /// channel (DmaPusher::in_transit): games write the commands it runs before they release the
+    /// acquire.
     u64 snapshot_suspensions = 0;
+    /// When nvhost-gpu copied the words (EDEN_NX2_SNAPSHOT_TRACE).
+    std::chrono::steady_clock::time_point submitted_at{};
+    /// Counts the lists DmaPusher::CopySubmittedWords copied on this channel.
+    u64 submit_sequence = 0;
 };
 
 /// FNV-1a over pushbuffer words (EDEN_NX2_PB_CHECK).
@@ -153,15 +161,26 @@ public:
     /// the channel is suspended (see CommandList::snapshot_suspensions).
     std::atomic<u64> suspensions{0};
 
+    /// EDEN_NX2_SNAPSHOT_TRACE=1 (diagnostics): logs the command list copies taken after submit
+    /// and how long channels waited on semaphores.
+    [[nodiscard]] static bool SnapshotTraceEnabled() {
+        static const bool enabled = std::getenv("EDEN_NX2_SNAPSHOT_TRACE") != nullptr;
+        return enabled;
+    }
+
     explicit DmaPusher(Core::System& system_, MemoryManager& memory_manager_, Control::ChannelState& channel_state_);
     ~DmaPusher();
 
     void Push(CommandList&& entries) {
-        // Copied during a suspension, or behind one: copy again now, unless still suspended.
+        if (ResnapshotEnabled() && !entries.submitted_offsets.empty()) {
+            TakeInTransitCopy(entries);
+        }
+        // Copied during a suspension, or behind one, and not copied again on its way (it was not
+        // in in_transit): copy again now, unless still suspended.
         const u64 now = suspensions.load(std::memory_order_acquire);
         if (!entries.submitted_offsets.empty() && (now & 1) == 0) {
             if (ResnapshotEnabled() && entries.snapshot_suspensions != now) {
-                RefreshSnapshot(entries, now);
+                RefreshSnapshot(entries, now, "when queued");
             } else if (!entries.deferred_entries.empty()) {
                 // Behind a GPU map when submitted: the map has run by now (GPU::MapInOrder).
                 RefreshDeferredEntries(entries);
@@ -169,6 +188,10 @@ public:
         }
         dma_pushbuffer.push_back(std::move(entries));
     }
+
+    /// NX2, nvhost-gpu: copies the words of a list it submits (CommandList::submitted_words) and
+    /// keeps the list in in_transit until Push queues it.
+    void CopySubmittedWords(CommandList& entries);
 
     void DispatchCalls();
 
@@ -217,17 +240,46 @@ public:
     /// Whether the entry lies on device pages the GPU has written (NX2).
     bool IsGpuWrittenCommands(GPUVAddr address, size_t size);
     /// Copies the list's words from memory again, as of suspension count `now`.
-    void RefreshSnapshot(CommandList& list, u64 now);
+    void RefreshSnapshot(CommandList& list, u64 now, const char* reason);
+    /// At a resume: copies the lists in in_transit again, as of suspension count `now` (reread
+    /// false: their copies stand as of `now`).
+    void CopyInTransitAgain(u64 now, bool reread);
+    /// Push: takes the copy a resume took of the list on its way, if one did.
+    void TakeInTransitCopy(CommandList& list);
+    /// EDEN_NX2_SNAPSHOT_TRACE: records and logs a copy taken after submit (RefreshSnapshot,
+    /// CopyInTransitAgain); copied_at: when, if not now.
+    void NoteRecopy(const CommandList& list, const char* reason, u64 old_count, u64 now,
+                    u32 changed_entries, u64 changed_words, size_t first_changed,
+                    std::chrono::steady_clock::time_point copied_at = {});
+    std::vector<u32> recopy_scratch;
     /// Copies the list's deferred entries (CommandList::deferred_entries) from memory.
     void RefreshDeferredEntries(CommandList& list);
 
-    /// EDEN_NX2_RESNAPSHOT=0 turns snapshot refreshes off.
+    /// EDEN_NX2_RESNAPSHOT=0 turns snapshot refreshes off: lists that waited read memory.
     static bool ResnapshotEnabled() {
         static const bool enabled = [] {
             const char* value = std::getenv("EDEN_NX2_RESNAPSHOT");
-            return value == nullptr || value[0] != '0';
+            return value == nullptr || (value[0] != '0' && !KeepSubmitCopies());
         }();
         return enabled;
+    }
+    /// Copy again only after a release the game wrote, not one the emulated GPU wrote
+    /// (Puller::LastResumeByGpu). EDEN_NX2_RESNAPSHOT=all: after every release.
+    static bool OnlyAfterCpuReleases() {
+        static const bool only = [] {
+            const char* value = std::getenv("EDEN_NX2_RESNAPSHOT");
+            return value == nullptr || std::string_view{value} != "all";
+        }();
+        return only;
+    }
+    /// EDEN_NX2_RESNAPSHOT=submit (diagnostics): every list runs as copied at submit, also after
+    /// a semaphore wait.
+    static bool KeepSubmitCopies() {
+        static const bool keep = [] {
+            const char* value = std::getenv("EDEN_NX2_RESNAPSHOT");
+            return value != nullptr && std::string_view{value} == "submit";
+        }();
+        return keep;
     }
     /// Reads a command list on pages the GPU wrote into command_headers, from the copies the
     /// buffer cache made after the work that wrote them or from guest memory for pages flushed
@@ -245,6 +297,24 @@ public:
 
     std::deque<CommandList> dma_pushbuffer; ///< Queue of command lists to be processed
     std::size_t dma_pushbuffer_subindex{};  ///< Index within a command list within the pushbuffer
+
+    /// Lists nvhost-gpu copied (CopySubmittedWords) that Push has not queued yet, in submission
+    /// order, and the copy a resume took of each since (CopyInTransitAgain), for Push to take.
+    struct InTransitList {
+        u64 submit_sequence = 0;
+        std::vector<CommandListHeader> entries;
+        std::vector<u32> offsets;
+        std::vector<u32> deferred_entries; ///< Not copied: a queued GPU map covers them
+        size_t words = 0;
+        bool copied = false;  ///< newer holds a copy a resume took
+        bool current = false; ///< Its copy (newer, else the one at submit) stands as of suspensions
+        std::vector<CommandHeader> newer;
+        u64 suspensions = 0; ///< DmaPusher::suspensions its copy stands as of
+        std::chrono::steady_clock::time_point copied_at{};
+    };
+    std::mutex in_transit_mutex;
+    std::deque<InTransitList> in_transit;
+    u64 last_submit_sequence = 0; ///< Guarded by in_transit_mutex
 
     struct DmaState {
         u32 method;            ///< Current method
