@@ -295,8 +295,9 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
     const bool immediate =
         !is_fence && !Settings::IsGPULevelHigh() && counter_type == QueryType::Payload;
     // Written later: the buffer cache keeps GPU writes over it until then (NoteReportPending).
+    // A synchronized release is written inside SignalFence, before any later GPU work.
     const bool report_noted =
-        !immediate && impl->rasterizer.NoteReportPending(cpu_addr, report_size);
+        !immediate && !is_synced && impl->rasterizer.NoteReportPending(cpu_addr, report_size);
     std::function<void()> operation([this, is_synced, streamer, query_base = query,
                                      query_location, pointer, pointer_timestamp, cpu_addr, addr,
                                      asid = gpu_memory->GetID(), counter_type, mirrored,
