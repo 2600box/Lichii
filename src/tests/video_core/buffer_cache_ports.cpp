@@ -1041,6 +1041,30 @@ TEST_CASE("Read downloads keep CPU writes made while they were on their way", "[
     REQUIRE_FALSE(Access::Pending(*f.cache, 0x20000, 0x1000));
 }
 
+TEST_CASE("Newer bytes that guest memory doesn't hold yet land the read downloads under them first",
+          "[buffer_ports]") {
+    Fixture f;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    std::ranges::fill(Access::Get(*f.cache, id).bytes, 0x12);
+    Access::Dirty(*f.cache, 0x20000, 0x1000);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    SECTION("an indirect dispatch's arguments, written by the GPU and discarded") {
+        (void)f.cache->ObtainCPUBuffer(0x20040, 12,
+                                       VideoCommon::ObtainBufferSynchronize::FullSynchronize,
+                                       VideoCommon::ObtainBufferOperation::DiscardWrite);
+    }
+    SECTION("a write to guest memory from the GPU's side (PrepareRegionWrite)") {
+        f.cache->ClearDownload(0x20040, 12);
+    }
+    // The read that took the download finds the GPU's bytes, as its synchronous flush wrote them.
+    f.cache->FinishReadDownloads(0x20000, 0x1000);
+    REQUIRE(f.bytes[0x10040] == 0x12);
+    REQUIRE(f.bytes[0x1004b] == 0x12);
+    REQUIRE(f.bytes[0x10fff] == 0x12);
+    REQUIRE(f.runtime.host_read_waits == 1);
+    REQUIRE(VideoCore::g_read_downloads == 0);
+}
+
 TEST_CASE("Read downloads land oldest first and leave newer GPU writes to download",
           "[buffer_ports]") {
     Fixture f;
