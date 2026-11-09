@@ -39,7 +39,7 @@ constexpr size_t ZoneCount = static_cast<size_t>(Nx2Profile::Zone::Count);
 /// Site runs at least this long are listed one by one in the frame's detail line.
 constexpr double LongSiteMs = 2.0;
 constexpr size_t MaxLongSites = 256;
-constexpr size_t DetailZones = 5;
+constexpr size_t DetailZones = 8;
 constexpr std::array<std::string_view, LookupCount> lookup_names{
     "gfx_prebuilt", "gfx_background", "gfx_recorded", "gfx_new", "compute_prebuilt", "compute_new",
 };
