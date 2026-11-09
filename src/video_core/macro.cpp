@@ -39,6 +39,7 @@
 #include "common/bit_field.h"
 #include "common/logging.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/nx2_async_readback.h"
 #include "video_core/nx2_fast_draw.h"
 #include "video_core/nx2_profile.h"
 
@@ -1451,16 +1452,27 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
                         VideoCommon::QueryDma::Trace(memory, maxwell3d.Rasterizer(), method, address,
                                                      source, read_bytes);
                     }
+                    // A call the split's back runs in its front's place (Maxwell3D::FrontRunOnBack)
+                    // counts its write-out for the async read-back line.
+                    const bool back_call =
+                        split_writes != nullptr && VideoCommon::Nx2Profile::Enabled();
+                    const u64 write_out_start = back_call ? VideoCore::AsyncReadback::Now() : 0;
                     if (owns_caches) {
                         VideoCommon::QueryDma::FlushPending(memory, maxwell3d.Rasterizer(), source,
                                                             read_bytes);
                     }
-                    if (memory.IsMemoryDirty(source, read_bytes, VideoCommon::CacheType::BufferCache)) {
+                    const bool dirty =
+                        memory.IsMemoryDirty(source, read_bytes, VideoCommon::CacheType::BufferCache);
+                    if (dirty) {
                         memory.FlushRegion(source, read_bytes, VideoCommon::CacheType::BufferCache);
                         static u64 flushes{};
                         if (++flushes % 2000 == 1) {
                             LOG_INFO(HW_GPU, "Native MME DMA read flushed GPU-written memory ({} times)", flushes);
                         }
+                    }
+                    if (back_call) {
+                        VideoCore::AsyncReadback::CountBackDmaRead(
+                            dirty, VideoCore::AsyncReadback::Now() - write_out_start);
                     }
                     static u32 dma_logs{};
                     if (dma_logs < 400) {

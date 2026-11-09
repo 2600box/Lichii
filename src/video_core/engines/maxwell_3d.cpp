@@ -1326,6 +1326,20 @@ bool BackWritable(const Maxwell3D& maxwell3d, u32 method) {
     }
 }
 
+// split.WaitUntil for a macro the back runs in the front's place (FrontRunOnBack), counted for the
+// async read-back line (EDEN_NX2_GPU_PROFILE).
+bool WaitForBackMacros(VideoCommon::GpuSplit& split, u64 position, VideoCommon::DrainSite site) {
+    if (!VideoCommon::Nx2Profile::Enabled()) {
+        return split.WaitUntil(position, site);
+    }
+    const u64 start = VideoCore::AsyncReadback::Now();
+    const bool waited = split.WaitUntil(position, site);
+    if (waited) {
+        VideoCore::AsyncReadback::CountBackWait(VideoCore::AsyncReadback::Now() - start);
+    }
+    return waited;
+}
+
 } // Anonymous namespace
 
 Maxwell3D::FrontState& Maxwell3D::Front(Core::System& system, VideoCommon::GpuSplit& split) {
@@ -1692,7 +1706,7 @@ bool Maxwell3D::FrontRunOnBack(Core::System& system, VideoCommon::GpuSplit& spli
     };
     if (fs.back_generation != engine.native_code_generation) {
         // The macros sent before run the code they were sent with, and check their records.
-        split.WaitUntil(fs.back_last, DrainSite::BackCode);
+        WaitForBackMacros(split, fs.back_last, DrainSite::BackCode);
         if (fs.back_escapes.load(std::memory_order_relaxed) != fs.back_escapes_seen) {
             take_escapes();
         }
@@ -1761,6 +1775,9 @@ bool Maxwell3D::FrontRunOnBack(Core::System& system, VideoCommon::GpuSplit& spli
         [this, system_ptr = &system, engine_ptr = &back, macro = known.get(),
          escapes = &fs.back_escapes](std::span<const u32> parameters) {
             // As ProcessMacro calls a macro, with the back's engine.
+            namespace AsyncReadback = VideoCore::AsyncReadback;
+            const bool profiled = VideoCommon::Nx2Profile::Enabled();
+            const u64 start = profiled ? AsyncReadback::Now() : 0;
             ConsumeSink(*system_ptr);
             engine_ptr->split_writes = &macro->write_set;
             const u64 unexpected = engine_ptr->split_unexpected_writes;
@@ -1768,6 +1785,10 @@ bool Maxwell3D::FrontRunOnBack(Core::System& system, VideoCommon::GpuSplit& spli
             if (engine_ptr->split_unexpected_writes != unexpected) {
                 macro->escaped.store(true, std::memory_order_relaxed);
                 escapes->fetch_add(1, std::memory_order_release);
+            }
+            if (profiled) {
+                AsyncReadback::CountBackMacro(AsyncReadback::Now() - start);
+                AsyncReadback::MaybeReport();
             }
         },
         fs.parameters);
@@ -1791,7 +1812,7 @@ bool Maxwell3D::FrontRunOnBack(Core::System& system, VideoCommon::GpuSplit& spli
 // waited for), so the back's value stays until the front writes the register again.
 u32 Maxwell3D::FrontRegister(VideoCommon::GpuSplit& split, FrontState& fs, u32 method) {
     if (fs.back_regs[method] != 0) {
-        split.WaitUntil(fs.back_regs[method], VideoCommon::DrainSite::BackRegister);
+        WaitForBackMacros(split, fs.back_regs[method], VideoCommon::DrainSite::BackRegister);
         fs.regs[method] = regs.reg_array[method];
         fs.back_regs[method] = 0;
         fs.back_owned[method] = fs.back_shadow[method] != 0;
@@ -1807,7 +1828,7 @@ bool Maxwell3D::FrontTakeOver(VideoCommon::GpuSplit& split, FrontState& fs, u32 
     using Control = Regs::ShadowRamControl;
     const bool tracked = fs.control == Control::Track || fs.control == Control::TrackWithFilter;
     if (fs.back_shadow[method] != 0 && fs.control == Control::Replay) {
-        split.WaitUntil(fs.back_shadow[method], VideoCommon::DrainSite::BackRegister);
+        WaitForBackMacros(split, fs.back_shadow[method], VideoCommon::DrainSite::BackRegister);
         fs.shadow[method] = shadow_state.reg_array[method];
         fs.back_shadow[method] = 0;
     }
