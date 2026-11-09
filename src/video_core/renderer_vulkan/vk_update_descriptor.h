@@ -107,6 +107,24 @@ public:
         *(payload_cursor++) = texel_buffer;
     }
 
+    /// Until EndCapture, entries go to `out` instead of the payload: stage A of a draw writes its
+    /// uniform buffer and image entries into the draw packet, which stage B adds with AddEntries.
+    void BeginCapture(DescriptorUpdateEntry* out, bool use_descriptor_buffer_) noexcept {
+        capture_saved = {payload_cursor, use_descriptor_buffer};
+        payload_cursor = out;
+        use_descriptor_buffer = supports_descriptor_buffer && use_descriptor_buffer_;
+    }
+
+    /// Where the next captured entry goes.
+    [[nodiscard]] DescriptorUpdateEntry* CaptureCursor() const noexcept {
+        return payload_cursor;
+    }
+
+    void EndCapture() noexcept {
+        payload_cursor = capture_saved.cursor;
+        use_descriptor_buffer = capture_saved.use_descriptor_buffer;
+    }
+
     /// Entries an earlier draw added (delta draws).
     void AddEntries(std::span<const DescriptorUpdateEntry> entries) {
         std::memcpy(payload_cursor, entries.data(), entries.size_bytes());
@@ -137,6 +155,10 @@ private:
     DescriptorUpdateEntry* payload_start = nullptr;
     const DescriptorUpdateEntry* upload_start = nullptr;
     std::unique_ptr<DescriptorUpdateEntry[]> payload;
+    struct {
+        DescriptorUpdateEntry* cursor{};
+        bool use_descriptor_buffer{};
+    } capture_saved;
     bool growth_disabled{};
     bool fallback_reported{};
 };

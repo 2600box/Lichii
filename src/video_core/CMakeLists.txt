@@ -209,6 +209,7 @@ add_library(video_core STATIC
     renderer_vulkan/vk_descriptor_buffer.h
     renderer_vulkan/vk_descriptor_pool.cpp
     renderer_vulkan/vk_descriptor_pool.h
+    renderer_vulkan/vk_draw_packet.h
     renderer_vulkan/vk_fence_manager.cpp
     renderer_vulkan/vk_fence_manager.h
     renderer_vulkan/vk_frame_dump.cpp

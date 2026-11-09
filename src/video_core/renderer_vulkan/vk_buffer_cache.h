@@ -125,6 +125,10 @@ public:
         return vertex_repack_mask != 0;
     }
 
+    u32 RepackedVertexBuffers() const {
+        return vertex_repack_mask;
+    }
+
     u64 CurrentTick();
 
     bool IsFree(u64 tick);

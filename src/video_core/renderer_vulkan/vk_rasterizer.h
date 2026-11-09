@@ -7,6 +7,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <optional>
 #include <string_view>
 
@@ -24,6 +25,7 @@
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_descriptor_buffer.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
+#include "video_core/renderer_vulkan/vk_draw_packet.h"
 #include "video_core/renderer_vulkan/vk_fence_manager.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_query_cache.h"
@@ -190,8 +192,11 @@ private:
 
     static constexpr VkDeviceSize DEFAULT_BUFFER_SIZE = 4 * sizeof(float);
 
+    /// Stage A builds draw_packet from the registers, stage B records it (docs/nx2/cmdlist.md).
+    /// `draw_func` records the draw command from the packet.
     template <typename Func>
-    void PrepareDraw(bool is_indexed, Func&&, bool is_indirect = false);
+    void PrepareDraw(bool is_indexed, u32 instance_count, Func&& draw_func,
+                     bool is_indirect = false);
 
     void CaptureIndirectTrace();
     void CollectIndirectTrace();
@@ -208,44 +213,18 @@ private:
     /// the GPU makes them now (BufferCache::Nx2CopyListPages).
     void SubmitNx2ListCopies();
 
-    /// Records the dynamic state of the draw being prepared with `pipeline` (null for
-    /// DrawTexture's blit).
-    void UpdateDynamicStates(const GraphicsPipeline* pipeline);
+    /// Stage A: takes the dynamic state dirty flags of the draw being prepared with `pipeline`
+    /// (null for DrawTexture's blit) and reads the values of those groups into `out`.
+    void UpdateDynamicStates(const GraphicsPipeline* pipeline, DynamicStatePacket& out);
 
-    void HandleTransformFeedback();
+    /// Stage B: records the groups `state` carries.
+    void RecordDynamicStates(const DynamicStatePacket& state);
 
-    void UpdateViewportsState(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateScissorsState(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateDepthBias(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateBlendConstants(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateDepthBounds(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateStencilFaces(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateLineWidth(Tegra::Engines::Maxwell3D::Regs& regs);
+    void HandleTransformFeedback(bool enabled);
 
-    void UpdateCullMode(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateDepthBoundsTestEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateDepthTestEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateDepthWriteEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateDepthCompareOp(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdatePrimitiveRestartEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateRasterizerDiscardEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateConservativeRasterizationMode(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateLineStippleEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateLineStipple(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateLineRasterizationMode(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateDepthBiasEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateLogicOpEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateDepthClampEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateAlphaToCoverageEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateAlphaToOneEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateFrontFace(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateStencilOp(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateStencilTestEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateLogicOp(Tegra::Engines::Maxwell3D::Regs& regs);
-    void UpdateBlending(Tegra::Engines::Maxwell3D::Regs& regs, const GraphicsPipeline* pipeline);
-    void UpdateColorWriteEnable(Tegra::Engines::Maxwell3D::Regs& regs);
-
-    void UpdateVertexInput(Tegra::Engines::Maxwell3D::Regs& regs);
+    /// EDEN_NX2_DRAW_PACKET_VERIFY: compares the packet with the draw resolved from the registers
+    /// again.
+    void VerifyDrawPacket(const DrawPacket& packet);
 
     void FrameDumpPass(const Framebuffer* framebuffer);
     /// EDEN_NX2_PENDING_WRITE_TRACE: logs bound buffer ranges with collected, unapplied CPU writes.
@@ -326,6 +305,16 @@ private:
     u32 render_trace_clears = 0;
     bool pending_native_work{};
     bool mesh_draw{}; ///< the draw being prepared uses a task/mesh pipeline
+    /// The draw the back thread is preparing, reused for its lists' capacity.
+    DrawPacket draw_packet;
+    u64 draw_sequence{};
+    struct {
+        u64 draws{};
+        u64 differing{};
+        u64 bytes{};
+        u32 logged{};
+        std::chrono::steady_clock::time_point last_report{};
+    } packet_verify;
     /// Fragment output components the dynamic color write mask was last recorded with
     u32 last_color_output_mask{};
     VideoCommon::OotNetwork::BypassState oot_network_bypass;

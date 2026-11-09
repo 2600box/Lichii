@@ -231,7 +231,7 @@ bool Passes(const std::array<bool, NUM_STAGES>& stages,
     return true;
 }
 
-using ConfigureFuncPtr = bool (*)(GraphicsPipeline*, bool);
+using ConfigureFuncPtr = bool (*)(GraphicsPipeline*, DrawPacket&);
 
 template <typename Spec, typename... Specs>
 ConfigureFuncPtr FindSpec(const std::array<bool, NUM_STAGES>& stages,
@@ -650,7 +650,15 @@ void GraphicsPipeline::AddTransition(GraphicsPipeline* transition) {
 }
 
 template <typename Spec>
-bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
+bool GraphicsPipeline::ConfigureImpl(DrawPacket& packet) {
+    // A draw that can't be recorded returns before it takes any dirty flag.
+    if (mesh_emulation &&
+        (!mesh_output_buffer ||
+         (mesh_emulation->has_task &&
+          std::any_of(mesh_task_buffers.begin(), mesh_task_buffers.begin() + 3,
+                      [](const MeshEmulationBuffer& buffer) { return !buffer.buffer; })))) {
+        return false;
+    }
     boost::container::small_vector<VideoCommon::ImageViewInOut, 160> views;
     boost::container::small_vector<VideoCommon::SamplerId, 96> samplers;
     views.reserve(num_image_elements);
@@ -663,6 +671,16 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     }
 
     buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);
+    constexpr u32 stage_mask = [] {
+        u32 mask{};
+        for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+            mask |= Spec::enabled_stages[stage] ? 1U << stage : 0U;
+        }
+        return mask;
+    }();
+    packet.stages = stage_mask;
+    packet.buffers.storage_stages = stage_mask;
+    packet.buffers.texture_stages = stage_mask;
 
     const auto& regs{maxwell3d->regs};
     const bool via_header_index{regs.sampler_binding == Maxwell::SamplerBinding::ViaHeaderBinding};
@@ -727,14 +745,13 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
 
     const auto config_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
         const Shader::Info& info{stage_infos[stage]};
-        buffer_cache.UnbindGraphicsStorageBuffers(stage);
         if constexpr (Spec::has_storage_buffers) {
             size_t ssbo_index{};
             for (const auto& desc : info.storage_buffers_descriptors) {
                 ASSERT(desc.count == 1);
-                buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
-                                                       desc.cbuf_offset, desc.is_written,
-                                                       desc.indirect_offset);
+                buffer_cache.BindGraphicsStorageBuffer(packet.buffers, stage, ssbo_index,
+                                                       desc.cbuf_index, desc.cbuf_offset,
+                                                       desc.is_written, desc.indirect_offset);
                 ++ssbo_index;
             }
         }
@@ -950,15 +967,14 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                             format = *explicit_format;
                         }
                     }
-                    buffer_cache.BindGraphicsTextureBuffer(stage, index, image_view.GpuAddr(),
+                    buffer_cache.BindGraphicsTextureBuffer(packet.buffers, stage, index,
+                                                           image_view.GpuAddr(),
                                                            image_view.BufferSize(), format,
                                                            is_written, is_image);
                     ++index;
                     ++texture_buffer_it;
                 }
             }};
-            buffer_cache.UnbindGraphicsTextureBuffers(stage);
-
             const Shader::Info& info{stage_infos[stage]};
             if constexpr (Spec::has_texture_buffers) {
                 for (const auto& desc : info.texture_buffer_descriptors) {
@@ -991,65 +1007,30 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         if constexpr (Spec::enabled_stages[4]) {
             bind_stage_info(4);
         }
-    } else {
-        if constexpr (Spec::enabled_stages[0]) {
-            buffer_cache.UnbindGraphicsTextureBuffers(0);
-        }
-        if constexpr (Spec::enabled_stages[1]) {
-            buffer_cache.UnbindGraphicsTextureBuffers(1);
-        }
-        if constexpr (Spec::enabled_stages[2]) {
-            buffer_cache.UnbindGraphicsTextureBuffers(2);
-        }
-        if constexpr (Spec::enabled_stages[3]) {
-            buffer_cache.UnbindGraphicsTextureBuffers(3);
-        }
-        if constexpr (Spec::enabled_stages[4]) {
-            buffer_cache.UnbindGraphicsTextureBuffers(4);
-        }
     }
 
-    if (regs.transform_feedback_enabled != 0) {
-        scheduler.RequestOutsideRenderPassOperationContext();
-    }
-
+    buffer_cache.ReadGraphicsGeometry(packet.buffers);
     {
         Profile::Scope scope{Profile::Zone::UpdateBuffers};
-        buffer_cache.UpdateGraphicsBuffers(is_indexed);
-        buffer_cache.BindHostGeometryBuffers(is_indexed);
+        buffer_cache.UpdateGraphicsUniformBuffers();
     }
 
-    {
-        Profile::Scope scope{Profile::Zone::DescriptorAcquire};
-        guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
-    }
-
+    BeginDescriptorCapture(packet);
     RescalingPushConstant rescaling;
-    RenderAreaPushConstant render_area;
     const VideoCommon::SamplerId* samplers_it{samplers.data()};
     const VideoCommon::ImageViewInOut* views_it{views.data()};
     const auto prepare_stage{[&](size_t stage) LAMBDA_FORCEINLINE {
         {
             Profile::Scope scope{Profile::Zone::BindStageBuffers};
-            buffer_cache.BindHostStageBuffers(stage);
+            CaptureUniformDescriptors(packet, stage);
         }
-        {
-            Profile::Scope scope{Profile::Zone::PushDescriptors};
-            const size_t first_entry = guest_descriptor_queue.UpdateCount();
-            PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
-                                 rescaling, samplers_it, views_it);
-            if (captured_delta) {
-                KeepImageDescriptors(stage, first_entry);
-            }
-        }
-        const auto& info{stage_infos[stage]};
-        if (info.uses_render_area) {
-            render_area.uses_render_area = true;
-            // Switch 2 titles may never program the surface clip; use colour target 0 then.
-            const u32 clip_width = regs.surface_clip.width, clip_height = regs.surface_clip.height;
-            const bool clip_set = clip_width != 0 && clip_height != 0;
-            render_area.words = {static_cast<float>(clip_set ? clip_width : u32{regs.rt[0].width}),
-                                 static_cast<float>(clip_set ? clip_height : u32{regs.rt[0].height})};
+        Profile::Scope scope{Profile::Zone::PushDescriptors};
+        const u32 first_entry = CapturedEntries(packet);
+        PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage], rescaling,
+                             samplers_it, views_it);
+        packet.image_entries[stage] = {first_entry, CapturedEntries(packet) - first_entry};
+        if (captured_delta) {
+            KeepImageDescriptors(stage, packet);
         }
     }};
     if constexpr (Spec::enabled_stages[0]) {
@@ -1067,86 +1048,52 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     if constexpr (Spec::enabled_stages[4]) {
         prepare_stage(4);
     }
+    packet.rescaling = rescaling.Data();
     if (captured_delta) {
-        kept_rescaling = rescaling.Data();
+        kept_rescaling = packet.rescaling;
         kept_scale_epoch = texture_cache.ScaleEpoch();
         kept_images_valid = true;
     }
-    if (mesh_emulation) {
-        if (!mesh_output_buffer) {
-            return false;
-        }
-        guest_descriptor_queue.AddBuffer(mesh_output_buffer, mesh_output_offset, mesh_output_size);
-        if (mesh_emulation->has_task) {
-            for (size_t index = 0; index < 3; ++index) { // payload, offsets, arguments
-                const MeshEmulationBuffer& task_buffer{mesh_task_buffers[index]};
-                if (!task_buffer.buffer) {
-                    return false;
-                }
-                guest_descriptor_queue.AddBuffer(task_buffer.buffer, task_buffer.offset,
-                                                 task_buffer.size);
-            }
-        }
-    }
-    if (buffer_cache.any_buffer_uploaded) {
-        buffer_cache.runtime.PostCopyBarrier();
-        buffer_cache.any_buffer_uploaded = false;
-    }
-    {
-        Profile::Scope scope{Profile::Zone::RenderTargets};
-        texture_cache.UpdateRenderTargets(false);
-        const std::span<const VideoCommon::ImageViewInOut> view_span{views.data(), views.size()};
-        texture_cache.CheckFeedbackLoop(view_span);
-        if (scheduler.HasFragmentBarrier() &&
-            (scheduler.RenderPassHasStores() || texture_cache.SamplesRenderTarget(view_span))) {
-            scheduler.RequestOutsideRenderPassOperationContext();
-        }
-    }
-    if (IsBuilt() && (!pipeline || build->Failed())) {
-        return false;
-    }
-    Profile::Scope scope{Profile::Zone::ConfigureDraw};
-    return ConfigureDraw(rescaling, render_area);
+    FinishPrepare(packet, std::span(views.data(), views.size()));
+    return true;
 }
 
 bool GraphicsPipeline::DeltaImagesChange() const noexcept {
     return texture_cache.SampledViewsChange(delta_views);
 }
 
-bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
+bool GraphicsPipeline::PrepareDelta(DrawPacket& packet) {
     namespace Profile = VideoCommon::Nx2Profile;
     // ConfigureImpl without reading handles and resolving image views, samplers and texture
-    // buffers: the buffers are resolved, synchronized and bound as it does.
+    // buffers: the buffers are read as it does.
     buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);
+    packet.stages = 0;
+    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        packet.stages |= configured_stages[stage] ? 1U << stage : 0U;
+    }
+    packet.buffers.storage_stages = packet.stages;
     {
         Profile::Scope scope{Profile::Zone::ReadHandles};
         for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
             if (!configured_stages[stage]) {
                 continue;
             }
-            buffer_cache.UnbindGraphicsStorageBuffers(stage);
             size_t ssbo_index{};
             for (const auto& desc : stage_infos[stage].storage_buffers_descriptors) {
                 ASSERT(desc.count == 1);
-                buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
-                                                       desc.cbuf_offset, desc.is_written,
-                                                       desc.indirect_offset);
+                buffer_cache.BindGraphicsStorageBuffer(packet.buffers, stage, ssbo_index,
+                                                       desc.cbuf_index, desc.cbuf_offset,
+                                                       desc.is_written, desc.indirect_offset);
                 ++ssbo_index;
             }
         }
     }
+    buffer_cache.ReadGraphicsGeometry(packet.buffers);
     {
         Profile::Scope scope{Profile::Zone::UpdateBuffers};
-        buffer_cache.UpdateGraphicsBuffers(is_indexed);
-        buffer_cache.BindHostGeometryBuffers(is_indexed);
+        buffer_cache.UpdateGraphicsUniformBuffers();
     }
-    {
-        Profile::Scope scope{Profile::Zone::DescriptorAcquire};
-        guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
-    }
-    const auto& regs{maxwell3d->regs};
     RescalingPushConstant rescaling;
-    RenderAreaPushConstant render_area;
     const VideoCommon::SamplerId* samplers_it{delta_samplers.data()};
     const VideoCommon::ImageViewInOut* views_it{delta_views.data()};
     // Push the entries kept for delta_views instead of resolving every view and sampler again;
@@ -1165,31 +1112,27 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
         }
         kept_image_entries.clear();
     }
+    BeginDescriptorCapture(packet);
     for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
         if (!configured_stages[stage]) {
             continue;
         }
         {
             Profile::Scope scope{Profile::Zone::BindStageBuffers};
-            buffer_cache.BindHostStageBuffers(stage);
+            CaptureUniformDescriptors(packet, stage);
         }
+        Profile::Scope scope{Profile::Zone::PushDescriptors};
+        const u32 first_entry = CapturedEntries(packet);
         if (replay_images) {
-            Profile::Scope scope{Profile::Zone::PushDescriptors};
             const auto [first, count] = kept_image_ranges[stage];
             guest_descriptor_queue.AddEntries({kept_image_entries.data() + first, count});
         } else {
-            Profile::Scope scope{Profile::Zone::PushDescriptors};
-            const size_t first_entry = guest_descriptor_queue.UpdateCount();
             PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
                                  rescaling, samplers_it, views_it);
-            KeepImageDescriptors(stage, first_entry);
         }
-        if (stage_infos[stage].uses_render_area) {
-            render_area.uses_render_area = true;
-            const u32 clip_width = regs.surface_clip.width, clip_height = regs.surface_clip.height;
-            const bool clip_set = clip_width != 0 && clip_height != 0;
-            render_area.words = {static_cast<float>(clip_set ? clip_width : u32{regs.rt[0].width}),
-                                 static_cast<float>(clip_set ? clip_height : u32{regs.rt[0].height})};
+        packet.image_entries[stage] = {first_entry, CapturedEntries(packet) - first_entry};
+        if (!replay_images) {
+            KeepImageDescriptors(stage, packet);
         }
     }
     if (replay_images) {
@@ -1220,38 +1163,179 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
         }
     }
     ReportDeltaDescriptors();
-    if (buffer_cache.any_buffer_uploaded) {
-        buffer_cache.runtime.PostCopyBarrier();
-        buffer_cache.any_buffer_uploaded = false;
+    packet.rescaling = rescaling.Data();
+    FinishPrepare(packet, delta_views);
+    return true;
+}
+
+void GraphicsPipeline::BeginDescriptorCapture(DrawPacket& packet) {
+    if (packet.entries.size() < num_descriptor_entries) {
+        packet.entries.resize(num_descriptor_entries);
     }
+    packet.uniform_entries = {};
+    packet.image_entries = {};
+    packet.mesh_entries = {};
+    guest_descriptor_queue.BeginCapture(packet.entries.data(), uses_descriptor_buffer);
+}
+
+u32 GraphicsPipeline::CapturedEntries(const DrawPacket& packet) const noexcept {
+    return static_cast<u32>(guest_descriptor_queue.CaptureCursor() - packet.entries.data());
+}
+
+void GraphicsPipeline::CaptureUniformDescriptors(DrawPacket& packet, size_t stage) {
+    const u32 first_entry = CapturedEntries(packet);
+    buffer_cache.BindHostGraphicsUniformBuffers(stage);
+    packet.uniform_entries[stage] = {first_entry, CapturedEntries(packet) - first_entry};
+}
+
+void GraphicsPipeline::KeepImageDescriptors(size_t stage, const DrawPacket& packet) {
+    const auto [first, count] = packet.image_entries[stage];
+    kept_image_ranges[stage] = {static_cast<u32>(kept_image_entries.size()), count};
+    kept_image_entries.insert(kept_image_entries.end(), packet.entries.begin() + first,
+                              packet.entries.begin() + first + count);
+}
+
+void GraphicsPipeline::FinishPrepare(DrawPacket& packet,
+                                     std::span<const VideoCommon::ImageViewInOut> views) {
+    namespace Profile = VideoCommon::Nx2Profile;
+    const u32 mesh_first = CapturedEntries(packet);
+    if (mesh_emulation) {
+        guest_descriptor_queue.AddBuffer(mesh_output_buffer, mesh_output_offset, mesh_output_size);
+        if (mesh_emulation->has_task) {
+            for (size_t index = 0; index < 3; ++index) { // payload, offsets, arguments
+                const MeshEmulationBuffer& task_buffer{mesh_task_buffers[index]};
+                guest_descriptor_queue.AddBuffer(task_buffer.buffer, task_buffer.offset,
+                                                 task_buffer.size);
+            }
+        }
+    }
+    packet.mesh_entries = {mesh_first, CapturedEntries(packet) - mesh_first};
+    guest_descriptor_queue.EndCapture();
+    packet.render_area = ReadRenderArea(packet.stages);
+    packet.buffers.buffers_uploaded = std::exchange(buffer_cache.any_buffer_uploaded, false);
     {
         Profile::Scope scope{Profile::Zone::RenderTargets};
         texture_cache.UpdateRenderTargets(false);
-        const std::span<const VideoCommon::ImageViewInOut> view_span{delta_views};
-        texture_cache.CheckFeedbackLoop(view_span);
-        if (scheduler.HasFragmentBarrier() &&
-            (scheduler.RenderPassHasStores() || texture_cache.SamplesRenderTarget(view_span))) {
-            scheduler.RequestOutsideRenderPassOperationContext();
+        texture_cache.CheckFeedbackLoop(views);
+        packet.samples_render_target =
+            scheduler.HasFragmentBarrier() && texture_cache.SamplesRenderTarget(views);
+    }
+    packet.framebuffer = texture_cache.GetFramebuffer();
+    packet.is_rescaling = texture_cache.IsRescaling();
+}
+
+RenderAreaPushConstant GraphicsPipeline::ReadRenderArea(u32 stages) const {
+    RenderAreaPushConstant render_area;
+    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        if (((stages >> stage) & 1) == 0 || !stage_infos[stage].uses_render_area) {
+            continue;
         }
+        // Switch 2 titles may never program the surface clip; use colour target 0 then.
+        const auto& regs{maxwell3d->regs};
+        const u32 clip_width = regs.surface_clip.width, clip_height = regs.surface_clip.height;
+        const bool clip_set = clip_width != 0 && clip_height != 0;
+        render_area.uses_render_area = true;
+        render_area.words = {static_cast<float>(clip_set ? clip_width : u32{regs.rt[0].width}),
+                             static_cast<float>(clip_set ? clip_height : u32{regs.rt[0].height})};
+    }
+    return render_area;
+}
+
+void GraphicsPipeline::VerifyPacket(const DrawPacket& packet,
+                                    std::vector<std::string>& differences) const {
+    auto storage = packet.buffers.storage_buffers.begin();
+    const auto storage_end = packet.buffers.storage_buffers.end();
+    for (u32 stage = 0; stage < NUM_STAGES; ++stage) {
+        if (((packet.buffers.storage_stages >> stage) & 1) == 0) {
+            continue;
+        }
+        u32 ssbo_index = 0;
+        for (const auto& desc : stage_infos[stage].storage_buffers_descriptors) {
+            if (ssbo_index >= VideoCommon::NUM_STORAGE_BUFFERS) {
+                break;
+            }
+            const VideoCommon::Binding now = buffer_cache.ResolveGraphicsStorageBuffer(
+                stage, desc.cbuf_index, desc.cbuf_offset, desc.is_written, desc.indirect_offset);
+            if (storage == storage_end || storage->stage != stage || storage->index != ssbo_index) {
+                differences.push_back(
+                    fmt::format("storage buffer {} of stage {} is not in the packet", ssbo_index,
+                                stage));
+            } else {
+                if (storage->binding.device_addr != now.device_addr ||
+                    storage->binding.size != now.size) {
+                    differences.push_back(fmt::format(
+                        "storage buffer {} of stage {}: {:#x}+{:#x} in the packet, {:#x}+{:#x} now",
+                        ssbo_index, stage, storage->binding.device_addr, storage->binding.size,
+                        now.device_addr, now.size));
+                }
+                ++storage;
+            }
+            ++ssbo_index;
+        }
+    }
+    const RenderAreaPushConstant render_area = ReadRenderArea(packet.stages);
+    if (render_area.uses_render_area != packet.render_area.uses_render_area ||
+        render_area.words != packet.render_area.words) {
+        differences.push_back(fmt::format("render area: {}x{} in the packet, {}x{} now",
+                                          packet.render_area.words[0],
+                                          packet.render_area.words[1], render_area.words[0],
+                                          render_area.words[1]));
+    }
+    if (packet.framebuffer != texture_cache.GetFramebuffer()) {
+        differences.push_back("framebuffer");
+    }
+    if (packet.is_rescaling != texture_cache.IsRescaling()) {
+        differences.push_back("rescaling");
+    }
+}
+
+bool GraphicsPipeline::Record(const DrawPacket& packet) {
+    namespace Profile = VideoCommon::Nx2Profile;
+    if (packet.buffers.transform_feedback) {
+        scheduler.RequestOutsideRenderPassOperationContext();
+    }
+    {
+        Profile::Scope scope{Profile::Zone::UpdateBuffers};
+        buffer_cache.UpdateGraphicsBuffers(packet.buffers);
+        buffer_cache.BindHostGeometryBuffers(packet.buffers);
+    }
+    {
+        Profile::Scope scope{Profile::Zone::DescriptorAcquire};
+        guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
+    }
+    const auto add_entries = [&](DrawPacket::Range range) {
+        if (range.second != 0) {
+            guest_descriptor_queue.AddEntries({packet.entries.data() + range.first, range.second});
+        }
+    };
+    for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
+        if (((packet.stages >> stage) & 1) == 0) {
+            continue;
+        }
+        add_entries(packet.uniform_entries[stage]);
+        {
+            Profile::Scope scope{Profile::Zone::BindStageBuffers};
+            buffer_cache.BindHostStageBuffers(stage);
+        }
+        add_entries(packet.image_entries[stage]);
+    }
+    add_entries(packet.mesh_entries);
+    if (packet.buffers.buffers_uploaded || buffer_cache.any_buffer_uploaded) {
+        buffer_cache.runtime.PostCopyBarrier();
+        buffer_cache.any_buffer_uploaded = false;
+    }
+    if (scheduler.HasFragmentBarrier() &&
+        (scheduler.RenderPassHasStores() || packet.samples_render_target)) {
+        scheduler.RequestOutsideRenderPassOperationContext();
     }
     if (IsBuilt() && (!pipeline || build->Failed())) {
         return false;
     }
     Profile::Scope scope{Profile::Zone::ConfigureDraw};
-    return ConfigureDraw(rescaling, render_area);
+    return ConfigureDraw(packet);
 }
 
-void GraphicsPipeline::KeepImageDescriptors(size_t stage, size_t first_entry) {
-    const DescriptorUpdateEntry* const entries = guest_descriptor_queue.UpdateData();
-    const size_t end_entry = guest_descriptor_queue.UpdateCount();
-    kept_image_ranges[stage] = {static_cast<u32>(kept_image_entries.size()),
-                                static_cast<u32>(end_entry - first_entry)};
-    kept_image_entries.insert(kept_image_entries.end(), entries + first_entry,
-                              entries + end_entry);
-}
-
-bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
-                                     const RenderAreaPushConstant& render_area) {
+bool GraphicsPipeline::ConfigureDraw(const DrawPacket& packet) {
     if (guest_descriptor_queue.UpdateCount() != num_descriptor_entries) {
         LOG_CRITICAL(Render_Vulkan, "Graphics descriptor count mismatch: expected {}, got {}",
                      num_descriptor_entries, guest_descriptor_queue.UpdateCount());
@@ -1298,9 +1382,9 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
         }
         scheduler.Record([this, descriptor_data, groups = mesh_groups, capacity = mesh_capacity,
                           task_buffers = mesh_task_buffers,
-                          rescaling_data = rescaling.Data(), is_rescaling = texture_cache.IsRescaling(),
-                          uses_render_area = render_area.uses_render_area,
-                          render_area_data = render_area.words](vk::CommandBuffer cmdbuf) {
+                          rescaling_data = packet.rescaling, is_rescaling = packet.is_rescaling,
+                          uses_render_area = packet.render_area.uses_render_area,
+                          render_area_data = packet.render_area.words](vk::CommandBuffer cmdbuf) {
             mesh_descriptor_set = VK_NULL_HANDLE;
             const bool has_task{mesh_emulation->has_task};
             if (!pipeline || !mesh_compute_pipeline || build->Failed() || groups == 0 ||
@@ -1419,7 +1503,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
         });
     }
-    scheduler.RequestRenderpass(texture_cache.GetFramebuffer());
+    scheduler.RequestRenderpass(packet.framebuffer);
     if (writes_storage) {
         scheduler.NoteRenderPassStores();
     }
@@ -1435,7 +1519,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                                    std::memory_order::relaxed);
         });
     }
-    const bool is_rescaling{texture_cache.IsRescaling()};
+    const bool is_rescaling{packet.is_rescaling};
     const bool update_rescaling{scheduler.UpdateRescaling(is_rescaling, IsMeshPipeline())};
     const bool bind_pipeline{scheduler.UpdateGraphicsPipeline(this)};
     const bool bind_descriptor_buffer{
@@ -1462,9 +1546,9 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
     }
     scheduler.Record([this, descriptor_data, bind_pipeline, update_descriptors,
                       descriptor_buffer_offset, descriptor_buffer_chunk, bind_descriptor_buffer,
-                      rescaling_data = rescaling.Data(), is_rescaling, update_rescaling,
-                      uses_render_area = render_area.uses_render_area,
-                      render_area_data = render_area.words](vk::CommandBuffer cmdbuf) {
+                      rescaling_data = packet.rescaling, is_rescaling, update_rescaling,
+                      uses_render_area = packet.render_area.uses_render_area,
+                      render_area_data = packet.render_area.words](vk::CommandBuffer cmdbuf) {
         if (bind_descriptor_buffer) {
             const VkDescriptorBufferBindingInfoEXT binding_info{
                 descriptor_buffer_ring.BindingInfo(descriptor_buffer_chunk)};
