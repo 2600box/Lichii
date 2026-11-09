@@ -472,14 +472,17 @@ def print_plan(config, plan, session, out=None):
 
 
 def summarize(session, plan):
-    """summary.md: A against B for every game, cache state and mesh mode."""
+    """summary.md: A against B for every game, cache state and mesh mode; failed runs apart."""
     runs = {}
+    failed = []
     for run in plan:
         path = Path(session) / "runs" / run["id"] / "run.json"
         if path.exists():
             with open(path, encoding="utf-8") as stream:
                 data = json.load(stream)
-            if data.get("metrics"):
+            if "error" in data:
+                failed.append(f"- {run['id']}: {data['error']}")
+            elif data.get("metrics"):
                 runs.setdefault((run["game"], run["cache"], run["mesh"]), {}).setdefault(
                     run["path"], []).append(data["metrics"])
     sections = []
@@ -489,8 +492,18 @@ def summarize(session, plan):
         table = cache_metrics.compare(by_path[names[0]], by_path.get(other, []), names[0], other)
         sections.append(f"## {game} {cache} {mesh}\n\n{table}")
     text = "# Shader cache bench\n\n" + "\n".join(sections)
+    if failed:
+        text += "\n## Failed runs (not in the tables)\n\n" + "\n".join(failed) + "\n"
     (Path(session) / "summary.md").write_text(text, encoding="utf-8")
     return text
+
+
+def ensure_closed(config):
+    """Nothing may write the caches while the bench moves them: no emulator, no debug server."""
+    exe_name = config.get("exe", "lichii.exe")
+    address = config.get("debug_server", "127.0.0.1:6545")
+    if lichii_running(exe_name) or port_open(address):
+        raise BenchError(f"{exe_name} is running or {address} answers: close it first")
 
 
 def run_bench(config, plan, session):
@@ -499,10 +512,8 @@ def run_bench(config, plan, session):
     (session / "runs").mkdir(parents=True, exist_ok=True)
     with open(session / "plan.json", "w", encoding="utf-8") as stream:
         json.dump({"config": config, "plan": plan}, stream, indent=1)
-    exe_name = config.get("exe", "lichii.exe")
+    ensure_closed(config)
     address = config.get("debug_server", "127.0.0.1:6545")
-    if lichii_running(exe_name) or port_open(address):
-        raise BenchError(f"{exe_name} is running or {address} answers: close the owner's session first")
     for run in plan:
         for directory in cache_dirs(config, run, backup_root):
             directory.back_up()
@@ -559,6 +570,7 @@ def run_bench(config, plan, session):
 
 def restore_all(config, session):
     """Puts every original cache directory back after a bench that stopped halfway."""
+    ensure_closed(config)
     backup_root = Path(session) / "backup"
     keep = Path(session) / "recovered" / datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     plan = make_plan(config, repeats=1)
@@ -572,6 +584,9 @@ def restore_all(config, session):
             if directory.aside.exists():
                 directory.restore(keep)
                 report.append(f"{directory.path}: original renamed back, run leftovers in {keep}")
+            elif directory.expected() is None and directory.path.exists():
+                directory.restore(keep)
+                report.append(f"{directory.path}: absent before the bench, run leftovers in {keep}")
             else:
                 problems = differences(directory.path, directory.expected())
                 report.append(f"{directory.path}: " + ("matches its backup" if not problems else

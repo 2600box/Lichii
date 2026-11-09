@@ -121,3 +121,50 @@ TEST_CASE("StutterTrace: every zone has a category or counts as other", "[video_
         REQUIRE(name != nullptr);
     }
 }
+
+
+TEST_CASE("StutterTrace: a frame counts the zones still open", "[video_core]") {
+    struct Seen {
+        Category first_outer{};
+        Category second_outer{};
+        u64 gfx_open{};
+        u64 gfx_nested{};
+        u64 idle_nested{};
+        u64 idle_closed{};
+        u64 gfx_closed{};
+        u64 idle_final{};
+        u64 builds{};
+    } seen;
+    std::thread{[&seen] {
+        const StutterTrace::ThreadScope thread_scope{Thread::Worker};
+        const auto at = [](u64 now, Category category) {
+            return StutterTrace::Snapshot(now)[Index(Thread::Worker)][Index(category)];
+        };
+        auto& builds =
+            StutterTrace::g_totals.counts[Index(Thread::Worker)][Index(Category::GraphicsMiss)];
+        const u64 gfx = at(0, Category::GraphicsMiss);
+        const u64 idle = at(0, Category::Idle);
+        const u64 built = builds.load();
+        // A pipeline build from 1000 to 2200 waits from 1600 to 2100 (Ticks).
+        seen.first_outer = StutterTrace::Open(Category::GraphicsMiss, 1000);
+        seen.gfx_open = at(1500, Category::GraphicsMiss) - gfx;
+        seen.second_outer = StutterTrace::Open(Category::Idle, 1600);
+        seen.gfx_nested = at(2000, Category::GraphicsMiss) - gfx;
+        seen.idle_nested = at(2000, Category::Idle) - idle;
+        StutterTrace::Close(seen.second_outer, 2100);
+        seen.idle_closed = at(2100, Category::Idle) - idle;
+        StutterTrace::Close(seen.first_outer, 2200);
+        seen.gfx_closed = at(5000, Category::GraphicsMiss) - gfx;
+        seen.idle_final = at(5000, Category::Idle) - idle;
+        seen.builds = builds.load() - built;
+    }}.join();
+    REQUIRE(seen.first_outer == Category::None);
+    REQUIRE(seen.second_outer == Category::GraphicsMiss);
+    REQUIRE(seen.gfx_open == 500);
+    REQUIRE(seen.gfx_nested == 600);
+    REQUIRE(seen.idle_nested == 400);
+    REQUIRE(seen.idle_closed == 500);
+    REQUIRE(seen.gfx_closed == 700);
+    REQUIRE(seen.idle_final == 500);
+    REQUIRE(seen.builds == 1);
+}

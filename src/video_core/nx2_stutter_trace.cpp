@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 
 #ifdef _WIN32
@@ -136,6 +137,35 @@ void Summarize(FrameState& state, u64 now) {
 
 } // Anonymous namespace
 
+ThreadTicks Snapshot(u64 now) {
+    ThreadTicks ticks;
+    for (size_t thread = 0; thread < ThreadCount; ++thread) {
+        auto& sequence = g_totals.sequence[thread];
+        for (;;) {
+            const u32 begin = sequence.load(std::memory_order_acquire);
+            if (begin % 2 != 0) {
+                std::this_thread::yield();
+                continue;
+            }
+            auto& totals = g_totals.ticks[thread];
+            for (size_t index = 0; index < CategoryCount; ++index) {
+                ticks[thread][index] = totals[index].load(std::memory_order_relaxed);
+            }
+            const size_t open = g_totals.open[thread].load(std::memory_order_relaxed);
+            const u64 since = g_totals.open_since[thread].load(std::memory_order_relaxed);
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (sequence.load(std::memory_order_relaxed) != begin) {
+                continue;
+            }
+            if (open < CategoryCount && now > since) {
+                ticks[thread][open] += now - since;
+            }
+            break;
+        }
+    }
+    return ticks;
+}
+
 Attribution Attribute(const ThreadTicks& ticks, const std::array<bool, ThreadCount>& running,
                       double interval_ms, double ms_per_tick) {
     Attribution result{.cause = "other"};
@@ -171,11 +201,10 @@ void OnPresent() {
     auto& state = g_frame;
     const u64 now = Nx2Profile::Now();
     const u64 now_ticks = Nx2Profile::Ticks();
-    ThreadTicks ticks;
+    const ThreadTicks ticks = Snapshot(now_ticks);
     ThreadTicks counts;
     for (size_t thread = 0; thread < ThreadCount; ++thread) {
         for (size_t index = 0; index < CategoryCount; ++index) {
-            ticks[thread][index] = g_totals.ticks[thread][index].load(std::memory_order_relaxed);
             counts[thread][index] = g_totals.counts[thread][index].load(std::memory_order_relaxed);
         }
     }
@@ -203,7 +232,9 @@ void OnPresent() {
     u64 compute_builds = 0;
     for (size_t thread = 0; thread < ThreadCount; ++thread) {
         for (size_t index = 0; index < CategoryCount; ++index) {
-            frame_ticks[thread][index] = ticks[thread][index] - last_ticks[thread][index];
+            // The tick counters of different cores can differ slightly.
+            const u64 total = ticks[thread][index];
+            frame_ticks[thread][index] = total - (std::min)(total, last_ticks[thread][index]);
         }
         running[thread] = g_totals.running[thread].load(std::memory_order_relaxed);
         graphics_builds += counts[thread][GraphicsMissIndex] - last_counts[thread][GraphicsMissIndex];
@@ -257,6 +288,11 @@ void BootMarker(std::string_view event, std::string_view details) {
 void SetCacheFile(std::string path) {
     std::scoped_lock lock{g_cache_file_mutex};
     g_cache_file = std::move(path);
+}
+
+void StartSession() {
+    g_frame = {};
+    SetCacheFile({});
 }
 
 } // namespace VideoCommon::StutterTrace

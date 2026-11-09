@@ -178,21 +178,26 @@ public:
         parent_child_ns = t_data.child_ns;
         t_data.child_ns = 0;
         start = Ticks();
+        traced = StutterTrace::Enabled();
+        if (traced) {
+            outer = StutterTrace::Open(stutter_categories[static_cast<size_t>(zone)], start);
+        }
     }
 
     ~Scope() {
         if (!enabled) {
             return;
         }
-        const u64 elapsed = Ticks() - start;
+        const u64 end = Ticks();
+        const u64 elapsed = end - start;
         auto& data = t_data;
         const auto index = static_cast<size_t>(zone);
         const u64 exclusive = elapsed - data.child_ns;
         data.exclusive_ns[index] += exclusive;
         ++data.count[index];
         data.child_ns = parent_child_ns + elapsed;
-        if (StutterTrace::Enabled()) {
-            StutterTrace::Add(stutter_categories[index], exclusive);
+        if (traced) {
+            StutterTrace::Close(outer, end);
         }
     }
 
@@ -202,6 +207,8 @@ public:
 private:
     Zone zone;
     bool enabled;
+    bool traced{};
+    StutterTrace::Category outer{StutterTrace::Category::None};
     u64 start{};
     u64 parent_child_ns{};
 };

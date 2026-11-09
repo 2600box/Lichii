@@ -82,22 +82,58 @@ struct Totals {
     /// Monotonic, each written only by its own thread; frames take the differences.
     std::array<std::array<std::atomic<u64>, CategoryCount>, ThreadCount> ticks{};
     std::array<std::array<std::atomic<u64>, CategoryCount>, ThreadCount> counts{};
+    /// Each thread's innermost open zone and the Nx2Profile::Ticks from which its time is not in
+    /// ticks yet, so that a frame also counts the zones still open when it is presented.
+    std::array<std::atomic<u8>, ThreadCount> open{};
+    std::array<std::atomic<u64>, ThreadCount> open_since{};
+    /// Odd while the thread updates ticks and its open zone (a sequence lock for Snapshot)
+    std::array<std::atomic<u32>, ThreadCount> sequence{};
     std::array<std::atomic<bool>, ThreadCount> running{};
     std::array<std::atomic<u64>, LookupCount> lookups{};
 };
 
 inline Totals g_totals;
 inline thread_local size_t t_thread = ThreadCount;
+inline thread_local Category t_open = Category::None;
+inline thread_local u64 t_open_since{};
+
+/// Makes category the calling thread's open zone from now on, adding the time of the zone open
+/// until now to its ticks (and one to its count when that zone closes).
+inline void SwitchOpen(Category category, u64 now, bool closing) {
+    const size_t thread = t_thread;
+    auto& sequence = g_totals.sequence[thread];
+    const u32 begin = sequence.load(std::memory_order_relaxed);
+    sequence.store(begin + 1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    if (t_open != Category::None) {
+        const auto index = static_cast<size_t>(t_open);
+        auto& total = g_totals.ticks[thread][index];
+        total.store(total.load(std::memory_order_relaxed) + (now - t_open_since),
+                    std::memory_order_relaxed);
+        if (closing) {
+            auto& count = g_totals.counts[thread][index];
+            count.store(count.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        }
+    }
+    g_totals.open[thread].store(static_cast<u8>(category), std::memory_order_relaxed);
+    g_totals.open_since[thread].store(now, std::memory_order_relaxed);
+    sequence.store(begin + 2, std::memory_order_release);
+    t_open = category;
+    t_open_since = now;
+}
 
 /// Names the calling thread for its lifetime.
 class ThreadScope {
 public:
     explicit ThreadScope(Thread thread) : index{static_cast<size_t>(thread)} {
         t_thread = index;
+        t_open = Category::None;
+        g_totals.open[index].store(static_cast<u8>(Category::None), std::memory_order_relaxed);
         g_totals.running[index].store(true, std::memory_order_relaxed);
     }
     ~ThreadScope() {
         g_totals.running[index].store(false, std::memory_order_relaxed);
+        g_totals.open[index].store(static_cast<u8>(Category::None), std::memory_order_relaxed);
         t_thread = ThreadCount;
     }
     ThreadScope(const ThreadScope&) = delete;
@@ -107,16 +143,22 @@ private:
     size_t index;
 };
 
-/// Exclusive zone time in Nx2Profile::Ticks on the calling thread; unnamed threads are ignored.
-inline void Add(Category category, u64 ticks) {
-    if (t_thread >= ThreadCount || category == Category::None) {
-        return;
+/// A zone of the category opens at now (Nx2Profile::Ticks) on the calling thread. Returns the
+/// zone it nests in, which Close reopens. Unnamed threads are ignored.
+inline Category Open(Category category, u64 now) {
+    if (t_thread >= ThreadCount) {
+        return Category::None;
     }
-    const auto index = static_cast<size_t>(category);
-    auto& total = g_totals.ticks[t_thread][index];
-    total.store(total.load(std::memory_order_relaxed) + ticks, std::memory_order_relaxed);
-    auto& count = g_totals.counts[t_thread][index];
-    count.store(count.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+    const Category outer = t_open;
+    SwitchOpen(category, now, false);
+    return outer;
+}
+
+/// The innermost open zone closes at now, back in outer (what its Open returned).
+inline void Close(Category outer, u64 now) {
+    if (t_thread < ThreadCount) {
+        SwitchOpen(outer, now, true);
+    }
 }
 
 inline void CountLookup(Lookup lookup) {
@@ -124,6 +166,9 @@ inline void CountLookup(Lookup lookup) {
 }
 
 using ThreadTicks = std::array<std::array<u64, CategoryCount>, ThreadCount>;
+
+/// Each thread's ticks at now (Nx2Profile::Ticks), its open zone's time so far included.
+[[nodiscard]] ThreadTicks Snapshot(u64 now);
 
 struct Attribution {
     std::array<double, CategoryCount> category_ms{}; ///< Summed over the threads
@@ -146,5 +191,8 @@ void BootMarker(std::string_view event, std::string_view details = {});
 
 /// The disk pipeline cache file, whose size the summaries log.
 void SetCacheFile(std::string path);
+
+/// Called when a GPU is created: frames and summaries start over (the totals stay monotonic).
+void StartSession();
 
 } // namespace VideoCommon::StutterTrace
