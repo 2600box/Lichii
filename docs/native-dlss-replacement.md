@@ -73,8 +73,7 @@ the game keeps its own pass whenever DLSS is off, unavailable or fails to start.
   FSR gets the same offset as the frame's jitter. Shadow maps, half-size passes, full-screen
   passes and frames the game upscales itself are not offset. A full-screen pass with depth
   writes on but the test off writes no depth (Vulkan disables writes with the test), so the
-  depth-write flag alone doesn't count. DLSS gets no jitter. `EDEN_NX2_OOT_JITTER=0` turns it
-  off; `-1` negates the offset given to FSR (a sign check: the image gets worse).
+  depth-write flag alone doesn't count. DLSS gets no jitter.
 - Motion with jitter: FSR is told the motion vectors carry no jitter (no jitter-cancellation
   flag). Camera motion comes from the unjittered matrices. The replay of Link's skinned draw is
   offset by the same jitter, so its scene-depth check compares the same samples the game drew,
@@ -83,7 +82,6 @@ the game keeps its own pass whenever DLSS is off, unavailable or fails to start.
 - Texture LOD bias (FSR only): when the session's upscaler is FSR, mipmapped samplers get
   AMD's recommended bias log2(render / output) - 1 = -1.58 in docked mode (none in handheld).
   Images the GPU wrote (render targets: bloom, blur, reflections, fog) keep the game's own bias.
-  `EDEN_NX2_OOT_LOD_BIAS=<bias>` replaces the default, also in handheld; `0` turns it off.
 - #644 (`82494c4820`, `74a2d20c90`, `4352c06bbf`) supplies the effects capture, used by FSR only
   (DLSS gets no bias mask and runs as before). FSR uses its R16F current/history bias as both
   reactive and transparency/composition masks; missing capture uses zero masks, not stale
