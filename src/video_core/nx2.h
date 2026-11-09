@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -139,8 +140,21 @@ inline void Nx2ClearGpuWrittenPages() {
 inline std::shared_mutex g_nx2_semaphore_regions_mutex;
 inline std::unordered_set<u64> g_nx2_semaphore_regions; // starts
 
+// Test build only (EGLA-91 round 3): EDEN_NX2_SEM_REGION_CAP=32 keeps at most that many regions,
+// as nx2's 32-slot table did before #1014.
+inline const size_t g_nx2_semaphore_region_cap = [] {
+    const char* value = std::getenv("EDEN_NX2_SEM_REGION_CAP");
+    return value != nullptr ? static_cast<size_t>(std::strtoull(value, nullptr, 10)) : size_t{0};
+}();
+inline std::atomic<u64> g_nx2_semaphore_regions_dropped{};
+
 inline void Nx2AddSemaphoreRegion(u64 start) {
     std::unique_lock lock{g_nx2_semaphore_regions_mutex};
+    if (g_nx2_semaphore_region_cap != 0 && !g_nx2_semaphore_regions.contains(start) &&
+        g_nx2_semaphore_regions.size() >= g_nx2_semaphore_region_cap) {
+        g_nx2_semaphore_regions_dropped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     g_nx2_semaphore_regions.insert(start);
 }
 

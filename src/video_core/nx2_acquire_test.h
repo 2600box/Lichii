@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <mutex>
+#include <shared_mutex>
 #include <unordered_set>
 
 #include "common/common_types.h"
@@ -32,24 +33,15 @@ inline const bool g_mirror = [] {
 
 /// True when address is in the first page of a registered two-page semaphore region.
 inline bool InFirstPage(u64 address) {
-    for (const auto& region : Tegra::g_nx2_semaphore_regions) {
-        const u64 start = region.load(std::memory_order_relaxed);
-        if (start != 0 && address >= start && address < start + 0x1000) {
-            return true;
-        }
-    }
-    return false;
+    return Tegra::Nx2InSemaphoreFirstPage(address);
 }
 
 /// Set by the puller around its mirrored Query, so the report hook can tell mirrored writes apart.
 inline thread_local bool t_mirrored_query = false;
 
-inline u32 RegisteredRegions() {
-    u32 count = 0;
-    for (const auto& region : Tegra::g_nx2_semaphore_regions) {
-        count += region.load(std::memory_order_relaxed) != 0;
-    }
-    return count;
+inline size_t RegisteredRegions() {
+    std::shared_lock lock{Tegra::g_nx2_semaphore_regions_mutex};
+    return Tegra::g_nx2_semaphore_regions.size();
 }
 
 // Buckets: <1 ms, <10 ms, <100 ms, <500 ms, <2 s, >=2 s.
@@ -150,12 +142,15 @@ public:
                  "EGLA94 words since boot: first-page direct {}, mirror targets {}, both {}",
                  direct_count, mirror_count, shared_words);
         LOG_INFO(HW_GPU,
-                 "EGLA94 mirror {}: mirrored releases {}, first-page direct writes {}, regions {}, "
+                 "EGLA94 mirror {}: mirrored releases {}, first-page direct writes {}, regions {} "
+                 "(cap {}, dropped since boot {}), "
                  "first-page suspends {} (second page already met {}), first-page waits {} "
                  "total {} ms max {} ms",
                  g_mirror ? "on" : "off", mirrored.exchange(0, std::memory_order_relaxed),
                  first_page_writes.exchange(0, std::memory_order_relaxed),
-                 RegisteredRegions(), first_page_suspends.exchange(0, std::memory_order_relaxed),
+                 RegisteredRegions(), Tegra::g_nx2_semaphore_region_cap,
+                 Tegra::g_nx2_semaphore_regions_dropped.load(std::memory_order_relaxed),
+                 first_page_suspends.exchange(0, std::memory_order_relaxed),
                  second_page_meets_count.exchange(0, std::memory_order_relaxed),
                  first_page_waits.exchange(0, std::memory_order_relaxed),
                  first_page_total_us.exchange(0, std::memory_order_relaxed) / 1000,
