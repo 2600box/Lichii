@@ -62,6 +62,7 @@ enum class Join : u32 {
     Barrier,     ///< Fragment and tiled cache barriers
     IdleHook,    ///< The split's idle hook (deferred submits)
     Diagnostics, ///< Draws a diagnostic reads B's result of (frame dump, indirect trace)
+    Framebuffer, ///< The texture cache creates or removes a framebuffer (packets point at them)
     Count,
 };
 
@@ -78,16 +79,16 @@ inline constexpr std::array<const char*, JoinCount> join_names{
     "clears",        "compute",            "query cache",
     "fences",        "flushes",            "frames",
     "copies",        "channels",           "barriers",
-    "idle hook",     "diagnostics",
+    "idle hook",     "diagnostics",        "framebuffer changes",
 };
 
 /// Whether the stage marker and the join counters run, as of Configure.
 inline bool g_counting{};
 /// Stage B runs on its own thread (EDEN_NX2_BACK_STAGES=1, test only): set while the
 /// rasterizer's ring runs. Joins then wait for B, and the owner checks are thread checks.
-inline bool g_threaded{};
+inline std::atomic<bool> g_threaded{};
 /// EDEN_NX2_BACK_STAGES_VERIFY=1 with the ring running.
-inline bool g_threaded_verify{};
+inline std::atomic<bool> g_threaded_verify{};
 /// Owner checks (EDEN_NX2_SPLIT_CHECK), as of Configure.
 inline bool g_checking{};
 inline thread_local Stage t_stage{};

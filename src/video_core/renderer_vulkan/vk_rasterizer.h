@@ -239,7 +239,8 @@ private:
         DrawPacket packet;
         Scheduler::PacketList list;
         bool indirect{};
-        u64 committed{}; ///< The packet's position in the ring
+        bool native_turing{}; ///< A native macro launched the draw
+        u64 committed{};      ///< The packet's position in the ring
         /// EDEN_NX2_BACK_STAGES_VERIFY: the device ranges B reads (begin, size, hash at A).
         std::vector<std::array<u64, 3>> reads;
     };
@@ -402,6 +403,8 @@ private:
     /// Stage B: the latest value of each dynamic state group A took.
     DynamicStatePacket back_dynamic;
     u64 back_b_resets{}; ///< Stage B: its own submits it recorded the dynamic state again after
+    /// Stage B could not record a draw a native macro launched: A sets the macro engine's flag.
+    std::atomic<bool> back_native_failed{};
     /// Stage B: EDEN_NX2_BACK_STAGES_VERIFY results and the ring's 10 s report.
     struct {
         u64 next{};
@@ -409,6 +412,7 @@ private:
         u64 ranges{};
         u64 differing{};
         u64 out_of_order{};
+        u64 b_submits{}; ///< Packets B recorded all of the dynamic state for after its own submit
         u32 logged{};
         std::chrono::steady_clock::time_point last_report{};
     } back_verify;

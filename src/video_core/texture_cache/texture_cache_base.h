@@ -565,6 +565,10 @@ private:
     /// Remove framebuffers using the given image views from the cache
     void RemoveFramebuffers(std::span<const ImageViewId> removed_views);
 
+    /// Lands a parked deferred clear before a framebuffer is created or removed; with stage B on
+    /// its own thread, once B recorded the packets in flight.
+    void FlushDeferredClearForFramebuffers();
+
     /// Mark an image as modified from the GPU
     void MarkModification(ImageBase& image) noexcept;
 

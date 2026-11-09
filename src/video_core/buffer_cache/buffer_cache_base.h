@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <chrono>
 #include <functional>
@@ -940,7 +941,8 @@ private:
     };
     std::array<GeometrySync, NUM_VERTEX_BUFFERS + 1> geometry_syncs{};
     /// Counts DeleteBuffer calls: a buffer id older than this count may have been freed or reused.
-    u64 buffer_deletions = 0;
+    /// Read by stage A without the lock while stage B deletes buffers on its own thread.
+    std::atomic<u64> buffer_deletions{};
     struct GeometryStats {
         u64 syncs{};
         u64 syncs_skipped{};

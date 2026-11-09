@@ -26,6 +26,7 @@
 #include "common/slot_vector.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/dirty_flags.h"
+#include "video_core/nx2_draw_stages.h"
 #include "video_core/nx2_fast_draw.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/guest_memory.h"
@@ -1208,7 +1209,7 @@ FramebufferId TextureCache<P>::GetFramebufferId(const RenderTargets& key) {
         return id ? &slot_image_views[id] : nullptr;
     });
     ImageView* const depth_buffer = key.depth_buffer_id ? &slot_image_views[key.depth_buffer_id] : nullptr;
-    runtime.FlushDeferredClear();
+    FlushDeferredClearForFramebuffers();
     framebuffer_id = slot_framebuffers.insert(runtime, color_buffers, depth_buffer, key);
     return framebuffer_id;
 }
@@ -4067,8 +4068,26 @@ void TextureCache<P>::RemoveImageViewReferences(std::span<const ImageViewId> rem
 }
 
 template <class P>
-void TextureCache<P>::RemoveFramebuffers(std::span<const ImageViewId> removed_views) {
+void TextureCache<P>::FlushDeferredClearForFramebuffers() {
+    if constexpr (requires { runtime.FlushDeferredClearNow(); }) {
+        if (DrawStages::g_threaded) {
+            runtime.FlushDeferredClearNow();
+            return;
+        }
+    }
     runtime.FlushDeferredClear();
+}
+
+template <class P>
+void TextureCache<P>::RemoveFramebuffers(std::span<const ImageViewId> removed_views) {
+    if (DrawStages::g_threaded &&
+        std::ranges::none_of(framebuffers, [removed_views](const auto& framebuffer) {
+            return framebuffer.first.Contains(removed_views);
+        })) {
+        runtime.FlushDeferredClear();
+        return;
+    }
+    FlushDeferredClearForFramebuffers();
     auto it = framebuffers.begin();
     while (it != framebuffers.end()) {
         if (it->first.Contains(removed_views)) {

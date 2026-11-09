@@ -1897,8 +1897,8 @@ void BufferCache<P>::SetUniformBuffersState(const std::array<u32, NUM_STAGES>& m
 template <class P>
 void BufferCache<P>::BeginGraphicsUniforms(const Nx2FastDraw::Delta* delta) {
     UniformKeep& keep = uniform_keep;
-    const bool unwritten = !keep.memory_writes_lost && keep.draw_deletions == buffer_deletions;
-    keep.draw_deletions = buffer_deletions;
+    const bool unwritten = !keep.memory_writes_lost && keep.draw_deletions == buffer_deletions.load(std::memory_order_relaxed);
+    keep.draw_deletions = buffer_deletions.load(std::memory_order_relaxed);
     keep.candidates = {};
     keep.writes.clear();
     const std::array<u32, NUM_STAGES> streamed = std::exchange(keep.streamed, {});
@@ -3343,7 +3343,7 @@ void BufferCache<P>::UpdateIndexBuffer(const GraphicsBufferPacket& packet) {
             inline_buffer_id = CreateBuffer(0, buffer_size, false);
         }
         if (slot_buffers[inline_buffer_id].SizeBytes() < buffer_size) [[unlikely]] {
-            ++buffer_deletions;
+            buffer_deletions.fetch_add(1, std::memory_order_relaxed);
             slot_buffers.erase(inline_buffer_id);
             inline_buffer_id = CreateBuffer(0, buffer_size, false);
         }
@@ -4051,7 +4051,7 @@ void BufferCache<P>::SynchronizeGeometryBuffer(u32 slot, BufferId buffer_id, DAd
     ++geometry_stats.syncs;
     if (memory_tracker.IsSynchronized(slot) && sync.buffer_id == buffer_id &&
         sync.device_addr == device_addr && sync.size == size &&
-        sync.deletions == buffer_deletions) {
+        sync.deletions == buffer_deletions.load(std::memory_order_relaxed)) {
         ++geometry_stats.syncs_skipped;
         if (Nx2Perf::Verify() && !SynchronizeBuffer(buffer, device_addr, size)) {
             ++geometry_stats.verify_mismatches;
@@ -4063,7 +4063,7 @@ void BufferCache<P>::SynchronizeGeometryBuffer(u32 slot, BufferId buffer_id, DAd
         .buffer_id = buffer_id,
         .device_addr = device_addr,
         .size = size,
-        .deletions = buffer_deletions,
+        .deletions = buffer_deletions.load(std::memory_order_relaxed),
     };
     memory_tracker.WatchSynchronized(slot, device_addr, size);
 }
@@ -4325,7 +4325,7 @@ template <class P>
 void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
     const StutterTrace::SiteScope site{StutterTrace::Site::BufferDelete};
     DrawStages::CountInA(DrawStages::Join::ABufferChange);
-    ++buffer_deletions;
+    buffer_deletions.fetch_add(1, std::memory_order_relaxed);
     if constexpr (requires { runtime.OnBufferDeleted(slot_buffers[buffer_id]); }) {
         runtime.OnBufferDeleted(slot_buffers[buffer_id]);
     }

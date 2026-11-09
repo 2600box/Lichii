@@ -208,11 +208,30 @@ starts the ring at the back's first draw and stops it if another thread draws.
 - The split counts the back's position for the front's waits only once B has recorded the
   packets made before it. A drain hands the open batch over at once.
 - `EDEN_NX2_SPLIT_CHECK` accepts scheduler use from B's thread.
+- Lifetimes of what packets point at:
+  - Pipeline cache GC joins B before it evicts a pipeline. Evicted pipelines are destroyed once
+    their tick is free.
+  - The texture cache joins B before it creates a framebuffer: a new one can move the others in
+    the slot vector. It also joins before it removes framebuffers. B's parked deferred clear lands
+    directly after that join.
+  - The texture cache destroys images and views on the frame ring, after a TickFrame, which joins
+    first.
+- B submits on its own only when it must wait for space (the descriptor buffer ring). The
+  scheduler's part resets on B, and A resets its state tracker at its next draw. B records its
+  running copy of every dynamic state group A sent since the ring started. A invalidated its state
+  tracker at that start, so every group a pipeline needs was sent, with its latest value.
+- A draw B cannot record still sets the native macro engine's failure flag. A sets it at its next
+  draw.
+- The ring starts on the split's back and stops there as the back exits. The stop clears that
+  thread's capture and the ring's hooks before anything else records.
 
 `EDEN_NX2_BACK_STAGES_VERIFY=1` makes A hash each range B reads (its first 256 KiB). B hashes
 the range again before it records the packet and checks that packets arrive in order. B logs the
 first 16 differences. Every 10 s a `Back stages verify` line gives the packets, the ranges
-checked, those that changed after A built the packet, and the packets out of order. A
+checked, those that changed after A built the packet, the packets out of order, and the packets B
+recorded the whole dynamic state for after a submit of its own. B does not resolve the
+addresses again: the packet holds device addresses only, and A's mappings can change while a
+packet is in flight. A remap shows up only as a content change. A
 `Back stages` line gives the ring's hand-overs, joins, full-ring waits, A's wait time, and B's
 sleeps and busy time. With `EDEN_NX2_GPU_PROFILE`, the profile line counts the joins by site.
 

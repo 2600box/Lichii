@@ -1180,14 +1180,15 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, u32 instance_count, Func&& d
     fast_draw_verify = fast_draw_on && FastDraw::VerifyEnabled();
     const u64 fast_draw_start = fast_draw_on ? Profile::Now() : 0;
     // EDEN_NX2_BACK_STAGES=1: stage B runs on its own thread for the draws of the split's back.
-    if (back_staging_pool) {
-        if (!back_ring && VideoCommon::GpuSplit::OnBackThread()) {
-            StartBackStages();
-        } else if (back_ring && std::this_thread::get_id() != back_owner) {
-            StopBackStages();
-        }
+    if (back_staging_pool && !back_ring && VideoCommon::GpuSplit::OnBackThread()) {
+        StartBackStages();
     }
     if (back_ring) {
+        // The ring stops on its own thread as the split's back exits (g_back_exit).
+        ASSERT(std::this_thread::get_id() == back_owner);
+        if (back_native_failed.exchange(false, std::memory_order_relaxed)) {
+            maxwell3d->GetNativeMacroEngine().native_execution_failed = true;
+        }
         // Stage B submitted on its own: A takes the state tracker's part of it.
         if (const u64 resets = scheduler.BackResets(); resets != back_resets_seen) {
             back_resets_seen = resets;
@@ -2207,6 +2208,10 @@ void RasterizerVulkan::StartBackStages() {
     DrawStages::g_after_join = [](void* rasterizer) {
         static_cast<RasterizerVulkan*>(rasterizer)->SpliceCapturedCommands();
     };
+    DrawStages::g_back_exit_argument = this;
+    DrawStages::g_back_exit = [](void* rasterizer) {
+        static_cast<RasterizerVulkan*>(rasterizer)->StopBackStages();
+    };
     back_ring->Start([this](u32 index) { ConsumeBackSlot(index); },
                      [](u64 position) { VideoCommon::GpuSplit::Get().NoteStageBConsumed(position); },
                      {});
@@ -2221,11 +2226,14 @@ void RasterizerVulkan::StartBackStages() {
 
 void RasterizerVulkan::StopBackStages() {
     namespace DrawStages = VideoCommon::DrawStages;
+    // On the thread that drew (the split's back as it exits): B records every packet, then that
+    // thread's capture and the ring's hooks are cleared before anything else records.
     back_ring->Join();
     DrawStages::g_threaded = false;
     DrawStages::g_threaded_verify = false;
     DrawStages::g_ring = nullptr;
     DrawStages::g_after_join = nullptr;
+    DrawStages::g_back_exit = nullptr;
     Scheduler::CaptureInto(nullptr);
     {
         std::scoped_lock lock{buffer_cache.mutex};
@@ -2236,12 +2244,13 @@ void RasterizerVulkan::StopBackStages() {
     back_slots.reset();
     back_slot = nullptr;
     state_tracker.InvalidateCommandBufferState();
-    LOG_INFO(Render_Vulkan, "Draw packets: stage B runs inline again (the thread that draws changed)");
+    LOG_INFO(Render_Vulkan, "Draw packets: stage B stopped with the split's back");
 }
 
 void RasterizerVulkan::CommitBackSlot(bool indirect) {
     BackSlot& slot = *back_slot;
     slot.indirect = indirect;
+    slot.native_turing = maxwell3d->GetNativeMacroEngine().native_turing;
     slot.committed = back_ring->Committed();
     NoteBackReads(slot);
     back_view.Bind(slot.packet.pipeline, slot.packet.framebuffer);
@@ -2370,8 +2379,13 @@ void RasterizerVulkan::RecordBackDraw(BackSlot& slot) {
         // what changed: record B's running copy of all of it.
         MergeDynamicState(back_dynamic, packet.dynamic);
         const u64 resets = scheduler.BackResets();
-        RecordDynamicStates(resets != back_b_resets ? back_dynamic : packet.dynamic);
-        back_b_resets = resets;
+        if (resets != back_b_resets) {
+            back_b_resets = resets;
+            ++back_verify.b_submits;
+            RecordDynamicStates(back_dynamic);
+        } else {
+            RecordDynamicStates(packet.dynamic);
+        }
     }
     if (recorded) {
         query_cache.NotifySegment(true);
@@ -2389,6 +2403,9 @@ void RasterizerVulkan::RecordBackDraw(BackSlot& slot) {
         buffer_cache.NoteWorkRecorded(false);
     } else {
         TraceDrawFailure("configure failed");
+        if (slot.native_turing) {
+            back_native_failed.store(true, std::memory_order_relaxed);
+        }
     }
     const auto now = std::chrono::steady_clock::now();
     if (now - back_verify.last_report < std::chrono::seconds{10}) {
@@ -2405,9 +2422,9 @@ void RasterizerVulkan::RecordBackDraw(BackSlot& slot) {
     if (DrawStages::g_threaded_verify) {
         LOG_INFO(Render_Vulkan,
                  "Back stages verify: {} packets, {} ranges checked, {} changed after A built "
-                 "the packet, {} out of order",
+                 "the packet, {} out of order, {} after a submit of B's own",
                  back_verify.packets, back_verify.ranges, back_verify.differing,
-                 back_verify.out_of_order);
+                 back_verify.out_of_order, back_verify.b_submits);
     }
 }
 

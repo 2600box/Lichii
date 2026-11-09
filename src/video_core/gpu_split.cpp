@@ -638,6 +638,9 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
         }
         StoreConsumed(read_position);
     }
+    if (DrawStages::g_back_exit != nullptr) {
+        DrawStages::g_back_exit(DrawStages::g_back_exit_argument);
+    }
     back_running.store(false, std::memory_order_seq_cst);
     front_wake.fetch_add(1, std::memory_order_seq_cst);
     front_wake.notify_all();
