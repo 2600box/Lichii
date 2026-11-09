@@ -1212,6 +1212,11 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
         }
         {
             Profile::Scope scope{Profile::Zone::PushDescriptors};
+            if (library_cache && stage == NUM_STAGES - 1) {
+                // Libraries: the fragment stage's rescaling bits start at fixed indices, as in
+                // ConfigureImpl.
+                rescaling.Seek(GPL_FRAGMENT_TEXTURE_SCALING_BASE, GPL_FRAGMENT_IMAGE_SCALING_BASE);
+            }
             PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
                                  rescaling, samplers_it, views_it);
         }
