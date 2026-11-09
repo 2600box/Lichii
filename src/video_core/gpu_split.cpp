@@ -148,6 +148,7 @@ void GpuSplit::Stop() {
     write_position = 0;
     last_writer_position = 0;
     last_sync_position = 0;
+    synced_writer_position = 0;
     semaphore_writes.clear();
     semaphore_writes_limit = 1024;
     last_any_write = 0;
@@ -344,8 +345,7 @@ bool GpuSplit::WaitForWrites(const Tegra::MemoryManager& memory, GPUVAddr addres
 }
 
 bool GpuSplit::WaitForSyncedWriters() {
-    return WaitFor(std::min({last_writer_position, last_sync_position, write_position}),
-                   DrainSite::ListWriters);
+    return WaitFor(std::min(synced_writer_position, write_position), DrainSite::ListWriters);
 }
 
 bool GpuSplit::WaitFor(u64 target, DrainSite site) {
