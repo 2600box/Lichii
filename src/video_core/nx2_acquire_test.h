@@ -54,6 +54,12 @@ public:
         static Stats instance;
         return instance;
     }
+    /// Any report or semaphore write into a first page, mirrored ones included.
+    void FirstPageWrite(u64 address) {
+        if (g_stats && InFirstPage(address)) {
+            first_page_writes.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
     void Mirrored() {
         if (g_stats) {
             mirrored.fetch_add(1, std::memory_order_relaxed);
@@ -110,9 +116,11 @@ public:
                  total_us.exchange(0, std::memory_order_relaxed) / 1000,
                  max_us.exchange(0, std::memory_order_relaxed) / 1000);
         LOG_INFO(HW_GPU,
-                 "EGLA94 mirror {}: mirrored releases {}, regions {}, first-page suspends {} "
-                 "(second page already met {}), first-page waits {} total {} ms max {} ms",
+                 "EGLA94 mirror {}: mirrored releases {}, first-page writes {}, regions {}, "
+                 "first-page suspends {} (second page already met {}), first-page waits {} "
+                 "total {} ms max {} ms",
                  g_mirror ? "on" : "off", mirrored.exchange(0, std::memory_order_relaxed),
+                 first_page_writes.exchange(0, std::memory_order_relaxed),
                  RegisteredRegions(), first_page_suspends.exchange(0, std::memory_order_relaxed),
                  second_page_meets_count.exchange(0, std::memory_order_relaxed),
                  first_page_waits.exchange(0, std::memory_order_relaxed),
@@ -123,7 +131,7 @@ public:
 private:
     std::array<std::atomic<u64>, 6> buckets{};
     std::atomic<u64> total_us{}, max_us{};
-    std::atomic<u64> mirrored{}, first_page_suspends{}, second_page_meets_count{};
+    std::atomic<u64> mirrored{}, first_page_writes{}, first_page_suspends{}, second_page_meets_count{};
     std::atomic<u64> first_page_waits{}, first_page_total_us{}, first_page_max_us{};
     std::atomic<s64> last_ms{};
 };
