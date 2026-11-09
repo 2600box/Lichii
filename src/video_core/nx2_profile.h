@@ -17,8 +17,10 @@
 
 #include "common/common_types.h"
 #include "video_core/gpu_split.h"
+#include "video_core/nx2_split_probe.h"
 #include "common/logging.h"
 #include "common/cpu_features.h"
+#include "common/spin_recursive_mutex.h"
 #include "common/thread_cpu_clock.h"
 #include "video_core/nx2_stutter_trace.h"
 
@@ -71,6 +73,8 @@ enum class Zone : u32 {
     GpuWait,              ///< Waiting for a GPU tick
     Present,              ///< Swapchain frame acquire and present
     WorkerIdle,           ///< VulkanWorker waiting for work
+    PresentWait,          ///< Present waits for the Vulkan worker or a free presentation frame
+    QueueSubmit,          ///< vkQueueSubmit
     Count,
 };
 
@@ -85,6 +89,7 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "writer wait", "list submit wait", "list GPU wait", "graphics pipeline miss",
     "compute pipeline miss", "pipeline wait", "shader capture", "texture cache", "GPU wait",
     "present", "worker idle",
+    "present wait", "queue submit",
 };
 
 /// The EDEN_NX2_STUTTER_TRACE category of each zone's exclusive time (None: counted as other).
@@ -118,8 +123,65 @@ inline constexpr auto stutter_categories = [] {
     set(Zone::ListGpuWait, Category::QueryFence);
     set(Zone::GpuWait, Category::QueryFence);
     set(Zone::Present, Category::Present);
+    set(Zone::PresentWait, Category::Present);
     return categories;
 }();
+
+/// What the split probe counts a zone's work as (nx2_split_probe.h). The probe times its own
+/// segments where a zone mixes serial and parallel work. Waits for the GPU, a presentation frame
+/// or a queue submit are serial: the drawing thread can do nothing else meanwhile and a split
+/// would not remove them, so they stay in busy time. Only waits for work are idle.
+inline Nx2SplitProbe::Work ProbeWork(Zone zone) {
+    using Nx2SplitProbe::Work;
+    switch (zone) {
+    case Zone::Idle:
+    case Zone::PendingSleep:
+    case Zone::SplitWait:
+    case Zone::WorkerIdle:
+        return Work::Idle;
+    case Zone::Draw:
+        return Work::Draw;
+    case Zone::FlushWork:
+        return Work::FlushWork;
+    case Zone::SyncDescriptors:
+    case Zone::ReadHandles:
+        return Work::Handles;
+    case Zone::FillImageViews:
+        return Work::ImageViews;
+    case Zone::TextureUpload:
+        return Work::Upload;
+    case Zone::RenderTargets:
+        return Work::RenderTargets;
+    case Zone::PipelineLookup:
+        return Work::PipelineLookup;
+    case Zone::Configure:
+    case Zone::TextureBuffers:
+        return Work::Configure;
+    case Zone::UpdateBuffers:
+        return Work::BufferResolve;
+    case Zone::BindStageBuffers:
+        return Work::StageBindings;
+    case Zone::DescriptorAcquire:
+    case Zone::PushDescriptors:
+    case Zone::ConfigureDraw:
+        return Work::Descriptors;
+    case Zone::DynamicState:
+        return Work::DynamicState;
+    case Zone::DrawRecord:
+        return Work::Record;
+    case Zone::GraphicsPipelineMiss:
+    case Zone::ComputePipelineMiss:
+    case Zone::PipelineWait:
+    case Zone::ShaderCapture:
+    case Zone::TextureCache:
+    case Zone::GpuWait:
+    case Zone::Present:
+    case Zone::PresentWait:
+    case Zone::QueueSubmit:
+    default:
+        return Work::OtherSerial;
+    }
+}
 
 // A plain flag: Enabled() runs several times per method write (no guard to check).
 inline bool g_enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
@@ -132,6 +194,8 @@ inline void ReadSwitch() {
     g_enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
     StutterTrace::ReadSwitch();
     g_zones_enabled = g_enabled || StutterTrace::Enabled();
+    Common::g_count_spin_contention = g_enabled;
+    Nx2SplitProbe::ReadSwitch(g_zones_enabled);
 }
 
 inline bool Enabled() {
@@ -161,6 +225,10 @@ struct ThreadData {
     std::array<u64, 8> counters{}; ///< See Counter
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_ns{};
     std::array<u64, static_cast<size_t>(DrainSite::Count)> drain_count{};
+    /// GPU waits by the zone they happened in (Other: outside every zone)
+    std::array<u64, static_cast<size_t>(Zone::Count)> gpu_wait_ns{};
+    std::array<u64, static_cast<size_t>(Zone::Count)> gpu_wait_count{};
+    Zone current{Zone::Other};
     u64 child_ns{};    ///< Time of the zones nested in the current one
     u64 window_start{};
     u64 window_start_ticks{};
@@ -173,15 +241,23 @@ class Scope {
 public:
     explicit Scope(Zone zone_) : zone{zone_}, enabled{g_zones_enabled} {
         if (!enabled) {
+            if (Nx2SplitProbe::g_enabled) {
+                probe_parent = Nx2SplitProbe::Enter(ProbeWork(zone));
+            }
             return;
         }
         parent_child_ns = t_data.child_ns;
         t_data.child_ns = 0;
+        parent = t_data.current;
+        t_data.current = zone;
         start = Ticks();
     }
 
     ~Scope() {
         if (!enabled) {
+            if (probe_parent != Nx2SplitProbe::Work::Skip) {
+                Nx2SplitProbe::Leave(probe_parent);
+            }
             return;
         }
         const u64 elapsed = Ticks() - start;
@@ -191,6 +267,11 @@ public:
         data.exclusive_ns[index] += exclusive;
         ++data.count[index];
         data.child_ns = parent_child_ns + elapsed;
+        data.current = parent;
+        if (zone == Zone::GpuWait) {
+            data.gpu_wait_ns[static_cast<size_t>(parent)] += elapsed;
+            ++data.gpu_wait_count[static_cast<size_t>(parent)];
+        }
         if (StutterTrace::Enabled()) {
             StutterTrace::Add(stutter_categories[index], exclusive);
         }
@@ -201,7 +282,9 @@ public:
 
 private:
     Zone zone;
+    Zone parent{Zone::Other};
     bool enabled;
+    Nx2SplitProbe::Work probe_parent{Nx2SplitProbe::Work::Skip};
     u64 start{};
     u64 parent_child_ns{};
 };
@@ -287,7 +370,8 @@ inline void AddDrain(DrainSite site, u64 start) {
 
 /// Called by the GPU thread (and the split's back thread) between commands: logs and resets
 /// the totals every 10 s.
-inline void Report(const char* thread_name = "GPU thread") {
+/// `report_all_contention`: also log (and reset) every thread's spin mutex contention.
+inline void Report(const char* thread_name = "GPU thread", bool report_all_contention = false) {
     if (!Enabled()) {
         return;
     }
@@ -347,6 +431,36 @@ inline void Report(const char* thread_name = "GPU thread") {
         drains.pop_back();
         line += " | waits for the back by site:" + drains;
     }
+    std::string gpu_waits;
+    for (size_t i = 0; i < data.gpu_wait_count.size(); ++i) {
+        if (data.gpu_wait_count[i] != 0) {
+            gpu_waits += fmt::format(" {} {:.1f} ms ({:.0f}/s),", zone_names[i],
+                                     static_cast<double>(data.gpu_wait_ns[i]) * 1000.0 / window_ticks,
+                                     static_cast<double>(data.gpu_wait_count[i]) * 1e9 / window);
+        }
+    }
+    if (!gpu_waits.empty()) {
+        gpu_waits.pop_back();
+        line += " | GPU waits by zone:" + gpu_waits;
+    }
+    {
+        auto& own = Common::t_spin_contention;
+        auto& all = Common::g_spin_contention;
+        line += fmt::format(
+            " | spin mutex contention: this thread {:.0f}/s {:.1f} ms ({:.0f} sleeps/s)",
+            static_cast<double>(own.count) * 1e9 / window, static_cast<double>(own.ns) / 1e6 * 1e9 / window,
+            static_cast<double>(own.sleeps) * 1e9 / window);
+        own = {};
+        if (report_all_contention) {
+            const u64 count = all.count.exchange(0, std::memory_order_relaxed);
+            const u64 ns = all.ns.exchange(0, std::memory_order_relaxed);
+            const u64 sleeps = all.sleeps.exchange(0, std::memory_order_relaxed);
+            line += fmt::format(", all threads {:.0f}/s {:.1f} ms ({:.0f} sleeps/s)",
+                                static_cast<double>(count) * 1e9 / window,
+                                static_cast<double>(ns) / 1e6 * 1e9 / window,
+                                static_cast<double>(sleeps) * 1e9 / window);
+        }
+    }
     if (cpu_now && data.cpu_start_ns && *cpu_now >= *data.cpu_start_ns) {
         line += fmt::format(" | host_cpu_busy_ms_per_s={:.3f} window_wall_ms={:.3f}",
                             static_cast<double>(*cpu_now - *data.cpu_start_ns) * 1000.0 / window,
@@ -365,7 +479,9 @@ inline void Report(const char* thread_name = "GPU thread") {
     t_method_count = {};
     t_method_same = {};
     t_dma_reads = {};
+    const Zone current = data.current;
     data = {};
+    data.current = current;
     data.window_start = now;
     data.window_start_ticks = now_ticks;
     data.cpu_start_ns = cpu_now;

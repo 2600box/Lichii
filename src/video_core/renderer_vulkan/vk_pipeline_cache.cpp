@@ -1672,6 +1672,7 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     const auto [pair, is_new]{graphics_cache.try_emplace(graphics_key)};
     auto& pipeline{pair->second};
     if (is_new) {
+        VideoCommon::Nx2SplitProbe::Mutate(VideoCommon::Nx2SplitProbe::Mutation::Pipeline);
         ReportNewPipelineKey(graphics_key);
         pipeline = background_pipelines.Take(graphics_key);
         if (StutterTrace::Enabled()) {

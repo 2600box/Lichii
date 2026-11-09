@@ -675,7 +675,10 @@ void BufferCache<P>::BindHostGeometryBuffers(bool is_indexed) {
 
 template <class P>
 void BufferCache<P>::BindHostStageBuffers(size_t stage) {
-    BindHostGraphicsUniformBuffers(stage);
+    {
+        VideoCommon::Nx2SplitProbe::Segment probe{VideoCommon::Nx2SplitProbe::Work::Uniforms};
+        BindHostGraphicsUniformBuffers(stage);
+    }
     if (channel_state->enabled_storage_buffers[stage] != 0) {
         BindHostGraphicsStorageBuffers(stage);
     }
@@ -2540,6 +2543,7 @@ void BufferCache<P>::JoinOverlap(BufferId new_buffer_id, BufferId overlap_id,
 template <class P>
 BufferId BufferCache<P>::CreateBuffer(DAddr device_addr, u32 wanted_size,
                                       bool sparse_compatible) {
+    VideoCommon::Nx2SplitProbe::Mutate(VideoCommon::Nx2SplitProbe::Mutation::Buffer);
     DAddr device_addr_end = Common::AlignUp(device_addr + wanted_size, CACHING_PAGESIZE);
     device_addr = Common::AlignDown(device_addr, CACHING_PAGESIZE);
     wanted_size = static_cast<u32>(device_addr_end - device_addr);
@@ -2605,6 +2609,7 @@ void BufferCache<P>::TouchBuffer(Buffer& buffer, BufferId buffer_id) noexcept {
 
 template <class P>
 bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 size) {
+    VideoCommon::Nx2SplitProbe::Segment probe{VideoCommon::Nx2SplitProbe::Work::BufferSync};
     // An upload over a clean word of the tracker (word_manager.h) finds and changes nothing:
     // walk only the dirty ones. Verify walks every word and checks the clean words.
     const bool skip_clean = !Nx2Perf::Verify();

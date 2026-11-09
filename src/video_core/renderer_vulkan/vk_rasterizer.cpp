@@ -996,7 +996,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         mesh_emulation_groups = groups;
         mesh_emulation_vertices_per_group = pipeline->MeshEmulationVerticesPerGroup();
     }
+    VideoCommon::Nx2SplitProbe::Mark(VideoCommon::Nx2SplitProbe::Work::Lock);
     std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+    VideoCommon::Nx2SplitProbe::Mark(VideoCommon::Nx2SplitProbe::Work::Draw);
     // What the next draw's TakeReusableDraw compares with, read once the caches are locked: a
     // break from here on, this draw's own resolve included, ends the delta chain.
     const u64 draw_serial = FastDraw::Serial();
@@ -1093,9 +1095,11 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         UpdateDynamicStates(pipeline);
     }
 
+    VideoCommon::Nx2SplitProbe::Mark(VideoCommon::Nx2SplitProbe::Work::Queries);
     query_cache.NotifySegment(true);
     HandleTransformFeedback();
     query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, maxwell3d->regs.zpass_pixel_count_enable);
+    VideoCommon::Nx2SplitProbe::Mark(VideoCommon::Nx2SplitProbe::Work::Draw);
     {
         Profile::Scope scope{Profile::Zone::DrawRecord};
         scheduler.TraceGraphicsPipeline(pipeline->ShaderHashes());
