@@ -147,8 +147,9 @@ public:
                            const VideoCore::DiskResourceLoadCallback& callback);
 
     /// What a graphics warm-up entry came to: built, not buildable (a guess the translation
-    /// rejects, which another warm-up would reject too), or refused by the driver.
-    enum class WarmResult { Built, Unbuildable, DriverFailed };
+    /// rejects, which another warm-up would reject too), refused by the driver, or left out
+    /// because the driver could crash on it (a vertex program that reads its position input).
+    enum class WarmResult { Built, Unbuildable, DriverFailed, Skipped };
 
     /// Graphics pipeline libraries (EDEN_NX2_GPL): builds the pre-rasterization and fragment
     /// shader libraries of the pipeline `key` would make, on the calling thread, with no draw and
@@ -188,12 +189,14 @@ private:
     /// Builds the pipeline as a job of shader_jobs with build_in_parallel, else leaves it for the
     /// caller's Build() (see BuildQueue). With `parallel` the stages translate at once on
     /// shader_jobs, each in IR pools of its own; their environments must be safe to read from those
-    /// threads.
+    /// threads. With `libraries_only`, `warm_skipped` (when set) tells a pipeline left out on
+    /// purpose (a vertex program that reads its position input) from one that cannot be built.
     std::unique_ptr<GraphicsPipeline> CreateGraphicsPipeline(
         ShaderPools& pools, const GraphicsPipelineCacheKey& key,
         std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
         bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools = nullptr,
-        ParallelTranslation* parallel = nullptr, bool libraries_only = false);
+        ParallelTranslation* parallel = nullptr, bool libraries_only = false,
+        bool* warm_skipped = nullptr);
 
     /// Released IR pools for a build, or new ones
     [[nodiscard]] std::shared_ptr<ShaderPools> TakeSparePools();

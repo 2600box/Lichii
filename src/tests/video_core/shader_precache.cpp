@@ -7,11 +7,16 @@
 #include <fstream>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
 #include "shader_recompiler/exception.h"
+#include "video_core/pipeline_cache_files.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+#include "video_core/shader_cache_v2/cache.h"
+#include "video_core/shader_cache_v2/cache_file.h"
+#include "video_core/shader_cache_v2/cache_format.h"
 #include "video_core/shader_environment.h"
 #include "video_core/shader_warm/shader_archives.h"
 #include "video_core/shader_warm/shader_warm_builder.h"
@@ -39,6 +44,26 @@ struct TempDir {
 void WriteBytes(const std::filesystem::path& file, std::string_view bytes) {
     std::ofstream out(file, std::ios::binary | std::ios::trunc);
     out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+}
+
+/// A graphics pipeline record of one vertex (0) or fragment (4) stage, as the Vulkan disk cache
+/// and the graphics records of the v2 log hold it: env count, env, key.
+std::vector<u8> StageRecord(u32 stage, const ShaderWarm::GraphicsKey& state, u64 stage_hash,
+                            u64 attribute_types) {
+    ShaderWarm::LoweredCode lowered;
+    lowered.code.resize(16 * sizeof(u64));
+    for (size_t i = 0; i < lowered.code.size(); ++i) {
+        lowered.code[i] = static_cast<u8>(i * 5 + stage_hash);
+    }
+    const std::vector<u8> program(128 + 16 * 16);
+    std::vector<u8> record(sizeof(u32));
+    const u32 env_count = 1;
+    std::memcpy(record.data(), &env_count, sizeof(env_count));
+    const auto env = ShaderWarm::GraphicsEnv(stage, lowered, program);
+    record.insert(record.end(), env.begin(), env.end());
+    const auto key = ShaderWarm::GraphicsEntryKey(stage, state, stage_hash, attribute_types);
+    record.insert(record.end(), key.begin(), key.end());
+    return record;
 }
 
 } // Anonymous namespace
@@ -218,4 +243,73 @@ TEST_CASE("ShaderPrecache: programs that cannot be lowered are refused", "[video
     const std::array<u8, 16> no_exit{};
     REQUIRE(ShaderWarm::LowerProgram(no_exit, lowered).has_value());
     REQUIRE(lowered.code.empty());
+}
+
+TEST_CASE("ShaderPrecache: draw state guesses come from the v2 log, else the older cache",
+          "[video_core]") {
+    namespace V2 = VideoCommon::ShaderCacheV2;
+    // Two draw states with the same render target (one color target, format 0xE0)
+    ShaderWarm::GraphicsKey state_a{};
+    ShaderWarm::GraphicsKey state_b{};
+    state_a[56] = state_b[56] = 0xE0;
+    state_a[200] = 1;
+    state_b[200] = 2;
+    const std::vector<std::vector<u8>> live{
+        StageRecord(0, state_a, 0x11, 0x5),
+        StageRecord(0, state_a, 0x12, 0x6),
+        StageRecord(0, state_b, 0x13, 0x7),
+        StageRecord(4, state_b, 0x21, 0),
+    };
+
+    // The v2 log: those records, plus two damaged ones and a removed one of state B (which would
+    // make it the most common vertex state) and a compute record
+    std::vector<u8> records;
+    u64 record_key = 0x100;
+    for (const auto& payload : live) {
+        V2::EncodeRecord(records, V2::RecordKind::Graphics, record_key++, payload);
+    }
+    for (const u64 stage_hash : {0x14, 0x15}) {
+        const size_t offset = records.size();
+        V2::EncodeRecord(records, V2::RecordKind::Graphics, record_key++,
+                         StageRecord(0, state_b, stage_hash, 0x8));
+        records[offset + V2::RecordHeaderSize + 40] ^= 0xFF;
+    }
+    V2::EncodeRecord(records, V2::RecordKind::Graphics, 0x200, StageRecord(0, state_b, 0x16, 0x9));
+    V2::EncodeRecord(records, V2::RecordKind::Tombstone, 0x200,
+                     V2::TombstonePayload(V2::RecordKind::Graphics));
+    V2::EncodeRecord(records, V2::RecordKind::Compute, 0x300, std::vector<u8>(64, 0x5A));
+
+    TempDir dir;
+    const auto log = dir.path / V2::FileName;
+    const auto old_cache =
+        VideoCommon::VersionedPipelineCachePath(dir.path, "vulkan", ShaderWarm::WarmCacheVersion);
+    REQUIRE(ShaderWarm::FindRuntimeCaches(dir.path).empty());
+
+    // The older disk cache alone: the same records one after another
+    std::vector<u8> old_bytes{'y', 'u', 'z', 'u', 'c', 'a', 'c', 'h'};
+    const u32 version = ShaderWarm::WarmCacheVersion;
+    old_bytes.resize(12);
+    std::memcpy(old_bytes.data() + 8, &version, sizeof(version));
+    for (const auto& payload : live) {
+        old_bytes.insert(old_bytes.end(), payload.begin(), payload.end());
+    }
+    WriteBytes(old_cache,
+               std::string_view{reinterpret_cast<const char*>(old_bytes.data()), old_bytes.size()});
+    REQUIRE(ShaderWarm::FindRuntimeCaches(dir.path) == std::vector{old_cache});
+
+    REQUIRE(V2::CreateLog(log, records) == V2::WriteResult::Written);
+    REQUIRE(ShaderWarm::FindRuntimeCaches(dir.path) == std::vector{log});
+
+    const auto expected_vertex = ShaderWarm::GraphicsEntryKey(0, state_a, 0, 0x5);
+    for (const auto& file : {log, old_cache}) {
+        const ShaderWarm::RuntimeStats stats = ShaderWarm::ReadRuntimeStats({file});
+        REQUIRE(stats.occurrences == 4);
+        REQUIRE(stats.templates[0].has_value());
+        REQUIRE(*stats.templates[0] == expected_vertex);
+        REQUIRE(stats.templates[1].has_value());
+        REQUIRE(*stats.templates[1] == state_b);
+        REQUIRE(stats.vertex_attributes.size() == 3);
+        REQUIRE(stats.vertex_attributes.at(0x11) == std::vector<u64>{0x5});
+        REQUIRE(stats.vertex_attributes.at(0x13) == std::vector<u64>{0x7});
+    }
 }
