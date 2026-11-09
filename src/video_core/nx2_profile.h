@@ -217,7 +217,10 @@ public:
             ++data.gpu_wait_count[static_cast<size_t>(parent)];
         }
         if (traced) {
-            StutterTrace::Close(outer, end, static_cast<size_t>(parent));
+            // Time outside every zone is no zone's: it may be a wait no zone covers.
+            StutterTrace::Close(outer, end,
+                                parent == Zone::Other ? StutterTrace::ZoneSlots
+                                                      : static_cast<size_t>(parent));
         }
     }
 
