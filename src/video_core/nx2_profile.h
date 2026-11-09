@@ -91,6 +91,8 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "present wait", "queue submit",
 };
 
+static_assert(static_cast<size_t>(Zone::Count) <= StutterTrace::ZoneSlots);
+
 /// The EDEN_NX2_STUTTER_TRACE category of each zone's exclusive time (None: counted as other).
 inline constexpr auto stutter_categories = [] {
     using StutterTrace::Category;
@@ -214,6 +216,7 @@ public:
             ++data.gpu_wait_count[static_cast<size_t>(parent)];
         }
         if (traced) {
+            StutterTrace::AddZone(index, exclusive);
             StutterTrace::Close(outer, end);
         }
     }

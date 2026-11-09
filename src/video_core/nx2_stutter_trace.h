@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "common/common_types.h"
 
@@ -17,7 +18,8 @@
 // zone to a category). Frames presented more than 33 ms after the previous one are logged with
 // their top category (Nx2Stutter); every 10 s the frame-time histogram, pipeline builds and
 // lookups (Nx2StutterSummary); and the boot phases with the process memory (Nx2Boot).
-// tools/nx2/cache_metrics.py reads them.
+// tools/nx2/cache_metrics.py reads them. Frames longer than EDEN_NX2_STUTTER_DETAIL_MS (default
+// 50) also get an Nx2StutterDetail line: each thread's largest zones and the sites below that ran.
 namespace VideoCommon::StutterTrace {
 
 enum class Category : u8 {
@@ -62,6 +64,34 @@ enum class Lookup : u8 {
 
 inline constexpr size_t LookupCount = static_cast<size_t>(Lookup::Count);
 
+/// Room for every Nx2Profile::Zone (nx2_profile.h checks it).
+inline constexpr size_t ZoneSlots = 64;
+
+/// Rare operations that can make one frame long on their own, timed apart from the zones they run
+/// in and on every thread, guest threads included.
+enum class Site : u8 {
+    MemoryAllocate,  ///< Device memory blocks allocated (vkAllocateMemory under VMA)
+    StagingCreate,   ///< A staging buffer the pool didn't have
+    BufferCreate,    ///< A buffer cache buffer, with the overlaps it joins
+    BufferDelete,    ///< A buffer cache buffer deleted
+    BufferCollect,   ///< Buffer cache garbage collection, its downloads included
+    BufferDownload,  ///< Buffer data downloaded while the caller waits for the host GPU
+    ImageCreate,     ///< A texture cache image, with the images it joins
+    ImageDelete,     ///< A texture cache image deleted
+    TextureCollect,  ///< Texture cache garbage collection
+    TextureDownload, ///< Image data downloaded while the caller waits for the host GPU
+    SchedulerFinish, ///< Submitting and waiting for the host GPU to finish all of it
+    MemoryFree,      ///< Device memory blocks given back to the driver
+    Count,
+};
+
+inline constexpr size_t SiteCount = static_cast<size_t>(Site::Count);
+inline constexpr std::array<std::string_view, SiteCount> site_names{
+    "memory_allocate", "staging_create", "buffer_create",    "buffer_delete",
+    "buffer_collect",  "buffer_download", "image_create",    "image_delete",
+    "texture_collect", "texture_download", "scheduler_finish", "memory_free",
+};
+
 [[nodiscard]] inline bool ReadEnv() {
     const char* const value = std::getenv("EDEN_NX2_STUTTER_TRACE");
     return value != nullptr && value[0] == '1';
@@ -90,6 +120,12 @@ struct Totals {
     std::array<std::atomic<u32>, ThreadCount> sequence{};
     std::array<std::atomic<bool>, ThreadCount> running{};
     std::array<std::atomic<u64>, LookupCount> lookups{};
+    /// Each zone's exclusive time once it closes (nested zones excluded), by thread.
+    std::array<std::array<std::atomic<u64>, ZoneSlots>, ThreadCount> zone_ticks{};
+    std::array<std::array<std::atomic<u64>, ZoneSlots>, ThreadCount> zone_counts{};
+    /// Sites run on any thread: added atomically.
+    std::array<std::atomic<u64>, SiteCount> site_ticks{};
+    std::array<std::atomic<u64>, SiteCount> site_counts{};
 };
 
 inline Totals g_totals;
@@ -160,6 +196,43 @@ inline void Close(Category outer, u64 now) {
         SwitchOpen(outer, now, true);
     }
 }
+
+/// A zone that ran exclusive ticks closes on the calling thread.
+inline void AddZone(size_t zone, u64 exclusive) {
+    if (t_thread < ThreadCount && zone < ZoneSlots) {
+        auto& total = g_totals.zone_ticks[t_thread][zone];
+        total.store(total.load(std::memory_order_relaxed) + exclusive, std::memory_order_relaxed);
+        auto& count = g_totals.zone_counts[t_thread][zone];
+        count.store(count.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+    }
+}
+
+/// A site ran from start to end (Nx2Profile::Ticks); long ones are kept for the frame's detail.
+void AddSite(Site site, u64 start, u64 end);
+
+/// Times a site while the trace is enabled.
+class SiteScope {
+public:
+    explicit SiteScope(Site site_) : site{site_} {
+        if (Enabled()) {
+            start = Now();
+        }
+    }
+    ~SiteScope() {
+        if (start != 0) {
+            AddSite(site, start, Now());
+        }
+    }
+    SiteScope(const SiteScope&) = delete;
+    SiteScope& operator=(const SiteScope&) = delete;
+
+    /// Nx2Profile::Ticks without including nx2_profile.h (which includes this header).
+    static u64 Now();
+
+private:
+    Site site;
+    u64 start{};
+};
 
 inline void CountLookup(Lookup lookup) {
     g_totals.lookups[static_cast<size_t>(lookup)].fetch_add(1, std::memory_order_relaxed);
