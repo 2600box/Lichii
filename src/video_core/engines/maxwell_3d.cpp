@@ -1762,7 +1762,7 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
     const bool verify = AsyncReadback::DmaReadVerify();
     std::vector<u32> undrained;
     std::vector<u32> checked;
-    if (verify) [[unlikely]] {
+    if (verify) {
         if (!drained) {
             for (u32 i = 0; i < words; ++i) {
                 undrained.push_back(memory_manager.Read<u32>(source + u64{i} * sizeof(u32)));
@@ -1782,11 +1782,11 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
         if (!diag_before.empty() && diag_before[i] != word) {
             ++changed;
         }
-        if (verify) [[unlikely]] {
+        if (verify) {
             checked.push_back(word);
         }
     }
-    if (verify) [[unlikely]] {
+    if (verify) {
         CheckDmaRead(macro, source, drained, waited, undrained, checked);
     }
     if (Tegra::Nx2CmdPageDiag::g_enabled) {

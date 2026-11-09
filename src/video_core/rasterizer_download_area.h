@@ -81,7 +81,7 @@ public:
     static void Await(DAddr addr, u64 size) noexcept {
         std::atomic_thread_fence(std::memory_order_seq_cst);
         const u64 sequence = state.sequence.load(std::memory_order_acquire);
-        if ((sequence & 1) != 0) [[unlikely]] {
+        if ((sequence & 1) != 0) {
             Wait(sequence, addr, size);
         }
     }

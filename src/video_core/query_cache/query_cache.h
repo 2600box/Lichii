@@ -672,7 +672,7 @@ template <typename Traits>
 void QueryCacheBase<Traits>::FinishReads(DAddr address, size_t size) {
     // SemiFlushQueryDirty asks with cache_mutex held, which no holder of the buffer cache's lock
     // takes.
-    if (VideoCore::ReadDownloadsMayCover(address, size)) [[unlikely]] {
+    if (VideoCore::ReadDownloadsMayCover(address, size)) {
         if (VideoCore::ReadCheckWrites::Enabled()) {
             VideoCore::ReadCheckWrites::Note(address, size, "a query result");
         }
