@@ -664,7 +664,7 @@ private:
     [[nodiscard]] bool ReadDownloadsCover(DAddr device_addr, u64 size) const;
 
     /// Writes the read downloads up to `tick` to guest memory, oldest first (`mutex` held, the
-    /// host GPU past `tick`). `landed_by`: who does, for the verify mode's lines.
+    /// host GPU past `tick`). `landed_by`: who does, for the read check's lines.
     void WriteReadDownloads(
         u64 tick,
         VideoCore::AsyncReadback::Landing landed_by = VideoCore::AsyncReadback::Landing::Completed);
@@ -677,7 +677,7 @@ private:
     bool WriteFinishedReadDownloads(DAddr device_addr, u64 size);
 
     /// Records a read download of the GPU-modified bytes over `ranges` that no read download
-    /// brings yet. `own`: the bytes the read itself asked for (the verify mode compares them).
+    /// brings yet. `own`: the bytes the read itself asked for (the read check compares them).
     /// A read's download is submitted at once; an early one goes with the GPU thread's next
     /// submission.
     void RecordReadDownload(std::span<const std::pair<DAddr, u64>> ranges,
@@ -899,7 +899,7 @@ private:
     PendingCpuWrites pending_cpu_writes;
     std::optional<Async_Buffer> current_buffer;
 
-    /// TEST (EDEN_NX2_ASYNC_READBACK=verify, every read download): what a synchronous flush of
+    /// EDEN_NX2_READ_CHECK (1 in n read downloads): what a synchronous flush of
     /// the read would have copied, copied again in the same submission, to compare guest memory
     /// with once the download is written.
     struct ReadCheck {
@@ -925,7 +925,7 @@ private:
         Common::RangeSet<DAddr> own;
     };
     struct ReadCheckTotals {
-        u64 every{};      ///< Tests: check 1 in `every` read downloads, over the verify mode
+        u64 every{};      ///< Tests: check 1 in `every` read downloads, over EDEN_NX2_READ_CHECK
         u64 next{};       ///< Read downloads seen, for the sampling
         u64 checked{};    ///< Read downloads compared
         u64 compared{};   ///< Bytes compared
@@ -944,7 +944,7 @@ private:
     };
     ReadCheckTotals read_check{};
     static u64 ReadCheckEvery() {
-        return VideoCore::AsyncReadback::Verify() ? 1 : 0;
+        return VideoCore::AsyncReadback::ReadCheckEvery();
     }
     void CheckReadDownload(const ReadCheck& check, const Common::RangeSet<DAddr>& cpu_written,
                            VideoCore::AsyncReadback::Landing landing);
@@ -970,7 +970,7 @@ private:
         /// No longer GPU-modified once written: a newer GPU write (MarkWrittenBuffer) or value in
         /// guest memory takes its bytes out.
         Common::RangeSet<DAddr> clean_ranges;
-        std::unique_ptr<ReadCheck> check; ///< TEST: read-back verify
+        std::unique_ptr<ReadCheck> check; ///< EDEN_NX2_READ_CHECK
         /// Recorded right after a GPU write, before any read (RecordEarlyDownloads)
         bool early{};
     };
@@ -980,7 +980,7 @@ private:
     /// their way, which later reads wait for rather than download again.
     Common::RangeSet<DAddr> read_download_ranges;
 
-    /// TEST (read-back verify): the bytes early downloads brought to a page's guest memory, and
+    /// EDEN_NX2_READ_CHECK: the bytes early downloads brought to a page's guest memory, and
     /// what guest memory held there as they landed, until newer downloaded bytes or values replace
     /// them. The read they serve compares them with the GPU's bytes then: a GPU write in between
     /// that took nothing out of them shows.
@@ -989,7 +989,7 @@ private:
         std::vector<u8> as_landed; ///< The page, DEVICE_PAGESIZE bytes
     };
     std::unordered_map<DAddr, EarlyLanded> early_landed;
-    /// TEST (read-back verify): an upload sends guest memory's bytes to the buffer. Where they
+    /// EDEN_NX2_READ_CHECK: an upload sends guest memory's bytes to the buffer. Where they
     /// are no longer what an early download landed, the guest wrote there since, and landed bytes
     /// are no longer GPU-modified, so that write may never have reached WriteMemory. The buffer
     /// then holds it while guest memory may hold the landed value again: no read compares those
@@ -1031,10 +1031,6 @@ private:
     /// flush on demand.
     static constexpr u64 EarlyBytesPerFrame = 1_MiB;
     static constexpr u32 MaxPendingEarlyDownloads = 32;
-    /// Only with EDEN_NX2_ASYNC_READBACK: the old path flushes every read on demand.
-    static bool EarlyDownloadsEnabled() {
-        return VideoCore::AsyncReadback::Enabled();
-    }
     std::vector<ReadBackPage> read_back_pages; ///< Sorted by page
     /// Pages to download once the work writing them is recorded.
     boost::container::small_vector<DAddr, 8> early_pages;

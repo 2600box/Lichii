@@ -235,14 +235,13 @@ u32 RandomArgument(std::mt19937& rng, u32 method, const Maxwell3D& engine) {
     return rng() % 64;
 }
 
-/// EDEN_NX2_ASYNC_READBACK's mode for a test, restored after it.
-struct ReadbackModeScope {
-    explicit ReadbackModeScope(VideoCore::AsyncReadback::Mode mode)
-        : previous{VideoCore::AsyncReadback::g_mode.exchange(mode)} {}
-    ~ReadbackModeScope() {
-        VideoCore::AsyncReadback::g_mode = previous;
+/// EDEN_NX2_DMA_READ_VERIFY for a test, restored after it.
+struct DmaReadVerifyScope {
+    DmaReadVerifyScope() : previous{VideoCore::AsyncReadback::g_dma_read_verify.exchange(true)} {}
+    ~DmaReadVerifyScope() {
+        VideoCore::AsyncReadback::g_dma_read_verify = previous;
     }
-    VideoCore::AsyncReadback::Mode previous;
+    bool previous;
 };
 
 /// A Turing MME instruction that sends the next macro parameter to `method` (as in
@@ -1048,9 +1047,7 @@ TEST_CASE("Split macro DMA reads wait only for the queued work that can write th
           "[video_core][gpu_split_dependencies]") {
     using Access = VideoCommon::GpuSplitTestAccess;
     using Writes = VideoCommon::GpuSplit::Writes;
-    using VideoCore::AsyncReadback::Mode;
     auto& counters = VideoCore::AsyncReadback::g_counters;
-    const ReadbackModeScope readback{Mode::On};
     // No per-second report resets the counters while the test reads them.
     counters.window_start = VideoCore::AsyncReadback::Now();
     Fixture f;
@@ -1119,7 +1116,7 @@ TEST_CASE("Split macro DMA reads wait only for the queued work that can write th
     SCOPE_EXIT {
         split.Stop();
     };
-    std::array<std::atomic<bool>, 5> release{};
+    std::array<std::atomic<bool>, 4> release{};
     std::atomic<bool> done{};
     std::thread reader;
     SCOPE_EXIT {
@@ -1241,27 +1238,13 @@ TEST_CASE("Split macro DMA reads wait only for the queued work that can write th
     split.Drain(VideoCommon::DrainSite::Other);
     CHECK(engine.regs.reg_array[state] == 0x33333333);
 
-    // Without EDEN_NX2_ASYNC_READBACK every read drains the split, as before: queued work that
-    // writes nothing holds it back.
+    // With EDEN_NX2_DMA_READ_VERIFY, a read that needn't drain drains anyway to compare its words.
     {
-        const ReadbackModeScope off{Mode::Off};
+        const DmaReadVerifyScope verify;
         blocking(release[3], Writes::Noted);
         read_on_reader(other);
         REQUIRE(waits());
         release[3] = true;
-        REQUIRE(finishes());
-        reader.join();
-        split.Drain(VideoCommon::DrainSite::Other);
-        CHECK(engine.regs.reg_array[state] == 0x33333333);
-    }
-
-    // With =verify, a read that needn't drain drains anyway to compare its words.
-    {
-        const ReadbackModeScope verify{Mode::Verify};
-        blocking(release[4], Writes::Noted);
-        read_on_reader(other);
-        REQUIRE(waits());
-        release[4] = true;
         REQUIRE(finishes());
         reader.join();
         split.Drain(VideoCommon::DrainSite::Other);

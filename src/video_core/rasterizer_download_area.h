@@ -111,13 +111,13 @@ private:
     static inline DownloadLandingState state;
 };
 
-/// TEST (read-back verify): the latest writes from the GPU's side that ReadDownloadsMayCover
+/// EDEN_NX2_READ_CHECK: the latest writes from the GPU's side that ReadDownloadsMayCover
 /// let through, to name the writer when the check finds newer bytes where an earlier read's
 /// download landed.
 class ReadCheckWrites {
 public:
     [[nodiscard]] static bool Enabled() {
-        return AsyncReadback::Verify();
+        return AsyncReadback::ReadCheckEvery() != 0;
     }
 
     static void Note(DAddr addr, u64 size, const char* writer) {

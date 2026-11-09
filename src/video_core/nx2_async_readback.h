@@ -12,50 +12,48 @@
 #include "common/common_types.h"
 #include "common/logging.h"
 
-// EDEN_NX2_ASYNC_READBACK: how a guest CPU read of GPU-written buffer memory gets its bytes
-// (GPU::OnCPURead), and how long a macro DMA read on the split's front waits for its back
-// (Maxwell3D::FrontDmaRead).
-// - unset or 0: the GPU thread downloads them and waits for the host GPU (Scheduler::Finish).
-//   Macro DMA reads drain the split.
-// - 1: the GPU thread submits the downloads and goes on. The reading thread waits for that
-//   submission and writes the bytes to guest memory (BufferCache::FinishReadDownloads). Pages
-//   the guest reads after each GPU write get their download right behind the write. Macro DMA
-//   reads wait only for the queued work that can write their words (GpuSplit::WaitForWrites).
-// - verify: 1, and every read download is compared with a synchronous flush's copy taken at the
-//   same point of the GPU's work (BufferCache::CheckReadDownload); every macro DMA read made
-//   without draining the split drains it too and is compared (CheckDmaRead).
+// Async read-back: a guest CPU read of GPU-written buffer memory (GPU::OnCPURead) has the GPU
+// thread submit the downloads and go on. The reading thread waits for that submission and writes
+// the bytes to guest memory (BufferCache::FinishReadDownloads). Pages the guest reads after each
+// GPU write get their download right behind the write. A macro DMA read on the split's front
+// waits only for the queued work that can write its words (Maxwell3D::FrontDmaRead,
+// GpuSplit::WaitForWrites).
+//
+// Diagnostics, off unless set:
+// - EDEN_NX2_READ_CHECK=n: 1 in n read downloads (1 checks them all) is compared with a
+//   synchronous flush's copy taken at the same point of the GPU's work
+//   (BufferCache::CheckReadDownload).
+// - EDEN_NX2_DMA_READ_VERIFY: every macro DMA read made without draining the split drains it
+//   too and is compared (CheckDmaRead).
 namespace VideoCore::AsyncReadback {
 
-enum class Mode : u8 { Off, On, Verify };
-
-[[nodiscard]] inline Mode ParseMode(const char* value) {
-    if (value == nullptr || value[0] == '\0' || std::strcmp(value, "0") == 0) {
-        return Mode::Off;
-    }
-    return std::strcmp(value, "verify") == 0 ? Mode::Verify : Mode::On;
+/// EDEN_NX2_READ_CHECK's value: unset, 0 or not a number checks none.
+[[nodiscard]] inline u64 ParseReadCheck(const char* value) {
+    return value == nullptr ? 0 : static_cast<u64>(std::strtoull(value, nullptr, 10));
 }
 
-inline std::atomic<Mode> g_mode{ParseMode(std::getenv("EDEN_NX2_ASYNC_READBACK"))};
+inline std::atomic<u64> g_read_check_every{ParseReadCheck(std::getenv("EDEN_NX2_READ_CHECK"))};
+inline std::atomic<bool> g_dma_read_verify{std::getenv("EDEN_NX2_DMA_READ_VERIFY") != nullptr};
 
 /// Called by VideoCore::CreateGPU: static initialization runs before the frontend loads
 /// nx2_switches.txt, so a switch set only there takes effect from that point on.
 inline void ReadSwitch() {
-    g_mode.store(ParseMode(std::getenv("EDEN_NX2_ASYNC_READBACK")), std::memory_order_relaxed);
+    g_read_check_every.store(ParseReadCheck(std::getenv("EDEN_NX2_READ_CHECK")),
+                             std::memory_order_relaxed);
+    g_dma_read_verify.store(std::getenv("EDEN_NX2_DMA_READ_VERIFY") != nullptr,
+                            std::memory_order_relaxed);
 }
 
-[[nodiscard]] inline Mode GetMode() {
-    return g_mode.load(std::memory_order_relaxed);
+/// EDEN_NX2_READ_CHECK: check 1 in this many read downloads, 0 for none.
+[[nodiscard]] inline u64 ReadCheckEvery() {
+    return g_read_check_every.load(std::memory_order_relaxed);
 }
 
-[[nodiscard]] inline bool Enabled() {
-    return GetMode() != Mode::Off;
+[[nodiscard]] inline bool DmaReadVerify() {
+    return g_dma_read_verify.load(std::memory_order_relaxed);
 }
 
-[[nodiscard]] inline bool Verify() {
-    return GetMode() == Mode::Verify;
-}
-
-/// Who wrote a read download to guest memory, named by the verify mode's mismatch lines.
+/// Who wrote a read download to guest memory, named by the read check's mismatch lines.
 enum class Landing : u8 {
     Reader,       ///< The guest thread whose read waited for it (GPU::OnCPURead)
     GpuSideWrite, ///< A write to guest memory from the GPU's side over its bytes
@@ -79,13 +77,12 @@ inline thread_local bool t_reading{};
 }
 
 enum class Read : u8 {
-    Sync,     ///< The GPU thread downloaded and waited for the host GPU (unset)
     Async,    ///< The GPU thread submitted the downloads, the reading thread waited for them
     InFlight, ///< An earlier read's or an early download covered it: no flush, only the wait
     Count,
 };
 
-/// Totals for the per-second line, from every thread.
+/// Totals for the per-second line (EDEN_NX2_GPU_PROFILE), from every thread.
 struct Counters {
     std::array<std::atomic<u64>, static_cast<size_t>(Read::Count)> reads{};
     /// From the read's request to its bytes in guest memory
@@ -100,7 +97,7 @@ struct Counters {
     std::atomic<u64> gpu_side_waits{};
     std::atomic<u64> gpu_side_wait_ns{};
     /// Macro DMA reads on the split's front (Maxwell3D::FrontDmaRead), those that waited for its
-    /// back (every one without the switch) and those that drained it, and the time they waited
+    /// back and those that drained it, and the time they waited
     std::atomic<u64> dma_reads{};
     std::atomic<u64> dma_waited{};
     std::atomic<u64> dma_drained{};
@@ -178,19 +175,16 @@ inline void MaybeReport() {
     const u64 dma_waited = take(c.dma_waited);
     const u64 dma_drained = take(c.dma_drained);
     const u64 dma_wait_ns = take(c.dma_wait_ns);
-    constexpr auto sync = static_cast<size_t>(Read::Sync);
     constexpr auto async = static_cast<size_t>(Read::Async);
     constexpr auto in_flight = static_cast<size_t>(Read::InFlight);
-    static constexpr std::array<const char*, 3> mode_names{"unset", "1", "verify"};
     LOG_INFO(HW_GPU,
-             "Async read-back (EDEN_NX2_ASYNC_READBACK={}) per second: reads {:.0f} synchronous "
-             "({:.1f} ms), {:.0f} async ({:.1f} ms), {:.0f} only waited for a download on its way "
-             "({:.1f} ms) | GPU thread in read flushes {:.1f} ms | readers waited on their fence "
+             "Async read-back per second: reads {:.0f} async ({:.1f} ms), {:.0f} only waited for a "
+             "download on its way ({:.1f} ms) | GPU thread in read flushes {:.1f} ms | readers "
+             "waited on their fence "
              "{:.0f} times, {:.1f} ms (longest {:.2f} ms) | GPU-side writes fell back to a host "
              "GPU wait {:.0f} times, {:.1f} ms | macro DMA reads {:.0f}, {:.0f} waited for the "
              "split's back ({:.1f} ms), {:.0f} drained it",
-             mode_names[static_cast<size_t>(GetMode())], per_second(reads[sync]),
-             ms_per_second(read_ns[sync]), per_second(reads[async]), ms_per_second(read_ns[async]),
+             per_second(reads[async]), ms_per_second(read_ns[async]),
              per_second(reads[in_flight]), ms_per_second(read_ns[in_flight]),
              ms_per_second(flush_ns), per_second(reader_waits), ms_per_second(reader_wait_ns),
              static_cast<double>(reader_max_wait_ns) / 1e6, per_second(gpu_side_waits),

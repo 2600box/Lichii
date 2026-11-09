@@ -1209,7 +1209,7 @@ void CheckDmaRead(u32 macro, GPUVAddr source, bool drained, bool waited,
     }
     last_report = now;
     LOG_INFO(HW_GPU,
-             "Macro DMA read checks (EDEN_NX2_ASYNC_READBACK=verify) in {:.1f} s: {} reads, {} "
+             "Macro DMA read checks (EDEN_NX2_DMA_READ_VERIFY) in {:.1f} s: {} reads, {} "
              "without draining the split ({} waited for queued writers), {} of those with other "
              "words than after a drain ({} in all)",
              seconds, reads, undrained_reads, waits, differences, total_differences);
@@ -1633,10 +1633,6 @@ bool Maxwell3D::FrontSkipsLoopWrite(FrontState& fs, u32 method, u32 value, bool 
 // barriers, counter resets, the WFI's host query copies, shadow RAM and macro code.
 void Maxwell3D::FrontNoteWrites(VideoCommon::GpuSplit& split, const FrontState& fs, u32 method,
                                 u32 amount) {
-    // Only the narrower wait reads them (EDEN_NX2_ASYNC_READBACK); without it every read drains.
-    if (!VideoCore::AsyncReadback::Enabled()) {
-        return;
-    }
     constexpr u32 cb_data = MAXWELL3D_REG_INDEX(const_buffer.buffer);
     const auto address = [&fs](u32 high) {
         return (GPUVAddr{fs.regs[high]} << 32) | fs.regs[high + 1];
@@ -1745,30 +1741,25 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
             VideoCommon::DrainSite::MacroDmaFlush);
     };
     namespace AsyncReadback = VideoCore::AsyncReadback;
-    const bool counted = AsyncReadback::Enabled() || VideoCommon::Nx2Profile::Enabled();
-    const u64 wait_start = counted ? AsyncReadback::Now() : 0;
-    bool waited = true;
-    bool drained = true;
-    if (AsyncReadback::Enabled()) {
-        // Only the work still queued that can write the words has to run first (FrontNoteWrites,
-        // GpuSplit::WaitForWrites). Past it no entry can make them GPU-written or add reports
-        // there, so the caches have nothing to write out unless they already hold it now.
-        waited = split.WaitForWrites(memory_manager, source, read_bytes);
-        drained =
-            memory_manager.IsMemoryDirty(source, read_bytes, VideoCommon::CacheType::BufferCache) ||
-            VideoCommon::QueryDma::HoldsReports(memory_manager, *rasterizer, source, read_bytes);
-    }
+    const u64 wait_start = AsyncReadback::Now();
+    // Only the work still queued that can write the words has to run first (FrontNoteWrites,
+    // GpuSplit::WaitForWrites). Past it no entry can make them GPU-written or add reports there,
+    // so the caches have nothing to write out unless they already hold it now.
+    const bool waited = split.WaitForWrites(memory_manager, source, read_bytes);
+    const bool drained =
+        memory_manager.IsMemoryDirty(source, read_bytes, VideoCommon::CacheType::BufferCache) ||
+        VideoCommon::QueryDma::HoldsReports(memory_manager, *rasterizer, source, read_bytes);
     if (drained) {
         write_out();
     }
-    if (counted) {
-        AsyncReadback::CountDmaRead(waited || drained, drained, AsyncReadback::Now() - wait_start);
+    AsyncReadback::CountDmaRead(waited || drained, drained, AsyncReadback::Now() - wait_start);
+    if (VideoCommon::Nx2Profile::Enabled()) {
         AsyncReadback::MaybeReport();
     }
-    // EDEN_NX2_ASYNC_READBACK=verify: a read made without draining the split drains it anyway and
-    // has the caches write the words out, as every read does without the switch, and the macro
-    // gets those words. CheckDmaRead counts the reads whose words differ from the ones read first.
-    const bool verify = AsyncReadback::Verify();
+    // EDEN_NX2_DMA_READ_VERIFY: a read made without draining the split drains it anyway and has
+    // the caches write the words out, as a full drain would, and the macro gets those words.
+    // CheckDmaRead counts the reads whose words differ from the ones read first.
+    const bool verify = AsyncReadback::DmaReadVerify();
     std::vector<u32> undrained;
     std::vector<u32> checked;
     if (verify) [[unlikely]] {

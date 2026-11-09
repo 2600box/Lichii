@@ -358,7 +358,7 @@ struct BufferCacheTestAccess {
     static size_t ReadDownloads(Cache& cache) {
         return cache.read_downloads.size();
     }
-    /// TEST (read-back verify): every read download compared with a synchronous flush.
+    /// Every read download compared with a synchronous flush (EDEN_NX2_READ_CHECK=1).
     static void CheckEveryRead(Cache& cache) {
         cache.read_check.every = 1;
     }
@@ -373,20 +373,18 @@ namespace {
 
 using Access = VideoCommon::BufferCacheTestAccess;
 
-/// EDEN_NX2_ASYNC_READBACK's mode for a test, restored after it.
-struct ReadbackModeScope {
-    explicit ReadbackModeScope(VideoCore::AsyncReadback::Mode mode)
-        : previous{VideoCore::AsyncReadback::g_mode.exchange(mode)} {}
-    ~ReadbackModeScope() {
-        VideoCore::AsyncReadback::g_mode = previous;
+/// EDEN_NX2_READ_CHECK for a test, restored after it.
+struct ReadCheckScope {
+    explicit ReadCheckScope(u64 every)
+        : previous{VideoCore::AsyncReadback::g_read_check_every.exchange(every)} {}
+    ~ReadCheckScope() {
+        VideoCore::AsyncReadback::g_read_check_every = previous;
     }
-    VideoCore::AsyncReadback::Mode previous;
+    u64 previous;
 };
 
 template <class R, class C>
 struct BasicFixture {
-    /// The read download tests run the async path's buffer cache side.
-    ReadbackModeScope readback_mode{VideoCore::AsyncReadback::Mode::On};
     ScopedSystemTestContext context;
     Core::System system;
     Core::DeviceMemory physical;
@@ -2007,35 +2005,19 @@ TEST_CASE("Read download check leaves out early downloaded bytes an upload repla
     REQUIRE(Access::ReadChecks(*f.cache).uncovered == 0);
 }
 
-TEST_CASE("EDEN_NX2_ASYNC_READBACK values select the read-back mode", "[buffer_ports]") {
-    using VideoCore::AsyncReadback::Mode;
-    using VideoCore::AsyncReadback::ParseMode;
-    REQUIRE(ParseMode(nullptr) == Mode::Off);
-    REQUIRE(ParseMode("") == Mode::Off);
-    REQUIRE(ParseMode("0") == Mode::Off);
-    REQUIRE(ParseMode("1") == Mode::On);
-    REQUIRE(ParseMode("verify") == Mode::Verify);
-}
-
-TEST_CASE("Without async read-back, pages read after each GPU write get no early downloads",
+TEST_CASE("EDEN_NX2_READ_CHECK values select how many read downloads are checked",
           "[buffer_ports]") {
-    Fixture f;
-    const ReadbackModeScope off{VideoCore::AsyncReadback::Mode::Off};
-    const Nx2TitleScope nx2_title;
-    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
-    for (u8 frame = 1; frame <= 3; ++frame) {
-        WriteByDispatch(f, id, 0x20000, 0x100, frame);
-        REQUIRE(f.runtime.queued_host_reads == 0);
-        ReadWord(f, 0x20010);
-        REQUIRE(f.bytes[0x10010] == frame);
-    }
-    REQUIRE(Access::ReadDownloads(*f.cache) == 0);
-    REQUIRE(Access::ReadChecks(*f.cache).checked == 0);
+    using VideoCore::AsyncReadback::ParseReadCheck;
+    REQUIRE(ParseReadCheck(nullptr) == 0);
+    REQUIRE(ParseReadCheck("") == 0);
+    REQUIRE(ParseReadCheck("0") == 0);
+    REQUIRE(ParseReadCheck("1") == 1);
+    REQUIRE(ParseReadCheck("16") == 16);
 }
 
-TEST_CASE("Async read-back verify compares every read download", "[buffer_ports]") {
+TEST_CASE("EDEN_NX2_READ_CHECK=1 compares every read download", "[buffer_ports]") {
     Fixture f;
-    const ReadbackModeScope verify{VideoCore::AsyncReadback::Mode::Verify};
+    const ReadCheckScope check{1};
     const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
     std::ranges::fill(Access::Get(*f.cache, id).bytes, 0x12);
     for (u32 read = 1; read <= 3; ++read) {
@@ -2080,11 +2062,11 @@ u64 MismatchedBy(Fixture& f, VideoCore::AsyncReadback::Landing landing) {
 }
 } // namespace
 
-TEST_CASE("Async read-back verify names who wrote a differing download to guest memory",
+TEST_CASE("The read check names who wrote a differing download to guest memory",
           "[buffer_ports]") {
     using VideoCore::AsyncReadback::Landing;
     Fixture f;
-    const ReadbackModeScope verify{VideoCore::AsyncReadback::Mode::Verify};
+    const ReadCheckScope check{1};
     OutdatedReadDownloads(f);
     SECTION("the reading thread") {
         const ReadingThreadScope reading;
