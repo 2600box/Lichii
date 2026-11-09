@@ -401,8 +401,9 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
         const auto properties = g_nx2_ampere && (regs.semaphore_trigger & (1U << 24)) != 0
                                     ? VideoCommon::QueryPropertiesFlags::IsAFence
                                     : VideoCommon::QueryPropertiesFlags::HasTimeout;
-        const GPUVAddr mirror = g_nx2_ampere && VideoCommon::Nx2AcquireTest::g_mirror
-                                    ? Nx2SemaphoreMirror(sequence_address) : 0;
+        const GPUVAddr target = g_nx2_ampere ? Nx2SemaphoreMirror(sequence_address) : 0;
+        VideoCommon::Nx2AcquireTest::Stats::Get().MirrorTarget(target);
+        const GPUVAddr mirror = VideoCommon::Nx2AcquireTest::g_mirror ? target : 0;
         if (mirror != 0) {
             VideoCommon::Nx2AcquireTest::Stats::Get().Mirrored();
             LOG_DEBUG(HW_GPU, "Switch 2 semaphore {:#x}={:#x} mirrored to {:#x}", sequence_address, payload, mirror);
@@ -410,8 +411,10 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
         OnBack([rasterizer = dma_pusher.rasterizer, sequence_address, mirror, properties, payload] {
             rasterizer->Query(sequence_address, VideoCommon::QueryType::Payload, properties, payload, 0);
             if (mirror != 0) {
+                VideoCommon::Nx2AcquireTest::t_mirrored_query = true;
                 rasterizer->Query(mirror, VideoCommon::QueryType::Payload,
                                   properties | VideoCommon::QueryPropertiesFlags::Nx2Mirror, payload, 0);
+                VideoCommon::Nx2AcquireTest::t_mirrored_query = false;
             }
         });
         NoteRelease(dma_pusher, sequence_address, payload,

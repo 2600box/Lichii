@@ -11,6 +11,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <mutex>
+#include <unordered_set>
 
 #include "common/common_types.h"
 #include "common/logging.h"
@@ -39,6 +41,9 @@ inline bool InFirstPage(u64 address) {
     return false;
 }
 
+/// Set by the puller around its mirrored Query, so the report hook can tell mirrored writes apart.
+inline thread_local bool t_mirrored_query = false;
+
 inline u32 RegisteredRegions() {
     u32 count = 0;
     for (const auto& region : Tegra::g_nx2_semaphore_regions) {
@@ -54,10 +59,26 @@ public:
         static Stats instance;
         return instance;
     }
-    /// Any report or semaphore write into a first page, mirrored ones included.
+    /// A report or semaphore write that is not the mirror's. A direct write into a first-page word
+    /// the mirror also targets is the collision of the #979 review (jpasqui f8941169650).
     void FirstPageWrite(u64 address) {
-        if (g_stats && InFirstPage(address)) {
-            first_page_writes.fetch_add(1, std::memory_order_relaxed);
+        if (!g_stats || t_mirrored_query || !InFirstPage(address)) {
+            return;
+        }
+        first_page_writes.fetch_add(1, std::memory_order_relaxed);
+        std::scoped_lock lock{words_mutex};
+        if (direct_words.size() < 4096) {
+            direct_words.insert(address & ~u64{3});
+        }
+    }
+    /// A second-page release whose first-page word the mirror writes (or would, with it off).
+    void MirrorTarget(u64 address) {
+        if (!g_stats || address == 0) {
+            return;
+        }
+        std::scoped_lock lock{words_mutex};
+        if (mirror_words.size() < 4096) {
+            mirror_words.insert(address & ~u64{3});
         }
     }
     void Mirrored() {
@@ -115,8 +136,21 @@ public:
                  b[0], b[1], b[2], b[3], b[4], b[5],
                  total_us.exchange(0, std::memory_order_relaxed) / 1000,
                  max_us.exchange(0, std::memory_order_relaxed) / 1000);
+        u64 shared_words = 0;
+        size_t direct_count = 0, mirror_count = 0;
+        {
+            std::scoped_lock lock{words_mutex};
+            for (const u64 word : direct_words) {
+                shared_words += mirror_words.contains(word) ? 1 : 0;
+            }
+            direct_count = direct_words.size();
+            mirror_count = mirror_words.size();
+        }
         LOG_INFO(HW_GPU,
-                 "EGLA94 mirror {}: mirrored releases {}, first-page writes {}, regions {}, "
+                 "EGLA94 words since boot: first-page direct {}, mirror targets {}, both {}",
+                 direct_count, mirror_count, shared_words);
+        LOG_INFO(HW_GPU,
+                 "EGLA94 mirror {}: mirrored releases {}, first-page direct writes {}, regions {}, "
                  "first-page suspends {} (second page already met {}), first-page waits {} "
                  "total {} ms max {} ms",
                  g_mirror ? "on" : "off", mirrored.exchange(0, std::memory_order_relaxed),
@@ -134,6 +168,8 @@ private:
     std::atomic<u64> mirrored{}, first_page_writes{}, first_page_suspends{}, second_page_meets_count{};
     std::atomic<u64> first_page_waits{}, first_page_total_us{}, first_page_max_us{};
     std::atomic<s64> last_ms{};
+    std::mutex words_mutex;
+    std::unordered_set<u64> direct_words, mirror_words;
 };
 
 } // namespace VideoCommon::Nx2AcquireTest
