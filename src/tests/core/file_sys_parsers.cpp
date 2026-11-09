@@ -311,10 +311,19 @@ TEST_CASE("NCA rejects a SHA-256 block smaller than a hash", "[core][file_sys]")
     REQUIRE(nca.Open() == ResultInvalidHierarchicalSha256BlockSize);
 }
 
-TEST_CASE("NCA rejects a SHA-256 block larger than the file before allocating its cache",
+TEST_CASE("NCA with a SHA-256 block larger than the file opens without allocating it",
           "[core][file_sys]") {
     auto nca = MakeSha256Nca();
-    nca.fs.hash_data.hierarchical_sha256_data.hash_block_size = 0x40000000;
+    auto& sha = nca.fs.hash_data.hierarchical_sha256_data;
+    sha.hash_block_size = 0x10000;
+    REQUIRE(nca.Open() == ResultSuccess);
+    sha.hash_block_size = 0x40000000;
+    REQUIRE(nca.Open() == ResultSuccess);
+}
+
+TEST_CASE("NCA rejects a SHA-256 hash layer larger than one block", "[core][file_sys]") {
+    auto nca = MakeSha256Nca();
+    nca.fs.hash_data.hierarchical_sha256_data.hash_layer_region[0].size = 0x2000;
     REQUIRE(nca.Open() == ResultInvalidHierarchicalSha256BlockSize);
 }
 

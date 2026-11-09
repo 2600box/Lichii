@@ -1173,21 +1173,14 @@ Result NcaFileSystemDriver::CreateSha3Storage(
     const s64 stored_size = GetBodySize(m_reader) + GetBodySize(m_original_reader);
     R_UNLESS(hash_region.size <= stored_size, ResultNcaBaseStorageOutOfRangeC);
 
-    // The hash layer fits in one block, and the buffer below also caches two blocks, so a block
-    // larger than every stored byte can only come from a corrupt header.
     R_UNLESS(Common::IsAligned<s64>(hash_region.size, VerificationStorage::HashSize) &&
-                 hash_region.size <= hash_data.hash_block_size &&
-                 static_cast<u64>(hash_data.hash_block_size) <=
-                     std::bit_ceil(static_cast<u64>(stored_size)),
+                 hash_region.size <= hash_data.hash_block_size,
              ResultInvalidHierarchicalSha256BlockSize);
 
-    constexpr s32 CacheBlockCount = 2;
     const auto hash_buffer_size = static_cast<size_t>(hash_region.size);
-    const auto cache_buffer_size = CacheBlockCount * static_cast<size_t>(hash_data.hash_block_size);
-    const auto total_buffer_size = hash_buffer_size + cache_buffer_size;
 
     auto buffer_hold_storage = std::make_shared<MemoryResourceBufferHoldStorage>(
-        std::move(base_storage), total_buffer_size);
+        std::move(base_storage), hash_buffer_size);
     R_UNLESS(buffer_hold_storage != nullptr, ResultAllocationMemoryFailedAllocateShared);
     R_UNLESS(buffer_hold_storage->IsValid(), ResultAllocationMemoryFailedInNcaFileSystemDriverI);
 
@@ -1241,23 +1234,15 @@ Result NcaFileSystemDriver::CreateSha256Storage(
     const s64 stored_size = GetBodySize(m_reader) + GetBodySize(m_original_reader);
     R_UNLESS(hash_region.size <= stored_size, ResultNcaBaseStorageOutOfRangeC);
 
-    // The hash layer fits in one block, and the buffer below also caches two blocks, so a block
-    // larger than every stored byte can only come from a corrupt header.
     R_UNLESS(Common::IsAligned<s64>(hash_region.size, VerificationStorage::HashSize) &&
-                 hash_region.size <= hash_data.hash_block_size &&
-                 static_cast<u64>(hash_data.hash_block_size) <=
-                     std::bit_ceil(static_cast<u64>(stored_size)),
+                 hash_region.size <= hash_data.hash_block_size,
              ResultInvalidHierarchicalSha256BlockSize);
 
-    // Determine buffer sizes.
-    constexpr s32 CacheBlockCount = 2;
     const auto hash_buffer_size = static_cast<size_t>(hash_region.size);
-    const auto cache_buffer_size = CacheBlockCount * static_cast<size_t>(hash_data.hash_block_size);
-    const auto total_buffer_size = hash_buffer_size + cache_buffer_size;
 
     // Make a buffer holder storage.
     auto buffer_hold_storage = std::make_shared<MemoryResourceBufferHoldStorage>(
-        std::move(base_storage), total_buffer_size);
+        std::move(base_storage), hash_buffer_size);
     R_UNLESS(buffer_hold_storage != nullptr, ResultAllocationMemoryFailedAllocateShared);
     R_UNLESS(buffer_hold_storage->IsValid(), ResultAllocationMemoryFailedInNcaFileSystemDriverI);
 
