@@ -797,6 +797,21 @@ TEST_CASE("Uniform keep binds unwritten uniform buffers of delta draws without r
     REQUIRE(f.runtime.allocations.size() == allocations);
 }
 
+TEST_CASE("Uniform keep ends at CPU writes the caches are told about", "[buffer_ports]") {
+    KeepFixture f{nullptr};
+    const VideoCommon::Nx2FastDraw::Delta unchanged{};
+    f.Draw(nullptr);
+    f.Draw(&unchanged);
+    REQUIRE(f.Counts().kept == 1);
+    f.UboBytes()[0x20] = 7;
+    f.cache->WriteMemory(KeepFixture::Ubo + 0x20, 1);
+    f.Draw(&unchanged);
+    REQUIRE(f.Counts().kept == 1);
+    f.cache->WriteMemory(0x18000, 0x10);
+    f.Draw(&unchanged);
+    REQUIRE(f.Counts().kept == 2);
+}
+
 TEST_CASE("Uniform keep never keeps across command buffers", "[buffer_ports]") {
     KeepFixture f{nullptr};
     const VideoCommon::Nx2FastDraw::Delta unchanged{};
