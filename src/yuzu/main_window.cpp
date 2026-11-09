@@ -387,7 +387,9 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     filter.ParseFilterString(Settings::values.log_filter.GetValue());
     Common::Log::SetGlobalFilter(filter);
 
-    if (user_data_migrator.migrated) {
+    // A linked directory shares its config with the old emulator, and the old paths stay valid.
+    if (user_data_migrator.migrated &&
+        user_data_migrator.migration_strategy != MigrationWorker::MigrationStrategy::Link) {
         // The migrated config keeps the old emulator's absolute storage paths. Move the ones
         // inside its directory to the same place inside ours, and save them before anything can
         // write there.

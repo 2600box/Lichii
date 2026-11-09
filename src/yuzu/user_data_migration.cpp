@@ -119,6 +119,7 @@ void UserDataMigrator::ShowMigrationPrompt(QMainWindow* main_window) {
         static_cast<MigrationWorker::MigrationStrategy>(group->checkedId());
 
     selected_emu = button->property("emulator").value<Emulator>();
+    migration_strategy = strategy;
 
     MigrateUserData(main_window, clear_shaders->isChecked(), strategy);
 }
