@@ -1223,8 +1223,9 @@ bool Device::GetSuitability(bool requires_swapchain) {
     FOR_EACH_VK_EXTENSION(EXTENSION);
 
     // Shader cache v2's driver layer alone uses VK_KHR_pipeline_binary: without it the device is
-    // created as before.
-    if (!VideoCommon::ShaderCacheV2::Enabled()) {
+    // created as before. EDEN_NX2_PIPELINE_BINARY_OFF is a test-only switch to bisect v2 without it.
+    if (!VideoCommon::ShaderCacheV2::Enabled() ||
+        std::getenv("EDEN_NX2_PIPELINE_BINARY_OFF") != nullptr) {
         RemoveExtension(extensions.pipeline_binary, VK_KHR_PIPELINE_BINARY_EXTENSION_NAME);
     }
 
