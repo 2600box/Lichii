@@ -36,6 +36,13 @@ namespace VideoCore::AsyncReadback {
 inline std::atomic<u64> g_read_check_every{ParseReadCheck(std::getenv("EDEN_NX2_READ_CHECK"))};
 inline std::atomic<bool> g_dma_read_verify{std::getenv("EDEN_NX2_DMA_READ_VERIFY") != nullptr};
 
+/// TEST (round 5, never merges): EDEN_NX2_BACK_MACROS=1 runs the macros that read memory on the
+/// split's back (Maxwell3D::FrontRunOnBack); unset or anything else keeps them on the front.
+[[nodiscard]] inline bool ParseBackMacros(const char* value) {
+    return value != nullptr && value[0] == '1';
+}
+inline std::atomic<bool> g_back_macros{ParseBackMacros(std::getenv("EDEN_NX2_BACK_MACROS"))};
+
 /// Called by VideoCore::CreateGPU: static initialization runs before the frontend loads
 /// nx2_switches.txt, so a switch set only there takes effect from that point on.
 inline void ReadSwitch() {
@@ -43,11 +50,17 @@ inline void ReadSwitch() {
                              std::memory_order_relaxed);
     g_dma_read_verify.store(std::getenv("EDEN_NX2_DMA_READ_VERIFY") != nullptr,
                             std::memory_order_relaxed);
+    g_back_macros.store(ParseBackMacros(std::getenv("EDEN_NX2_BACK_MACROS")),
+                        std::memory_order_relaxed);
 }
 
 /// EDEN_NX2_READ_CHECK: check 1 in this many read downloads, 0 for none.
 [[nodiscard]] inline u64 ReadCheckEvery() {
     return g_read_check_every.load(std::memory_order_relaxed);
+}
+
+[[nodiscard]] inline bool BackMacros() {
+    return g_back_macros.load(std::memory_order_relaxed);
 }
 
 [[nodiscard]] inline bool DmaReadVerify() {
@@ -235,8 +248,9 @@ inline void MaybeReport() {
     constexpr auto async = static_cast<size_t>(Read::Async);
     constexpr auto in_flight = static_cast<size_t>(Read::InFlight);
     LOG_INFO(HW_GPU,
-             "Async read-back per second: reads {:.0f} async ({:.1f} ms), {:.0f} only waited for a "
-             "download on its way ({:.1f} ms) | GPU thread in read flushes {:.1f} ms | readers "
+             "Async read-back (EDEN_NX2_BACK_MACROS={}) per second: reads {:.0f} async "
+             "({:.1f} ms), {:.0f} only waited for a download on its way ({:.1f} ms) | GPU thread "
+             "in read flushes {:.1f} ms | readers "
              "waited on their fence "
              "{:.0f} times, {:.1f} ms (longest {:.2f} ms) | GPU-side writes fell back to a host "
              "GPU wait {:.0f} times, {:.1f} ms | macro DMA reads {:.0f}, {:.0f} waited for the "
@@ -245,8 +259,9 @@ inline void MaybeReport() {
              "({:.1f} ms) | split's back ran {:.0f} macros that read memory ({:.1f} ms), their DMA "
              "reads {:.0f}, {:.0f} flushed GPU-modified words ({:.1f} ms writing caches out) | "
              "front waited for them {:.0f} times ({:.1f} ms)",
-             per_second(reads[async]), ms_per_second(read_ns[async]),
-             per_second(reads[in_flight]), ms_per_second(read_ns[in_flight]),
+             BackMacros() ? "1" : "unset", per_second(reads[async]),
+             ms_per_second(read_ns[async]), per_second(reads[in_flight]),
+             ms_per_second(read_ns[in_flight]),
              ms_per_second(flush_ns), per_second(reader_waits), ms_per_second(reader_wait_ns),
              static_cast<double>(reader_max_wait_ns) / 1e6, per_second(gpu_side_waits),
              ms_per_second(gpu_side_wait_ns), per_second(dma_reads), per_second(dma_waited),

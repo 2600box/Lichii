@@ -245,6 +245,15 @@ struct DmaReadVerifyScope {
     bool previous;
 };
 
+/// EDEN_NX2_BACK_MACROS=1 for a test, restored after it.
+struct BackMacrosScope {
+    BackMacrosScope() : previous{VideoCore::AsyncReadback::g_back_macros.exchange(true)} {}
+    ~BackMacrosScope() {
+        VideoCore::AsyncReadback::g_back_macros = previous;
+    }
+    bool previous;
+};
+
 /// A Turing MME instruction from its fields (TuringMacroInterpreter::Decode); a lane left alone
 /// adds the zero register to itself.
 struct Mme {
@@ -1144,6 +1153,7 @@ TEST_CASE("Split macro DMA reads wait only for the queued work that can write th
           "[video_core][gpu_split_dependencies]") {
     using Access = VideoCommon::GpuSplitTestAccess;
     using Writes = VideoCommon::GpuSplit::Writes;
+    const BackMacrosScope back_macros;
     auto& counters = VideoCore::AsyncReadback::g_counters;
     // No per-second report resets the counters while the test reads them.
     counters.window_start = VideoCore::AsyncReadback::Now();

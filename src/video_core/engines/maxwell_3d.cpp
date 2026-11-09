@@ -1685,7 +1685,7 @@ bool Maxwell3D::FrontRunOnBack(Core::System& system, VideoCommon::GpuSplit& spli
                                const MacroEngine& engine, u32 start) {
     using DrainSite = VideoCommon::DrainSite;
     using BackMacro = FrontState::BackMacro;
-    if (fs.parameters.size() > 0x1000) {
+    if (!VideoCore::AsyncReadback::BackMacros() || fs.parameters.size() > 0x1000) {
         return false;
     }
     // A macro the back ran wrote another register: the front's copies may be stale anywhere. It
