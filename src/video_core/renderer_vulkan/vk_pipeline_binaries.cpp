@@ -273,6 +273,9 @@ vk::Pipeline PipelineBinaries::Create(const CreateInfo& ci, VkPipelineCache cach
         store.Reject(kind, key);
         StutterTrace::CountDriverBuild(StutterTrace::DriverBuild::Rejected);
     }
+    if (store.Full()) {
+        return CreateNormally(logical, ci, cache);
+    }
 
     const VkPipelineCreateFlags2CreateInfoKHR capture_flags{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO_KHR,

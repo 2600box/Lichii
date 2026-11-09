@@ -457,3 +457,40 @@ TEST_CASE("Shader cache v2: a compaction limit keeps the lowest ranks, then the 
     }
     REQUIRE(keys == std::vector<u64>{1, 3, 7, 8, 9});
 }
+
+TEST_CASE("Shader cache v2 driver blobs: a session stores nothing past the ceiling",
+          "[video_core][shader_cache_v2]") {
+    TempDir temp;
+    const auto file = temp.path / V2::DriverFileName;
+    const auto payload = [](u64 index) {
+        V2::PipelineBinaries binaries = TestBinaries(index, 4000);
+        binaries.binaries.resize(1);
+        return V2::EncodeBinaries(binaries);
+    };
+    const u64 record = V2::RecordSize(payload(0).size());
+    const u64 identity =
+        V2::FileHeaderSize + V2::RecordSize(V2::EncodeIdentity(TestIdentity()).size());
+    const V2::DriverBlobOptions options{.max_bytes = record * 4,
+                                        .target_bytes = record * 3,
+                                        .min_dead_bytes = ~u64{0},
+                                        .ceiling_bytes = identity + record * 5,
+                                        .writer = FastWriter};
+    {
+        V2::DriverBlobStore store{file, TestIdentity(), options};
+        for (u64 i = 0; i < 4; ++i) {
+            store.Store(RecordKind::GraphicsBinary, i, payload(i));
+        }
+        REQUIRE_FALSE(store.Full());
+        for (u64 i = 4; i < 10; ++i) {
+            store.Store(RecordKind::GraphicsBinary, i, payload(i));
+        }
+        REQUIRE(store.Full());
+        REQUIRE(store.Counts().written == 5);
+    }
+    // Closing compacts it back under the cap
+    REQUIRE(std::filesystem::file_size(file) <= options.target_bytes + 4096);
+    V2::DriverBlobStore store{file, TestIdentity(), options};
+    REQUIRE_FALSE(store.Full());
+    REQUIRE(store.Counts().loaded > 0);
+    REQUIRE_FALSE(store.Find(RecordKind::GraphicsBinary, 5).has_value());
+}

@@ -200,7 +200,7 @@ void DriverBlobStore::Reject(RecordKind kind, u64 key) {
 
 void DriverBlobStore::Store(RecordKind kind, u64 key, std::span<const u8> payload) {
     std::scoped_lock lock{mutex};
-    if (!writer || closed) {
+    if (!writer || closed || file_bytes + RecordSize(payload.size()) > options.ceiling_bytes) {
         return;
     }
     const auto [it, inserted] = index.try_emplace({kind, key});
@@ -217,6 +217,11 @@ void DriverBlobStore::Store(RecordKind kind, u64 key, std::span<const u8> payloa
     written_bytes.fetch_add(RecordSize(payload.size()), std::memory_order_relaxed);
     // Under the lock, so that Close never ends the writer under it
     writer->Append(kind, key, payload);
+}
+
+bool DriverBlobStore::Full() const {
+    std::scoped_lock lock{mutex};
+    return file_bytes >= options.ceiling_bytes;
 }
 
 DriverBlobCounts DriverBlobStore::Counts() const {

@@ -68,6 +68,9 @@ struct DriverBlobOptions {
     u64 target_bytes{384ULL << 20};
     /// It also compacts when dead records take this much and a quarter of the file
     u64 min_dead_bytes{64ULL << 20};
+    /// No blob is stored in a session once the file would take more than this, dead records
+    /// included (Full); closing then brings it back under max_bytes
+    u64 ceiling_bytes{1ULL << 30};
     WriterOptions writer{};
 };
 
@@ -122,6 +125,9 @@ public:
     /// Queues the payload of a pipeline for the file, replacing a stored one. A pipeline stored in
     /// this session isn't stored again.
     void Store(RecordKind kind, u64 key, std::span<const u8> payload);
+
+    /// The file has reached ceiling_bytes: nothing more is stored this session.
+    [[nodiscard]] bool Full() const;
 
     [[nodiscard]] DriverBlobCounts Counts() const;
 
