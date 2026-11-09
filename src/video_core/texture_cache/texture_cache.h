@@ -7,6 +7,7 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <numeric>
 #include <cstdlib>
 #include <limits>
@@ -2105,10 +2106,26 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
     ++images_uploaded;
     uploaded_bytes += image.guest_size_bytes;
     largest_upload = (std::max<u64>)(largest_upload, image.guest_size_bytes);
+    const auto upload_start = std::chrono::steady_clock::now();
     if (!UploadInChunks(image)) {
         auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
         UploadImageContents(image, staging);
         runtime.InsertUploadMemoryBarrier();
+    }
+    // TEST ONLY (EGLA-98): uploads over 3 ms with their shape, while the stutter trace is on.
+    if (StutterTrace::Enabled()) {
+        const double upload_ms = std::chrono::duration<double, std::milli>(
+                                     std::chrono::steady_clock::now() - upload_start)
+                                     .count();
+        if (upload_ms > 3.0) {
+            LOG_INFO(HW_GPU,
+                     "EGLA98 upload ms={:.1f} guest_bytes={} {}x{}x{} layers={} levels={} "
+                     "format={} type={} flags={:#x}",
+                     upload_ms, image.guest_size_bytes, image.info.size.width,
+                     image.info.size.height, image.info.size.depth, image.info.resources.layers,
+                     image.info.resources.levels, static_cast<u32>(image.info.format),
+                     static_cast<u32>(image.info.type), static_cast<u32>(image.flags));
+        }
     }
     // The host GPU has its own copy now and the guest rarely reads this memory again: TickFrame
     // marks it cold, so the OS pages it out before anything else when it needs RAM (title 1
@@ -3203,7 +3220,17 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
     // The copies from overlaps the GPU wrote can each write a part of it, together all of it:
     // Mario Kart World renders each layer of its shadow map and colour arrays as a target of its
     // own, then samples the array, and the upload under those copies took 13-31 ms an array.
-    if (!can_rescale && !copied_whole && new_info.num_samples == 1) {
+    // TEST ONLY (EGLA-98): EDEN_NX2_JOIN_SKIP=0 uploads as before; EDEN_NX2_JOIN_VERIFY=1 fills
+    // the first 256 skipped images with 0xA5 and counts the texels the copies leave unwritten.
+    static const bool egla98_join_skip = [] {
+        const char* const value = std::getenv("EDEN_NX2_JOIN_SKIP");
+        return value == nullptr || value[0] != '0';
+    }();
+    static const bool egla98_join_verify = std::getenv("EDEN_NX2_JOIN_VERIFY") != nullptr;
+    static u32 egla98_verifies_left = 256;
+    bool egla98_layers_whole = false;
+    bool egla98_verify = false;
+    if (egla98_join_skip && !can_rescale && !copied_whole && new_info.num_samples == 1) {
         std::vector<u8> written(
             static_cast<size_t>(new_info.resources.levels * new_info.resources.layers));
         for (const JoinCopy& copy : join_copies_to_do) {
@@ -3218,6 +3245,22 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
                                          written);
         }
         copied_whole = std::ranges::all_of(written, [](u8 whole) { return whole != 0; });
+        egla98_layers_whole = copied_whole;
+    }
+    if (egla98_layers_whole) {
+        if (StutterTrace::Enabled()) {
+            LOG_INFO(HW_GPU, "EGLA98 join skip {}x{} layers={} levels={} format={} copies={} bytes={}",
+                     new_info.size.width, new_info.size.height, new_info.resources.layers,
+                     new_info.resources.levels, static_cast<u32>(new_info.format),
+                     join_copies_to_do.size(), new_image.guest_size_bytes);
+        }
+        if (egla98_join_verify && egla98_verifies_left > 0) {
+            --egla98_verifies_left;
+            egla98_verify = true;
+            auto sentinel = runtime.UploadStagingBuffer(new_image.unswizzled_size_bytes);
+            std::ranges::fill(sentinel.mapped_span, u8{0xA5});
+            new_image.UploadMemory(sentinel, FullDownloadCopies(new_info));
+        }
     }
     if (overwritten_by_clear()) {
         // Stays CpuModified: UpdateRenderTargets' PrepareImage drops the upload only when
@@ -3275,6 +3318,30 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         DeleteImage(copy_object.id);
     }
 
+    if (egla98_verify) {
+        auto map = runtime.DownloadStagingBuffer(new_image.unswizzled_size_bytes);
+        const auto copies = FullDownloadCopies(new_info);
+        new_image.DownloadMemory(map, copies);
+        runtime.Finish();
+        const size_t block = VideoCore::Surface::BytesPerBlock(new_info.format);
+        const size_t size = (std::min)(map.mapped_span.size(),
+                                       static_cast<size_t>(new_image.unswizzled_size_bytes));
+        u64 left = 0;
+        size_t first_left = size;
+        for (size_t offset = 0; offset + block <= size; offset += block) {
+            const auto texel = map.mapped_span.subspan(offset, block);
+            if (std::ranges::all_of(texel, [](u8 byte) { return byte == 0xA5; })) {
+                first_left = (std::min)(first_left, offset);
+                ++left;
+            }
+        }
+        LOG_INFO(HW_GPU,
+                 "EGLA98 join verify {}x{} layers={} levels={} format={} texels={} "
+                 "sentinel_left={} first_left_offset={}",
+                 new_info.size.width, new_info.size.height, new_info.resources.layers,
+                 new_info.resources.levels, static_cast<u32>(new_info.format), size / block, left,
+                 first_left);
+    }
     RegisterImage(new_image_id);
     return new_image_id;
 }
