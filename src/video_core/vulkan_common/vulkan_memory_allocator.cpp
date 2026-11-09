@@ -608,7 +608,8 @@ MemoryCommit MemoryAllocator::Commit(const vk::Buffer &buffer, MemoryUsage usage
 
 #ifdef _WIN32
 namespace {
-/// The DXGI adapter of the Vulkan device (matched by LUID), or null.
+/// The DXGI adapter of the Vulkan device (matched by LUID), or null. Looked up again when the
+/// device changes (another GPU picked between sessions).
 IDXGIAdapter3* FindDxgiAdapter(const Device& device) {
     VkPhysicalDeviceIDProperties id{};
     id.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
@@ -619,6 +620,19 @@ IDXGIAdapter3* FindDxgiAdapter(const Device& device) {
     if (!id.deviceLUIDValid) {
         return nullptr;
     }
+    LUID luid{};
+    std::memcpy(&luid, id.deviceLUID, sizeof(luid));
+    static LUID cached_luid{};
+    static IDXGIAdapter3* cached{};
+    if (cached != nullptr && cached_luid.LowPart == luid.LowPart &&
+        cached_luid.HighPart == luid.HighPart) {
+        return cached;
+    }
+    if (cached != nullptr) {
+        cached->Release();
+        cached = nullptr;
+    }
+    cached_luid = luid;
     const HMODULE dxgi = LoadLibraryW(L"dxgi.dll");
     if (dxgi == nullptr) {
         return nullptr;
@@ -631,15 +645,12 @@ IDXGIAdapter3* FindDxgiAdapter(const Device& device) {
         FAILED(create(__uuidof(IDXGIFactory4), reinterpret_cast<void**>(&factory)))) {
         return nullptr;
     }
-    LUID luid{};
-    std::memcpy(&luid, id.deviceLUID, sizeof(luid));
-    IDXGIAdapter3* adapter{};
     if (FAILED(factory->EnumAdapterByLuid(luid, __uuidof(IDXGIAdapter3),
-                                          reinterpret_cast<void**>(&adapter)))) {
-        adapter = nullptr;
+                                          reinterpret_cast<void**>(&cached)))) {
+        cached = nullptr;
     }
     factory->Release();
-    return adapter;
+    return cached;
 }
 } // Anonymous namespace
 #endif
@@ -654,7 +665,7 @@ void LogMemoryTrace(const Device& device) {
 #ifdef _WIN32
     // This process's use of the card's memory (local) and of system memory for the GPU
     // (non-local: host memory types, and what the OS moved out of video memory).
-    static IDXGIAdapter3* const adapter = FindDxgiAdapter(device);
+    IDXGIAdapter3* const adapter = FindDxgiAdapter(device);
     DXGI_QUERY_VIDEO_MEMORY_INFO local{};
     DXGI_QUERY_VIDEO_MEMORY_INFO non_local{};
     if (adapter != nullptr &&

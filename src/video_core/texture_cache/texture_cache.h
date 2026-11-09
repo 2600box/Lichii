@@ -490,7 +490,10 @@ void TextureCache<P>::TickFrame() {
         }
         u64 decode_bytes{};
         for (const auto& decode : async_decodes) {
-            decode_bytes += decode->decoded_data.capacity();
+            // The worker sizes the buffer before it publishes complete.
+            if (decode->complete.load(std::memory_order_acquire)) {
+                decode_bytes += decode->decoded_data.capacity();
+            }
         }
         const u64 sentenced = std::accumulate(sentenced_image_bytes.begin(),
                                               sentenced_image_bytes.end(), gpu_sentenced_bytes);
