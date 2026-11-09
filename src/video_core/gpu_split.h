@@ -298,6 +298,7 @@ public:
     /// guest's GPU work before it is complete before the commands after it are fetched.
     void NoteSync() {
         last_sync_position = write_position;
+        synced_writer_position = last_writer_position;
     }
     /// Waits until the back executed the work sent before the last NoteSync. Returns whether any
     /// of it was still queued.
@@ -437,6 +438,7 @@ private:
     u64 write_position{};
     u64 last_writer_position{};
     u64 last_sync_position{};
+    u64 synced_writer_position{};
     struct SemaphoreWrite {
         u64 position; ///< write_position once it was sent
         u32 payload;
