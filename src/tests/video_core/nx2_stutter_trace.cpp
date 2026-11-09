@@ -184,11 +184,14 @@ TEST_CASE("StutterTrace: zones keep their own time and sites count on every thre
     const u64 creates_before = totals.site_counts[create].load();
     const u64 create_ticks_before = totals.site_ticks[create].load();
     u64 update_elapsed{};
-    std::thread{[&update_elapsed] {
+    size_t open_zone{};
+    std::thread{[&update_elapsed, &open_zone] {
         const StutterTrace::ThreadScope named{Thread::Back};
         const u64 start = Nx2Profile::Ticks();
         {
             const Nx2Profile::Scope outer{Nx2Profile::Zone::UpdateBuffers};
+            // Frames read the open zone to count its time before it closes.
+            open_zone = StutterTrace::g_totals.open_zone[Index(Thread::Back)].load();
             std::this_thread::sleep_for(std::chrono::milliseconds{2});
             const Nx2Profile::Scope inner{Nx2Profile::Zone::BindStageBuffers};
             std::this_thread::sleep_for(std::chrono::milliseconds{2});
@@ -202,6 +205,7 @@ TEST_CASE("StutterTrace: zones keep their own time and sites count on every thre
     }}.join();
     const u64 update_ticks = totals.zone_ticks[back][update].load() - update_before;
     const u64 bind_ticks = totals.zone_ticks[back][bind].load() - bind_before;
+    REQUIRE(open_zone == update);
     REQUIRE(update_ticks > 0);
     REQUIRE(bind_ticks > 0);
     // Exclusive: the nested zone's time is not in the outer one's.

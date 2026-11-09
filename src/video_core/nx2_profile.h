@@ -194,7 +194,8 @@ public:
         start = Ticks();
         traced = StutterTrace::Enabled();
         if (traced) {
-            outer = StutterTrace::Open(stutter_categories[static_cast<size_t>(zone)], start);
+            outer = StutterTrace::Open(stutter_categories[static_cast<size_t>(zone)], start,
+                                       static_cast<size_t>(zone));
         }
     }
 
@@ -216,8 +217,7 @@ public:
             ++data.gpu_wait_count[static_cast<size_t>(parent)];
         }
         if (traced) {
-            StutterTrace::AddZone(index, exclusive);
-            StutterTrace::Close(outer, end);
+            StutterTrace::Close(outer, end, static_cast<size_t>(parent));
         }
     }
 

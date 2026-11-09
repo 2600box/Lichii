@@ -140,7 +140,7 @@ void Summarize(FrameState& state, u64 now) {
     }
     std::string sites;
     for (size_t index = 0; index < SiteCount; ++index) {
-        if (state.window_site_counts[index] != 0) {
+        if (state.window_site_counts[index] != 0 || state.window_site_ms[index] != 0.0) {
             sites += fmt::format("{}{}:{}x{:.1f}", sites.empty() ? "" : ",", site_names[index],
                                  state.window_site_counts[index], state.window_site_ms[index]);
         }
@@ -171,14 +171,36 @@ void Summarize(FrameState& state, u64 now) {
     state.window_site_counts = {};
 }
 
-ZoneTicks SnapshotZones(const std::array<std::array<std::atomic<u64>, ZoneSlots>, ThreadCount>& totals) {
-    ZoneTicks values;
+/// Each thread's zone ticks at now, its open zone's time so far included, and zone closes.
+std::pair<ZoneTicks, ZoneTicks> SnapshotZones(u64 now) {
+    ZoneTicks ticks;
+    ZoneTicks counts;
     for (size_t thread = 0; thread < ThreadCount; ++thread) {
-        for (size_t zone = 0; zone < ZoneSlots; ++zone) {
-            values[thread][zone] = totals[thread][zone].load(std::memory_order_relaxed);
+        auto& sequence = g_totals.sequence[thread];
+        for (;;) {
+            const u32 begin = sequence.load(std::memory_order_acquire);
+            if (begin % 2 != 0) {
+                std::this_thread::yield();
+                continue;
+            }
+            for (size_t zone = 0; zone < ZoneSlots; ++zone) {
+                ticks[thread][zone] = g_totals.zone_ticks[thread][zone].load(std::memory_order_relaxed);
+                counts[thread][zone] =
+                    g_totals.zone_counts[thread][zone].load(std::memory_order_relaxed);
+            }
+            const size_t open = g_totals.open_zone[thread].load(std::memory_order_relaxed);
+            const u64 since = g_totals.open_since[thread].load(std::memory_order_relaxed);
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (sequence.load(std::memory_order_relaxed) != begin) {
+                continue;
+            }
+            if (open < ZoneSlots && now > since) {
+                ticks[thread][open] += now - since;
+            }
+            break;
         }
     }
-    return values;
+    return {ticks, counts};
 }
 
 ZoneTicks Difference(const ZoneTicks& now, const ZoneTicks& last) {
@@ -302,9 +324,9 @@ void OnPresent() {
     }
     const ThreadTicks last_ticks = std::exchange(state.ticks, ticks);
     const ThreadTicks last_counts = std::exchange(state.counts, counts);
-    const ZoneTicks last_zones = std::exchange(state.zone_ticks, SnapshotZones(g_totals.zone_ticks));
-    const ZoneTicks last_zone_counts =
-        std::exchange(state.zone_counts, SnapshotZones(g_totals.zone_counts));
+    auto [zone_ticks, zone_counts] = SnapshotZones(now_ticks);
+    const ZoneTicks last_zones = std::exchange(state.zone_ticks, zone_ticks);
+    const ZoneTicks last_zone_counts = std::exchange(state.zone_counts, zone_counts);
     std::array<u64, SiteCount> site_ticks;
     std::array<u64, SiteCount> site_counts;
     for (size_t index = 0; index < SiteCount; ++index) {
@@ -360,14 +382,14 @@ void OnPresent() {
     state.window_compute_builds += compute_builds;
     std::string sites;
     for (size_t index = 0; index < SiteCount; ++index) {
+        // Ticks and count are separate atomics: a run can land in one frame's ticks and the next
+        // frame's count, so each adds up on its own.
         const u64 count = site_counts[index] - (std::min)(site_counts[index], last_site_counts[index]);
-        if (count == 0) {
+        const u64 ticks = site_ticks[index] - (std::min)(site_ticks[index], last_site_ticks[index]);
+        if (count == 0 && ticks == 0) {
             continue;
         }
-        const double ms =
-            static_cast<double>(site_ticks[index] - (std::min)(site_ticks[index],
-                                                               last_site_ticks[index])) *
-            ms_per_tick;
+        const double ms = static_cast<double>(ticks) * ms_per_tick;
         state.window_site_counts[index] += count;
         state.window_site_ms[index] += ms;
         sites += fmt::format("{}{}:{}x{:.1f}", sites.empty() ? "" : ",", site_names[index], count, ms);
