@@ -158,15 +158,14 @@ private:
         size_t count{};
     };
 
-    /// Builds the pipeline on the workers with build_in_parallel, else here. With the v2 cache it is
-    /// a job of shader_jobs with build_in_parallel, else left for the caller's Build() (see
-    /// BuildQueue). With `parallel` the stages translate at once on shader_jobs, each in IR pools
-    /// of its own; their environments must be safe to read from those threads.
+    /// Builds the pipeline as a job of shader_jobs with build_in_parallel, else leaves it for the
+    /// caller's Build() (see BuildQueue). With `parallel` the stages translate at once on
+    /// shader_jobs, each in IR pools of its own; their environments must be safe to read from those
+    /// threads.
     std::unique_ptr<GraphicsPipeline> CreateGraphicsPipeline(
         ShaderPools& pools, const GraphicsPipelineCacheKey& key,
         std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
         bool build_in_parallel, std::shared_ptr<ShaderPools> emit_pools = nullptr,
-        std::unique_ptr<EmissionBudget::Reservation> reservation = nullptr,
         ParallelTranslation* parallel = nullptr);
 
     /// Released IR pools for a build, or new ones
@@ -183,8 +182,8 @@ private:
                                                     std::span<const u64> keep_pointers = {});
 
     /// Builds the pipeline as CreateGraphicsPipeline does. With `emit_pools`, which `pools` must
-    /// be, the SPIR-V is emitted by the CPU stage of the pipeline's job (shader cache v2), which
-    /// takes the pools and the program.
+    /// be, the SPIR-V is emitted by the CPU stage of the pipeline's job, which takes the pools and
+    /// the program.
     ComputePipelineCacheEntry CreateComputePipeline(ShaderPools& pools,
                                                      const ComputePipelineCacheKey& key,
                                                      Shader::Environment& env,
@@ -232,12 +231,11 @@ private:
     /// only pipelines built during play.
     void QueueVulkanPipelineCacheSave();
 
-    /// One build of the shader precache: builds a pipeline and destroys it, true when it built.
+    /// One build of the shader precache: a pipeline built and destroyed
     struct PrecacheJob {
         u64 graphics_hash{}; ///< The cached graphics pipeline it builds, 0 for a compute program
-        Common::UniqueFunction<bool> build;
-        /// With the v2 cache instead of build: translates the pipeline and returns its build, which
-        /// is true when it built (the job's CPU and driver stages)
+        /// Translates the pipeline and returns its build, which is true when it built (the job's
+        /// CPU and driver stages)
         Common::UniqueFunction<Common::UniqueFunction<bool>> translate;
         u64 cpu_bytes{};
     };
@@ -264,10 +262,8 @@ private:
     VideoCore::ShaderNotify& shader_notify;
     bool use_asynchronous_shaders{};
     bool use_vulkan_pipeline_cache{};
-    const size_t num_pipeline_workers;
-    EmissionBudget emission_budget;
-    /// Shader cache v2 (ShaderCacheV2::Enabled): the jobs that replace the workers, the prebuild
-    /// and the precache threads. Declared before the pipelines, whose builds it runs.
+    /// The pipelines' builds, the prebuild and the precache. Declared before the pipelines, whose
+    /// builds it runs.
     std::optional<VideoCommon::ShaderJobScheduler> shader_jobs;
     std::optional<ScheduledPrebuild<GraphicsPipelineCacheKey, GraphicsPipeline>> scheduled_prebuild;
 
@@ -305,12 +301,10 @@ private:
     std::unordered_set<u64> disk_pipelines;
     std::unordered_map<u64, u8> used_pipelines; ///< Key hash -> sessions since it was last used
     std::unordered_set<const GraphicsPipeline*> used_this_session;
-    std::filesystem::path used_pipelines_filename;
     std::chrono::steady_clock::time_point used_pipelines_saved{};
     void SaveUsedPipelines();
 
-    /// The v2 cache (ShaderCacheV2::Enabled) pipeline_cache_filename names, and this session's
-    /// Used record
+    /// The cache pipeline_cache_filename names, and this session's Used record
     std::unique_ptr<VideoCommon::ShaderCacheV2::Cache> cache_v2;
     /// Its driver layer, where the device has VK_KHR_pipeline_binary
     std::unique_ptr<PipelineBinaries> pipeline_binaries;
@@ -327,10 +321,8 @@ private:
     /// Requested first when the cache is destroyed, to stop a rewrite of the disk cache: Android
     /// and yuzu_cmd load with a stop token that never stops
     std::stop_source serialization_stop;
-    Common::ThreadWorker workers;
     Common::ThreadWorker serialization_thread;
     DynamicFeatures dynamic_features;
-    PipelinePrebuild<GraphicsPipelineCacheKey, GraphicsPipeline> background_pipelines;
 };
 
 } // namespace Vulkan

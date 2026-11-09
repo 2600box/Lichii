@@ -12,66 +12,18 @@
 #include <utility>
 
 #include "common/logging.h"
-#include "common/thread_worker.h"
-#include "video_core/renderer_vulkan/async_draw_policy.h"
 #include "video_core/shader_jobs.h"
 
 namespace Vulkan {
 
-class EmissionBudget {
-public:
-    class Reservation {
-    public:
-        Reservation(const Reservation&) = delete;
-        Reservation& operator=(const Reservation&) = delete;
-
-        ~Reservation() {
-            if (pending) {
-                pending->fetch_sub(1, std::memory_order_relaxed);
-            }
-        }
-
-    private:
-        friend class EmissionBudget;
-        Reservation() = default;
-        std::shared_ptr<std::atomic<size_t>> pending;
-    };
-
-    explicit EmissionBudget(size_t capacity_) : capacity{capacity_} {}
-
-    std::unique_ptr<Reservation> TryAcquire(bool native) {
-        size_t count = pending->load(std::memory_order_relaxed);
-        if (!DefersShaderEmission(native, count, capacity)) {
-            return nullptr;
-        }
-        auto reservation = std::unique_ptr<Reservation>{new Reservation};
-        while (DefersShaderEmission(native, count, capacity)) {
-            if (pending->compare_exchange_weak(count, count + 1, std::memory_order_relaxed)) {
-                reservation->pending = pending;
-                return reservation;
-            }
-        }
-        return nullptr;
-    }
-
-    size_t Pending() const {
-        return pending->load(std::memory_order_relaxed);
-    }
-
-private:
-    const size_t capacity;
-    std::shared_ptr<std::atomic<size_t>> pending = std::make_shared<std::atomic<size_t>>(0);
-};
-
-/// Where a pipeline is built. Without workers or jobs it is built in its constructor.
+/// Where a pipeline is built. Without jobs it is built in its constructor.
 struct PipelineBuildQueue {
-    Common::ThreadWorker* workers{};
-    /// Shader cache v2: a Soon job of this scheduler, whose CPU stage is the pipeline's deferred
-    /// SPIR-V emission if it has one, and whose driver stage builds it. The estimates are the job's.
+    /// A Soon job of this scheduler, whose CPU stage is the pipeline's deferred SPIR-V emission if
+    /// it has one, and whose driver stage builds it. The estimates are the job's.
     VideoCommon::ShaderJobScheduler* jobs{};
     u64 cpu_bytes{};
     u64 driver_bytes{};
-    /// Shader cache v2: left for Build(), the driver stage of the job that translated it
+    /// Left for Build(), the driver stage of the job that translated it
     bool owner_builds{};
 };
 
@@ -122,9 +74,6 @@ class PipelineBuild {
     };
 
 public:
-    PipelineBuild(Common::ThreadWorker* workers, std::function<void()> task)
-        : PipelineBuild(PipelineBuildQueue{.workers = workers}, std::move(task)) {}
-
     /// With jobs, `emit` is the CPU stage that runs before `task`
     PipelineBuild(const PipelineBuildQueue& queue, std::function<void()> task,
                   std::function<void()> emit = {})
@@ -157,8 +106,6 @@ public:
                 job.driver = [state = state] { state->Run(); };
             }
             handle = jobs->Submit(std::move(job));
-        } else if (queue.workers) {
-            queue.workers->QueueWork([state = state] { state->Run(); });
         } else if (!owner_builds) {
             state->Run();
         }

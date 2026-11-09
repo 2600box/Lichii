@@ -384,13 +384,6 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
             build_job.driver = [this] { RunBuild(); };
         }
         job = jobs->Submit(std::move(build_job));
-    } else if (build_queue.workers) {
-        build_task_done = false;
-        build_queue.workers->QueueWork([this] {
-            RunBuild();
-            // The last access to this pipeline from the worker.
-            build_task_done.store(true, std::memory_order::release);
-        });
     } else if (!build_queue.owner_builds) {
         RunBuild();
     }

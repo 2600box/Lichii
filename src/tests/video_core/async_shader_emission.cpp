@@ -206,8 +206,8 @@ TEST_CASE("Production verification preserves merged vertex control flow and stag
     const auto fragment_info = job->programs[1].info;
     const auto reference = job->Emit();
     std::array<std::vector<u32>, 2> emitted, verified;
-    Common::ThreadWorker workers{1, "PipelineTest"};
-    Vulkan::PipelineBuild build{&workers, [&] {
+    VideoCommon::ShaderJobScheduler jobs{{.name = "PipelineTest"}};
+    Vulkan::PipelineBuild build{{.jobs = &jobs}, [&] {
                                     emitted = job->Emit();
                                     verified = job->Emit(reference);
                                 }};

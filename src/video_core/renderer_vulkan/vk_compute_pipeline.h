@@ -100,7 +100,7 @@ public:
 
     /// Whether no build of this pipeline is left queued on a worker thread, which holds it
     [[nodiscard]] bool IsBuildTaskDone() const noexcept {
-        return jobs ? job.Ready() : build_task_done.load(std::memory_order::acquire);
+        return !jobs || job.Ready();
     }
 
     /// Builds it on this thread, for a pipeline made with PipelineBuildQueue::owner_builds
@@ -138,7 +138,6 @@ private:
 
     std::function<void()> build_task;
     std::atomic_bool build_claimed{false};
-    std::atomic_bool build_task_done{true};
     std::condition_variable build_condvar;
     std::mutex build_mutex;
     std::atomic_bool is_built{false};

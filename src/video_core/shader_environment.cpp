@@ -808,7 +808,7 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(
         return result;
     }
     // A program from an override file depends on more than the lowering: the v2 cache leaves it out.
-    if (ShaderCacheV2::Enabled() && !overridden) {
+    if (cache_v2 && !overridden) {
         program_record = std::make_shared<const ShaderCacheV2::ProgramRecord>(
             ShaderCacheV2::MakeProgramRecord(stage, native_header_size, sph, native, inputs,
                                              *result));

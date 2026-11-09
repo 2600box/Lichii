@@ -63,13 +63,10 @@ u64 BinaryBuilds() {
 } // Anonymous namespace
 
 // Needs a Vulkan driver with VK_KHR_pipeline_binary that doesn't prefer its own cache (RADV, for
-// one: Mesa's amdgpu drm-shim runs it without a GPU), and the v2 switch, which the device reads:
-//   EDEN_NX2_SHADER_CACHE=v2 ./tests "[vulkan_pipeline_binaries]"
+// one: Mesa's amdgpu drm-shim runs it without a GPU):
+//   ./tests "[vulkan_pipeline_binaries]"
 TEST_CASE("Vulkan pipeline binaries: a compute pipeline is built again from its binaries",
           "[.][vulkan_pipeline_binaries]") {
-    if (!V2::Enabled()) {
-        SKIP("EDEN_NX2_SHADER_CACHE=v2 isn't set");
-    }
     const auto library = Vulkan::OpenLibrary();
     REQUIRE(library);
     Vulkan::vk::InstanceDispatch dld;

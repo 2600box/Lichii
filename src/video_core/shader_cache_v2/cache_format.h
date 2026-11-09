@@ -11,7 +11,7 @@
 
 #include "common/common_types.h"
 
-/// Shader cache v2 (EDEN_NX2_SHADER_CACHE=v2): one append-only log of framed records per title.
+/// Shader cache v2, the Vulkan pipeline cache: one append-only log of framed records per title.
 ///
 /// File header (32 bytes): "LXSHCACH", u32 format version, u32 header size, u64 creation time
 /// (Unix seconds), u32 CRC-32 of the bytes before it, u32 zero.

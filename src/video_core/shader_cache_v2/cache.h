@@ -24,10 +24,6 @@ namespace VideoCommon::ShaderCacheV2 {
 
 struct LogRecord;
 
-/// EDEN_NX2_SHADER_CACHE=v2, read once: the Vulkan pipeline cache keeps its records in a v2 log
-/// instead of vulkan.fork-v<version>.bin. A test switch until v2 replaces the old cache.
-[[nodiscard]] bool Enabled();
-
 /// The log of a title, in its shader cache directory
 inline constexpr std::string_view FileName{"lichii-cache.v2.bin"};
 /// What the driver compiled for that title's pipelines, beside it (driver_blobs.h)

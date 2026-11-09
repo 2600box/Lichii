@@ -2,9 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
-#include <cstdlib>
 #include <cstring>
-#include <string_view>
 
 #include "common/assert.h"
 #include "common/logging.h"
@@ -32,14 +30,6 @@ bool HoldsInputs(const ProgramRecord& record, const ProgramKeyInputs& inputs) {
 }
 
 } // Anonymous namespace
-
-bool Enabled() {
-    static const bool enabled = [] {
-        const char* const value = std::getenv("EDEN_NX2_SHADER_CACHE");
-        return value != nullptr && std::string_view{value} == "v2";
-    }();
-    return enabled;
-}
 
 Cache::Cache(std::filesystem::path file, WriterOptions options)
     : writer{std::move(file), options} {}

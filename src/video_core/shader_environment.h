@@ -90,8 +90,7 @@ public:
         return lowered_native;
     }
 
-    /// The v2 cache record of the native program this environment lowered (see
-    /// ShaderCacheV2::Enabled), once
+    /// The v2 cache record of the native program this environment lowered, once
     [[nodiscard]] std::shared_ptr<const ShaderCacheV2::ProgramRecord> TakeProgramRecord() noexcept {
         return std::move(program_record);
     }

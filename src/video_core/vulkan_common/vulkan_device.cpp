@@ -1222,12 +1222,6 @@ bool Device::GetSuitability(bool requires_swapchain) {
     FOR_EACH_VK_FEATURE_EXT(FEATURE_EXTENSION);
     FOR_EACH_VK_EXTENSION(EXTENSION);
 
-    // Shader cache v2's driver layer alone uses VK_KHR_pipeline_binary: without it the device is
-    // created as before.
-    if (!VideoCommon::ShaderCacheV2::Enabled()) {
-        RemoveExtension(extensions.pipeline_binary, VK_KHR_PIPELINE_BINARY_EXTENSION_NAME);
-    }
-
     extensions.depth_stencil_resolve =
         extensions.depth_stencil_resolve &&
         (instance_version >= VK_API_VERSION_1_2 || extensions.create_renderpass2);
