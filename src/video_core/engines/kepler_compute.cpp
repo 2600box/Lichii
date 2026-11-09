@@ -374,6 +374,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                                                           memory_manager.Read<u32>(address), payload);
                         memory_manager.Write<u32>(address, value);
                         if (const auto device = memory_manager.GpuToCpuAddress(address)) {
+                            Tegra::Nx2MirrorShadow::Get().NoteDirectRelease(*device, address);
                             Tegra::Nx2SemaphoreWaiters::Get().OnWrite(*device, value);
                         }
                         static const u64 watch = [] {
@@ -398,6 +399,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                         const u32 value = (std::max)(memory_manager.Read<u32>(address), payload);
                         memory_manager.Write<u32>(address, value);
                         if (const auto device = memory_manager.GpuToCpuAddress(address)) {
+                            Tegra::Nx2MirrorShadow::Get().NoteDirectRelease(*device, address);
                             Tegra::Nx2SemaphoreWaiters::Get().OnWrite(*device, value);
                         }
                     });
