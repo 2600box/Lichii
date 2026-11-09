@@ -178,6 +178,14 @@ class CacheMetricsTest(unittest.TestCase):
         result = cache_metrics.parse_log(self.write("ansi.txt", "\x00" + text))
         self.assertAlmostEqual(result["boot_to_first_frame_s"], 203.9)
 
+    def test_cut_off_last_line_is_skipped(self):
+        whole = cache_metrics.parse_log(self.write("whole.txt", TRACE_LOG))
+        cut = (TRACE_LOG + line(225.0, "Nx2Stutter frame=99999 ms=")
+               + line(225.0, "Nx2StutterSummary window_s="))
+        result = cache_metrics.parse_log(self.write("cut.txt", cut))
+        self.assertEqual(result["frames_over_33ms"], whole["frames_over_33ms"])
+        self.assertEqual(result["frame_ms"], whole["frame_ms"])
+
     def test_compare_markdown(self):
         a = [cache_metrics.parse_log(self.write("a.txt", TRACE_LOG))]
         b_run = json.loads(json.dumps(a[0]))

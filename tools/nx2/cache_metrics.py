@@ -158,15 +158,18 @@ def analyze(lines, start_s=None, end_s=None):
                 values["t"] = line.t
                 markers.setdefault(values["event"], values)
                 continue
+            # A line the emulator was killed while writing lacks its last field: skipped.
             if "Nx2StutterSummary " in text:
                 values = fields(text[text.index("Nx2StutterSummary"):])
                 values["t"] = line.t
-                summaries.append(values)
+                if "cache_bytes" in values:
+                    summaries.append(values)
                 continue
             if "Nx2Stutter " in text:
                 values = fields(text[text.index("Nx2Stutter "):])
                 values["t"] = line.t
-                stutters.append(values)
+                if "builds" in values:
+                    stutters.append(values)
                 continue
         if build is None and (match := BUILD.search(text)):
             build = match.group(1).strip()
