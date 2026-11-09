@@ -17,6 +17,7 @@
 
 #include "common/common_types.h"
 #include "video_core/gpu_split.h"
+#include "video_core/nx2_split_probe.h"
 #include "common/logging.h"
 #include "common/cpu_features.h"
 #include "common/spin_recursive_mutex.h"
@@ -126,6 +127,62 @@ inline constexpr auto stutter_categories = [] {
     return categories;
 }();
 
+/// What the split probe counts a zone's work as (nx2_split_probe.h). The probe times its own
+/// segments where a zone mixes serial and parallel work. Waits for the GPU, a presentation frame
+/// or a queue submit are serial: the drawing thread can do nothing else meanwhile and a split
+/// would not remove them, so they stay in busy time. Only waits for work are idle.
+inline Nx2SplitProbe::Work ProbeWork(Zone zone) {
+    using Nx2SplitProbe::Work;
+    switch (zone) {
+    case Zone::Idle:
+    case Zone::PendingSleep:
+    case Zone::SplitWait:
+    case Zone::WorkerIdle:
+        return Work::Idle;
+    case Zone::Draw:
+        return Work::Draw;
+    case Zone::FlushWork:
+        return Work::FlushWork;
+    case Zone::SyncDescriptors:
+    case Zone::ReadHandles:
+        return Work::Handles;
+    case Zone::FillImageViews:
+        return Work::ImageViews;
+    case Zone::TextureUpload:
+        return Work::Upload;
+    case Zone::RenderTargets:
+        return Work::RenderTargets;
+    case Zone::PipelineLookup:
+        return Work::PipelineLookup;
+    case Zone::Configure:
+    case Zone::TextureBuffers:
+        return Work::Configure;
+    case Zone::UpdateBuffers:
+        return Work::BufferResolve;
+    case Zone::BindStageBuffers:
+        return Work::StageBindings;
+    case Zone::DescriptorAcquire:
+    case Zone::PushDescriptors:
+    case Zone::ConfigureDraw:
+        return Work::Descriptors;
+    case Zone::DynamicState:
+        return Work::DynamicState;
+    case Zone::DrawRecord:
+        return Work::Record;
+    case Zone::GraphicsPipelineMiss:
+    case Zone::ComputePipelineMiss:
+    case Zone::PipelineWait:
+    case Zone::ShaderCapture:
+    case Zone::TextureCache:
+    case Zone::GpuWait:
+    case Zone::Present:
+    case Zone::PresentWait:
+    case Zone::QueueSubmit:
+    default:
+        return Work::OtherSerial;
+    }
+}
+
 // A plain flag: Enabled() runs several times per method write (no guard to check).
 inline bool g_enabled = std::getenv("EDEN_NX2_GPU_PROFILE") != nullptr;
 /// Whether zones measure: for the profile or for EDEN_NX2_STUTTER_TRACE.
@@ -138,6 +195,7 @@ inline void ReadSwitch() {
     StutterTrace::ReadSwitch();
     g_zones_enabled = g_enabled || StutterTrace::Enabled();
     Common::g_count_spin_contention = g_enabled;
+    Nx2SplitProbe::ReadSwitch(g_zones_enabled);
 }
 
 inline bool Enabled() {
@@ -183,6 +241,9 @@ class Scope {
 public:
     explicit Scope(Zone zone_) : zone{zone_}, enabled{g_zones_enabled} {
         if (!enabled) {
+            if (Nx2SplitProbe::g_enabled) {
+                probe_parent = Nx2SplitProbe::Enter(ProbeWork(zone));
+            }
             return;
         }
         parent_child_ns = t_data.child_ns;
@@ -194,6 +255,9 @@ public:
 
     ~Scope() {
         if (!enabled) {
+            if (probe_parent != Nx2SplitProbe::Work::Skip) {
+                Nx2SplitProbe::Leave(probe_parent);
+            }
             return;
         }
         const u64 elapsed = Ticks() - start;
@@ -220,6 +284,7 @@ private:
     Zone zone;
     Zone parent{Zone::Other};
     bool enabled;
+    Nx2SplitProbe::Work probe_parent{Nx2SplitProbe::Work::Skip};
     u64 start{};
     u64 parent_child_ns{};
 };

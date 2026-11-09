@@ -651,6 +651,7 @@ bool TextureCache<P>::ResolveMemoizedTextures(SampledTextureMemo& memo,
                                               std::span<const GPUVAddr> handle_addresses,
                                               std::span<ImageViewInOut> views,
                                               std::span<SamplerId> samplers) {
+    Nx2SplitProbe::Segment probe{Nx2SplitProbe::Work::ImageViews};
     const auto& image_table = channel_state->graphics_image_table;
     const auto& sampler_table = channel_state->graphics_sampler_table;
     const bool via_header_index =
@@ -1111,6 +1112,7 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
         if (IsValidEntry(*gpu_memory, descriptor)) {
             const auto [pair, is_new_tc] = channel_state->image_views.try_emplace(descriptor);
             if (is_new_tc) {
+                Nx2SplitProbe::Mutate(Nx2SplitProbe::Mutation::View);
                 const auto failed_images = [&]() -> u32 {
                     if constexpr (requires { runtime.FailedImages(); }) {
                         return runtime.FailedImages();
@@ -2824,6 +2826,7 @@ std::optional<DAddr> TextureCache<P>::ImageCpuAddress(GPUVAddr gpu_addr, size_t 
 template <class P>
 ImageId TextureCache<P>::InsertImage(const ImageInfo& info, GPUVAddr gpu_addr,
                                      RelaxedOptions options) {
+    Nx2SplitProbe::Mutate(Nx2SplitProbe::Mutation::Image);
     std::optional<DAddr> cpu_addr = ImageCpuAddress(gpu_addr, CalculateGuestSizeInBytes(info));
     if (!cpu_addr) {
         const DAddr fake_addr = ~(1ULL << 40ULL) + virtual_invalid_space;
@@ -3364,6 +3367,7 @@ SamplerId TextureCache<P>::FindSampler(const TSCEntry& config, bool compute) {
     }
     const auto [pair, is_new] = channel_state->samplers.try_emplace(config);
     if (is_new) {
+        Nx2SplitProbe::Mutate(Nx2SplitProbe::Mutation::Sampler);
         pair->second = slot_samplers.insert(runtime, config);
     }
     return pair->second;
