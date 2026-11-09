@@ -246,6 +246,20 @@ TOOLS = [
             "required": ["steps"],
         },
     },
+    {
+        "name": "host_timing",
+        "description": "HostTiming wait test switch: margin_us -1 is the default hardware wait, 0 or "
+                       "more sleeps in the OS until that long before each event. stats toggles "
+                       "the per-second 'HostTiming wait' log line (read it with log_tail). "
+                       "Returns the previous and current values.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "margin_us": {"type": "integer", "minimum": -1, "maximum": 100000},
+                "stats": {"type": "boolean"},
+            },
+        },
+    },
 ]
 
 TOOL_NAMES = {tool["name"] for tool in TOOLS}
