@@ -268,6 +268,12 @@ public:
     /// what a synchronous flush would have written.
     void ClearDownload(DAddr base_addr, u64 size);
 
+    /// ClearDownload where guest memory gets the newer bytes before a read can find the range: a
+    /// guest CPU write, a synchronous download landing under `mutex`, or a GPU-side write whose
+    /// read downloads MemoryManager landed first. Read downloads leave the range rather than land,
+    /// so this never waits for the host GPU.
+    void ClearReplacedDownload(DAddr device_addr, u64 size);
+
     /// CPU writes collected but not yet applied (SetPendingCpuWrites).
     [[nodiscard]] Common::RangeSet<DAddr> PendingCpuWriteRanges();
 
@@ -289,8 +295,10 @@ public:
     /// Writes the DownloadMemoryForRead copies over [device_addr, device_addr + size), and those
     /// submitted before them, to guest memory, waiting for the host GPU if it must. Any thread:
     /// the reading one before it reads, the GPU's side before it writes guest memory there. Takes
-    /// `mutex` itself (a caller holding it keeps it held while the host GPU finishes).
-    void FinishReadDownloads(DAddr device_addr, u64 size);
+    /// `mutex` itself (a caller holding it keeps it held while the host GPU finishes). Returns how
+    /// long it waited for the host GPU (at least 1 ns if it did), or nothing when no download was
+    /// over the range.
+    std::optional<u64> FinishReadDownloads(DAddr device_addr, u64 size);
 
     /// A GPU write into the buffers over [device_addr, device_addr + size), after the read
     /// downloads taken so far: they still write their older bytes to guest memory, as synchronous
@@ -671,11 +679,6 @@ private:
 
     /// ClearDownload, for the downloads taken at fences only.
     void ClearFenceDownloads(DAddr device_addr, u64 size);
-
-    /// ClearDownload where guest memory gets the newer bytes before a read can find the range: a
-    /// guest CPU write, or a synchronous download landing under `mutex`. Read downloads leave the
-    /// range rather than land.
-    void ClearReplacedDownload(DAddr device_addr, u64 size);
 
     /// Whether every GPU-modified byte in the range is in a read download's clean_ranges.
     [[nodiscard]] bool ReadDownloadsCover(DAddr device_addr, u64 size) const;

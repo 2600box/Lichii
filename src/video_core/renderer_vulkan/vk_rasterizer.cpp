@@ -2435,7 +2435,9 @@ void RasterizerVulkan::PrepareRegionWrite(DAddr addr, u64 size, VideoCommon::Cac
         return;
     }
     std::scoped_lock lock{buffer_cache.mutex};
-    buffer_cache.ClearDownload(addr, size);
+    // MemoryManager landed the read downloads here just before (FinishRead) and writes guest memory
+    // next. Landing a newer one would wait for the host GPU with the lock held, from any thread.
+    buffer_cache.ClearReplacedDownload(addr, size);
 }
 
 void RasterizerVulkan::InvalidateRegion(DAddr addr, u64 size, VideoCommon::CacheType which) {
