@@ -481,8 +481,9 @@ static bool EditNup(const Core::LaunchParams& lp) {
 
 /// Hidden test hook (not in --help): builds a game's shader precache files without booting it.
 ///   yuzu-cmd --build-warm <game file> <title id hex> <output dir> [--defaults | cache ...]
-/// With pipeline cache files, the draw state guesses come from them; --defaults uses the
-/// built-in guesses; neither uses the title's own pipeline cache when it exists.
+/// With pipeline cache files (lichii-cache.v2.bin logs or older vulkan.fork-v<N>.bin caches), the
+/// draw state guesses come from them; --defaults uses the built-in guesses; neither uses the
+/// title's own pipeline cache when it exists.
 static bool BuildWarm(Core::System& system, int argc, char** argv) {
     namespace ShaderWarm = VideoCommon::ShaderWarm;
     if (argc < 5) {

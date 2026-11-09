@@ -523,22 +523,8 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
     if (options.runtime_caches) {
         caches = *options.runtime_caches;
     } else {
-        // The current version's cache, or right after a version bump, the newest older cache
-        // with the same record layout (the play history the guesses come from).
-        const auto own = VideoCommon::VersionedPipelineCachePath(
-            TitleDir(title_id), "vulkan", VideoCommon::VulkanPipelineCacheVersion);
-        if (fs::exists(own, ec)) {
-            caches.push_back(own);
-        } else {
-            for (const u32 version : CompatibleRuntimeCacheVersions) {
-                const auto older =
-                    VideoCommon::VersionedPipelineCachePath(TitleDir(title_id), "vulkan", version);
-                if (fs::exists(older, ec)) {
-                    caches.push_back(older);
-                    break;
-                }
-            }
-        }
+        // The title's play history the guesses come from: its v2 log, else an older disk cache
+        caches = FindRuntimeCaches(TitleDir(title_id));
     }
     const RuntimeStats stats = ReadRuntimeStats(caches);
     const bool use_stats = stats.occurrences != 0;

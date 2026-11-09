@@ -157,8 +157,9 @@ Result BuildWarmFiles(Core::System& system, const std::filesystem::path& game_pa
 struct BuildOptions {
     /// Folder for warm-compute.bin and warm-graphics.bin; empty: <shader dir>/<title id>.
     std::filesystem::path output_dir;
-    /// Pipeline caches used for the draw state guesses. Unset: the title's own pipeline cache
-    /// when it exists, else the built-in defaults. Set but empty: always the built-in defaults.
+    /// Pipeline caches used for the draw state guesses (v2 logs or older disk caches). Unset:
+    /// the title's own (FindRuntimeCaches), else the built-in defaults. Set but empty: always
+    /// the built-in defaults.
     std::optional<std::vector<std::filesystem::path>> runtime_caches;
     /// Conversion threads, 0: a quarter of the CPU threads, 2 to 6.
     size_t threads{};

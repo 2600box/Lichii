@@ -12,6 +12,8 @@
 #include "shader_recompiler/frontend/ampere/program_capture.h"
 #include "shader_recompiler/program_header.h"
 #include "video_core/native_lowering.h"
+#include "video_core/shader_cache_v2/cache.h"
+#include "video_core/shader_cache_v2/cache_format.h"
 #include "video_core/shader_warm/warm_records.h"
 
 namespace VideoCommon::ShaderWarm {
@@ -85,6 +87,81 @@ size_t TailSize(u32 stage) {
         return 16;
     }
     return 80 + (stage == 3 ? 32 : 0) + (stage == 7 || stage == 8 ? 92 : 0);
+}
+
+/// A vertex or fragment stage of a recorded graphics pipeline; `key` points into the file read.
+struct Occurrence {
+    u32 stage;
+    u64 hash;
+    const u8* key;
+};
+
+/// The (env, key) pairs already counted
+using SeenRecords = std::unordered_set<PairHash, PairHasher>;
+
+/// Reads the pipeline record at `cur` of `bytes` as the Vulkan disk cache holds it (env count,
+/// envs, key), moves `cur` past it and adds each vertex and fragment stage of a graphics record
+/// not seen before. False when no whole record is left there.
+bool ReadPipelineRecord(std::span<const u8> bytes, size_t& cur,
+                        std::vector<Occurrence>& occurrences, SeenRecords& seen) {
+    struct Env {
+        u32 stage;
+        size_t begin;
+        size_t end;
+    };
+    const size_t size = bytes.size();
+    if (cur + 4 > size) {
+        return false;
+    }
+    const u32 count = Get<u32>(bytes, cur);
+    cur += 4;
+    if (count == 0) {
+        return false;
+    }
+    std::vector<Env> envs;
+    for (u32 i = 0; i < count; ++i) {
+        if (cur + EnvHeaderSize > size) {
+            return false;
+        }
+        std::array<u64, 6> counts;
+        std::memcpy(counts.data(), bytes.data() + cur, sizeof(counts));
+        const u32 stage = Get<u32>(bytes, cur + 48 + 6 * 4);
+        const u64 body = counts[0] + counts[1] * 8 + counts[2] * 8 + counts[3] * 12 +
+                         counts[4] * 9 + counts[5] * 12 + TailSize(stage);
+        if (body > size - cur - EnvHeaderSize) {
+            return false;
+        }
+        const size_t begin = cur;
+        cur += EnvHeaderSize + static_cast<size_t>(body);
+        envs.push_back({stage, begin, cur});
+    }
+    const size_t key_size = envs[0].stage == ComputeStage ? 24 : GraphicsKeySize;
+    if (key_size > size - cur) {
+        return false;
+    }
+    const u8* const key = bytes.data() + cur;
+    cur += key_size;
+    if (envs[0].stage == ComputeStage) {
+        return true;
+    }
+    std::array<u64, 6> hashes;
+    std::memcpy(hashes.data(), key, sizeof(hashes));
+    size_t env_index = 0;
+    for (size_t slot = 0; slot < 6 && env_index < envs.size(); ++slot) {
+        if (hashes[slot] == 0) {
+            continue;
+        }
+        const Env& env = envs[env_index++];
+        if (env.stage != 0 && env.stage != 4) {
+            continue;
+        }
+        const PairHash id{Hash128(bytes.subspan(env.begin, env.end - env.begin)),
+                          Hash128({key, key_size})};
+        if (seen.insert(id).second) {
+            occurrences.push_back({env.stage, hashes[slot], key});
+        }
+    }
+    return true;
 }
 
 } // Anonymous namespace
@@ -228,15 +305,30 @@ GraphicsKey GraphicsEntryKey(u32 stage, const GraphicsKey& template_key, u64 sta
     return key;
 }
 
+std::vector<std::filesystem::path> FindRuntimeCaches(const std::filesystem::path& title_dir) {
+    std::error_code error;
+    const auto log = title_dir / ShaderCacheV2::FileName;
+    if (std::filesystem::exists(log, error)) {
+        return {log};
+    }
+    // No v2 log yet: the current version's disk cache, or the newest older one with the same
+    // record layout
+    std::vector<u32> versions{WarmCacheVersion};
+    versions.insert(versions.end(), CompatibleRuntimeCacheVersions.begin(),
+                    CompatibleRuntimeCacheVersions.end());
+    for (const u32 version : versions) {
+        auto cache = VideoCommon::VersionedPipelineCachePath(title_dir, "vulkan", version);
+        if (std::filesystem::exists(cache, error)) {
+            return {std::move(cache)};
+        }
+    }
+    return {};
+}
+
 RuntimeStats ReadRuntimeStats(const std::vector<std::filesystem::path>& caches) {
-    struct Occurrence {
-        u32 stage;
-        u64 hash;
-        const u8* key;
-    };
     std::vector<std::vector<u8>> files;
     std::vector<Occurrence> occurrences;
-    std::unordered_set<PairHash, PairHasher> seen;
+    SeenRecords seen;
     for (const auto& path : caches) {
         std::ifstream file(path, std::ios::binary | std::ios::ate);
         if (!file.is_open()) {
@@ -248,69 +340,26 @@ RuntimeStats ReadRuntimeStats(const std::vector<std::filesystem::path>& caches) 
         if (!file.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(size))) {
             continue;
         }
-        if (size < 12 || std::memcmp(data.data(), "yuzucach", 8) != 0 ||
-            !IsReadableRuntimeCacheVersion(Get<u32>(data, 8))) {
-            continue;
-        }
         const std::span<const u8> bytes{data};
-        size_t cur = 12;
-        struct Env {
-            u32 stage;
-            size_t begin;
-            size_t end;
-        };
-        std::vector<Env> envs;
-        while (cur + 4 <= size) {
-            const u32 count = Get<u32>(bytes, cur);
-            cur += 4;
-            envs.clear();
-            bool truncated = count == 0;
-            for (u32 i = 0; i < count && !truncated; ++i) {
-                if (cur + EnvHeaderSize > size) {
-                    truncated = true;
-                    break;
-                }
-                std::array<u64, 6> counts;
-                std::memcpy(counts.data(), data.data() + cur, sizeof(counts));
-                const u32 stage = Get<u32>(bytes, cur + 48 + 6 * 4);
-                const u64 body = counts[0] + counts[1] * 8 + counts[2] * 8 + counts[3] * 12 +
-                                 counts[4] * 9 + counts[5] * 12 + TailSize(stage);
-                if (body > size - cur - EnvHeaderSize) {
-                    truncated = true;
-                    break;
-                }
-                const size_t begin = cur;
-                cur += EnvHeaderSize + static_cast<size_t>(body);
-                envs.push_back({stage, begin, cur});
-            }
-            if (truncated) {
-                break;
-            }
-            const size_t key_size = envs[0].stage == ComputeStage ? 24 : GraphicsKeySize;
-            if (key_size > size - cur) {
-                break;
-            }
-            const u8* const key = data.data() + cur;
-            cur += key_size;
-            if (envs[0].stage == ComputeStage) {
+        if (size >= 8 && std::memcmp(data.data(), "yuzucach", 8) == 0) {
+            // A Vulkan disk cache from before the v2 log: its records one after another
+            if (size < 12 || !IsReadableRuntimeCacheVersion(Get<u32>(data, 8))) {
                 continue;
             }
-            std::array<u64, 6> hashes;
-            std::memcpy(hashes.data(), key, sizeof(hashes));
-            size_t env_index = 0;
-            for (size_t slot = 0; slot < 6 && env_index < envs.size(); ++slot) {
-                if (hashes[slot] == 0) {
+            size_t cur = 12;
+            while (ReadPipelineRecord(bytes, cur, occurrences, seen)) {
+            }
+        } else {
+            // A shader cache v2 log: each graphics record's payload is one record of the disk
+            // cache, byte for byte. The reader drops records whose header or payload doesn't
+            // match its checksum, and keeps only the latest record of a key.
+            const ShaderCacheV2::ParsedLog log = ShaderCacheV2::ParseLog(bytes);
+            for (const ShaderCacheV2::LogRecord& record : log.live) {
+                if (record.kind != ShaderCacheV2::RecordKind::Graphics) {
                     continue;
                 }
-                const Env& env = envs[env_index++];
-                if (env.stage != 0 && env.stage != 4) {
-                    continue;
-                }
-                const PairHash id{Hash128(bytes.subspan(env.begin, env.end - env.begin)),
-                                  Hash128({key, key_size})};
-                if (seen.insert(id).second) {
-                    occurrences.push_back({env.stage, hashes[slot], key});
-                }
+                size_t cur = 0;
+                ReadPipelineRecord(record.payload, cur, occurrences, seen);
             }
         }
         files.push_back(std::move(data));

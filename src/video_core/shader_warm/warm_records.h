@@ -105,7 +105,14 @@ struct RuntimeStats {
     size_t occurrences{};
 };
 
-/// Reads v53 pipeline caches (yuzucach) like make_graphics_warm.py's runtime_records().
+/// The pipeline caches a title's draw state guesses come from, in its shader cache folder: the
+/// shader cache v2 log (lichii-cache.v2.bin) when it exists, else the newest readable Vulkan disk
+/// cache from before it (vulkan.fork-v<version>.bin), else none (the built-in defaults).
+std::vector<std::filesystem::path> FindRuntimeCaches(const std::filesystem::path& title_dir);
+
+/// Reads pipeline caches like make_graphics_warm.py's runtime_records(): Vulkan disk caches
+/// (yuzucach) of a readable version, and shader cache v2 logs, whose graphics records hold the
+/// same records. Damaged v2 records are skipped.
 RuntimeStats ReadRuntimeStats(const std::vector<std::filesystem::path>& caches);
 
 /// Built-in FixedPipelineState guesses (warm_defaults.cpp), hash slots zero.
