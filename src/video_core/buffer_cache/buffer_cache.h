@@ -901,13 +901,15 @@ void BufferCache<P>::NoteReadBack(DAddr begin, DAddr end, bool gpu_modified) {
 }
 
 template <class P>
-void BufferCache<P>::NoteReportPending(DAddr device_addr, u64 size) {
+bool BufferCache<P>::NoteReportPending(DAddr device_addr, u64 size) {
     if constexpr (!IS_OPENGL && USE_MEMORY_MAPS) {
         const DAddr page = Common::AlignDown(device_addr, DEVICE_PAGESIZE);
         if (std::ranges::binary_search(read_back_pages, page, {}, &ReadBackPage::page)) {
             pending_reports.push_back({device_addr, size, false});
+            return true;
         }
     }
+    return false;
 }
 
 template <class P>

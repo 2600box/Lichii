@@ -1483,14 +1483,17 @@ void ReportOnReadBackPage(Fixture& f, VideoCommon::BufferId id) {
         WriteByDispatch(f, id, 0x20000, 0x100, frame);
         ReadWord(f, 0x20010);
     }
-    f.cache->NoteReportPending(0x20040, 4);
+    REQUIRE(f.cache->NoteReportPending(0x20040, 4));
 }
 
-/// The report's fence callback (QueryCacheBase::CounterReport) writes its result.
-void WriteReportResult(Fixture& f, u32 result) {
+/// The report's fence callback (QueryCacheBase::CounterReport) writes its result, and ends it if
+/// the buffer cache kept it (`noted`).
+void WriteReportResult(Fixture& f, u32 result, bool noted) {
     f.cache->FinishReadDownloads(0x20040, 4);
     std::memcpy(f.bytes + 0x10040, &result, sizeof(result));
-    f.cache->FinishReport(0x20040, 4);
+    if (noted) {
+        f.cache->FinishReport(0x20040, 4);
+    }
 }
 } // namespace
 
@@ -1510,7 +1513,7 @@ TEST_CASE("A query result older than a GPU write it lands over leaves the write 
         REQUIRE(Access::ReadDownloads(*f.cache) == 0);
         REQUIRE(f.bytes[0x10040] == 3);
     }
-    WriteReportResult(f, 0xcafef00d);
+    WriteReportResult(f, 0xcafef00d, true);
     // The dispatch's words are newer: the next read downloads them again.
     REQUIRE_FALSE(ReadWord(f, 0x20040).preemtive);
     REQUIRE(f.bytes[0x10040] == 3);
@@ -1528,12 +1531,36 @@ TEST_CASE("A query result newer than the GPU writes under it stays in guest memo
         ReadWord(f, 0x20010);
     }
     WriteByDispatch(f, id, 0x20000, 0x100, 3);
-    f.cache->NoteReportPending(0x20040, 4);
-    WriteReportResult(f, 0xcafef00d);
+    const bool noted = f.cache->NoteReportPending(0x20040, 4);
+    REQUIRE(noted);
+    WriteReportResult(f, 0xcafef00d, noted);
     REQUIRE(ReadWord(f, 0x20040).preemtive);
     u32 value{};
     std::memcpy(&value, f.bytes + 0x10040, sizeof(value));
     REQUIRE(value == 0xcafef00d);
+}
+
+TEST_CASE("A result the buffer cache didn't keep ends no other result's tracking",
+          "[buffer_ports]") {
+    Fixture f;
+    const Nx2TitleScope nx2_title;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    // R1 at 0x20040, reported before the page gets early downloads: not kept.
+    const bool r1 = f.cache->NoteReportPending(0x20040, 4);
+    REQUIRE_FALSE(r1);
+    for (u8 frame = 1; frame <= 2; ++frame) {
+        WriteByDispatch(f, id, 0x20000, 0x100, frame);
+        ReadWord(f, 0x20010);
+    }
+    // R2 at the same words, then R1's callback.
+    const bool r2 = f.cache->NoteReportPending(0x20040, 4);
+    REQUIRE(r2);
+    WriteReportResult(f, 0x11111111, r1);
+    // A dispatch writes the words after R2's report, then R2's callback.
+    WriteByDispatch(f, id, 0x20000, 0x100, 3);
+    WriteReportResult(f, 0x22222222, r2);
+    REQUIRE_FALSE(ReadWord(f, 0x20040).preemtive);
+    REQUIRE(f.bytes[0x10040] == 3);
 }
 
 TEST_CASE("Finished early downloads land a few draws later, or at the next dispatch",
