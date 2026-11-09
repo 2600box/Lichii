@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Test build only (EGLA-86 A/B): acquire suspension histogram, off unless
-// EDEN_NX2_ACQUIRE_STATS is set. Not for nx2.
+// Test build only (EGLA-86 A/B, EGLA-94 mirror A/B): acquire suspension histogram and semaphore
+// mirror counters, off unless EDEN_NX2_ACQUIRE_STATS is set. EDEN_NX2_SEM_MIRROR=0 turns the
+// mirror off. Not for nx2.
 
 #pragma once
 
@@ -13,6 +14,7 @@
 
 #include "common/common_types.h"
 #include "common/logging.h"
+#include "video_core/nx2.h"
 
 namespace VideoCommon::Nx2AcquireTest {
 
@@ -21,6 +23,30 @@ inline const bool g_stats = [] {
     return value != nullptr && value[0] != '\0' && value[0] != '0';
 }();
 
+inline const bool g_mirror = [] {
+    const char* value = std::getenv("EDEN_NX2_SEM_MIRROR");
+    return value == nullptr || value[0] != '0';
+}();
+
+/// True when address is in the first page of a registered two-page semaphore region.
+inline bool InFirstPage(u64 address) {
+    for (const auto& region : Tegra::g_nx2_semaphore_regions) {
+        const u64 start = region.load(std::memory_order_relaxed);
+        if (start != 0 && address >= start && address < start + 0x1000) {
+            return true;
+        }
+    }
+    return false;
+}
+
+inline u32 RegisteredRegions() {
+    u32 count = 0;
+    for (const auto& region : Tegra::g_nx2_semaphore_regions) {
+        count += region.load(std::memory_order_relaxed) != 0;
+    }
+    return count;
+}
+
 // Buckets: <1 ms, <10 ms, <100 ms, <500 ms, <2 s, >=2 s.
 class Stats {
 public:
@@ -28,7 +54,20 @@ public:
         static Stats instance;
         return instance;
     }
-    void Acquire(std::chrono::steady_clock::duration wait) {
+    void Mirrored() {
+        if (g_stats) {
+            mirrored.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    /// A suspension starts on a first-page word; second_page_meets: the matching second-page word
+    /// already satisfies it (the mirror would have).
+    void FirstPageSuspend(bool second_page_meets) {
+        if (g_stats) {
+            first_page_suspends.fetch_add(1, std::memory_order_relaxed);
+            second_page_meets_count.fetch_add(second_page_meets ? 1 : 0, std::memory_order_relaxed);
+        }
+    }
+    void Acquire(std::chrono::steady_clock::duration wait, bool first_page = false) {
         if (!g_stats) {
             return;
         }
@@ -40,6 +79,14 @@ public:
         total_us.fetch_add(us, std::memory_order_relaxed);
         for (u64 seen = max_us.load(std::memory_order_relaxed);
              us > seen && !max_us.compare_exchange_weak(seen, us, std::memory_order_relaxed);) {
+        }
+        if (first_page) {
+            first_page_waits.fetch_add(1, std::memory_order_relaxed);
+            first_page_total_us.fetch_add(us, std::memory_order_relaxed);
+            for (u64 seen = first_page_max_us.load(std::memory_order_relaxed);
+                 us > seen &&
+                 !first_page_max_us.compare_exchange_weak(seen, us, std::memory_order_relaxed);) {
+            }
         }
         const s64 now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                std::chrono::steady_clock::now().time_since_epoch())
@@ -62,11 +109,22 @@ public:
                  b[0], b[1], b[2], b[3], b[4], b[5],
                  total_us.exchange(0, std::memory_order_relaxed) / 1000,
                  max_us.exchange(0, std::memory_order_relaxed) / 1000);
+        LOG_INFO(HW_GPU,
+                 "EGLA94 mirror {}: mirrored releases {}, regions {}, first-page suspends {} "
+                 "(second page already met {}), first-page waits {} total {} ms max {} ms",
+                 g_mirror ? "on" : "off", mirrored.exchange(0, std::memory_order_relaxed),
+                 RegisteredRegions(), first_page_suspends.exchange(0, std::memory_order_relaxed),
+                 second_page_meets_count.exchange(0, std::memory_order_relaxed),
+                 first_page_waits.exchange(0, std::memory_order_relaxed),
+                 first_page_total_us.exchange(0, std::memory_order_relaxed) / 1000,
+                 first_page_max_us.exchange(0, std::memory_order_relaxed) / 1000);
     }
 
 private:
     std::array<std::atomic<u64>, 6> buckets{};
     std::atomic<u64> total_us{}, max_us{};
+    std::atomic<u64> mirrored{}, first_page_suspends{}, second_page_meets_count{};
+    std::atomic<u64> first_page_waits{}, first_page_total_us{}, first_page_max_us{};
     std::atomic<s64> last_ms{};
 };
 
