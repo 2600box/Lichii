@@ -13,13 +13,17 @@
 #include "common/logging.h"
 
 // EDEN_NX2_ASYNC_READBACK: how a guest CPU read of GPU-written buffer memory gets its bytes
-// (GPU::OnCPURead).
+// (GPU::OnCPURead), and how long a macro DMA read on the split's front waits for its back
+// (Maxwell3D::FrontDmaRead).
 // - unset or 0: the GPU thread downloads them and waits for the host GPU (Scheduler::Finish).
+//   Macro DMA reads drain the split.
 // - 1: the GPU thread submits the downloads and goes on. The reading thread waits for that
 //   submission and writes the bytes to guest memory (BufferCache::FinishReadDownloads). Pages
-//   the guest reads after each GPU write get their download right behind the write.
+//   the guest reads after each GPU write get their download right behind the write. Macro DMA
+//   reads wait only for the queued work that can write their words (GpuSplit::WaitForWrites).
 // - verify: 1, and every read download is compared with a synchronous flush's copy taken at the
-//   same point of the GPU's work (BufferCache::CheckReadDownload).
+//   same point of the GPU's work (BufferCache::CheckReadDownload); every macro DMA read made
+//   without draining the split drains it too and is compared (CheckDmaRead).
 namespace VideoCore::AsyncReadback {
 
 enum class Mode : u8 { Off, On, Verify };
@@ -95,6 +99,12 @@ struct Counters {
     /// Writes from the GPU's side that waited for the host GPU to run a read download under them
     std::atomic<u64> gpu_side_waits{};
     std::atomic<u64> gpu_side_wait_ns{};
+    /// Macro DMA reads on the split's front (Maxwell3D::FrontDmaRead), those that waited for its
+    /// back (every one without the switch) and those that drained it, and the time they waited
+    std::atomic<u64> dma_reads{};
+    std::atomic<u64> dma_waited{};
+    std::atomic<u64> dma_drained{};
+    std::atomic<u64> dma_wait_ns{};
     std::atomic<u64> window_start{};
 };
 
@@ -124,7 +134,14 @@ inline void CountHostWait(u64 ns) {
     }
 }
 
-/// Logs the totals every 10 s and resets them, on whichever reading thread comes first.
+inline void CountDmaRead(bool waited, bool drained, u64 ns) {
+    Add(g_counters.dma_reads, 1);
+    Add(g_counters.dma_waited, waited ? 1 : 0);
+    Add(g_counters.dma_drained, drained ? 1 : 0);
+    Add(g_counters.dma_wait_ns, ns);
+}
+
+/// Logs the totals every 10 s and resets them, on whichever thread counting comes first.
 inline void MaybeReport() {
     auto& c = g_counters;
     const u64 now = Now();
@@ -157,6 +174,10 @@ inline void MaybeReport() {
     const u64 reader_max_wait_ns = take(c.reader_max_wait_ns);
     const u64 gpu_side_waits = take(c.gpu_side_waits);
     const u64 gpu_side_wait_ns = take(c.gpu_side_wait_ns);
+    const u64 dma_reads = take(c.dma_reads);
+    const u64 dma_waited = take(c.dma_waited);
+    const u64 dma_drained = take(c.dma_drained);
+    const u64 dma_wait_ns = take(c.dma_wait_ns);
     constexpr auto sync = static_cast<size_t>(Read::Sync);
     constexpr auto async = static_cast<size_t>(Read::Async);
     constexpr auto in_flight = static_cast<size_t>(Read::InFlight);
@@ -166,13 +187,15 @@ inline void MaybeReport() {
              "({:.1f} ms), {:.0f} async ({:.1f} ms), {:.0f} only waited for a download on its way "
              "({:.1f} ms) | GPU thread in read flushes {:.1f} ms | readers waited on their fence "
              "{:.0f} times, {:.1f} ms (longest {:.2f} ms) | GPU-side writes fell back to a host "
-             "GPU wait {:.0f} times, {:.1f} ms",
+             "GPU wait {:.0f} times, {:.1f} ms | macro DMA reads {:.0f}, {:.0f} waited for the "
+             "split's back ({:.1f} ms), {:.0f} drained it",
              mode_names[static_cast<size_t>(GetMode())], per_second(reads[sync]),
              ms_per_second(read_ns[sync]), per_second(reads[async]), ms_per_second(read_ns[async]),
              per_second(reads[in_flight]), ms_per_second(read_ns[in_flight]),
              ms_per_second(flush_ns), per_second(reader_waits), ms_per_second(reader_wait_ns),
              static_cast<double>(reader_max_wait_ns) / 1e6, per_second(gpu_side_waits),
-             ms_per_second(gpu_side_wait_ns));
+             ms_per_second(gpu_side_wait_ns), per_second(dma_reads), per_second(dma_waited),
+             ms_per_second(dma_wait_ns), per_second(dma_drained));
 }
 
 } // namespace VideoCore::AsyncReadback
