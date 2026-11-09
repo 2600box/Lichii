@@ -229,7 +229,7 @@ void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu
     // out of the GPU-modified ones, and the read's synchronous flush leaves them. Landed bytes
     // are no longer GPU-modified, so the write reaches no ClearDownload: written back to the
     // landed value after an upload of another, they read as GPU bytes the download missed.
-    if (!early_landed.empty()) [[unlikely]] {
+    if (!early_landed.empty()) {
         ForgetEarlyLanded(device_addr, size);
     }
     // The written range lies within its pages: when they hold no GPU-written data, both lookups
@@ -369,7 +369,7 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
             return area;
         }
     }
-    if (check_early) [[unlikely]] {
+    if (check_early) {
         area->preemtive = false;
     }
     // A preflushable mark persists and downloads later GPU writes at every fence. Native titles
@@ -586,7 +586,7 @@ void BufferCache<P>::RecordReadDownload(std::span<const std::pair<DAddr, u64>> r
         boost::container::small_vector<Copy, 16> check_copies;
         u64 check_size = 0;
         const u64 check_every = read_check.every != 0 ? read_check.every : ReadCheckEvery();
-        if (check_every != 0 && read_check.next++ % check_every == 0) [[unlikely]] {
+        if (check_every != 0 && read_check.next++ % check_every == 0) {
             check = std::make_unique<ReadCheck>();
             check->read_begin = ~DAddr{0};
             for (const auto& [own_addr, own_size] : own) {
@@ -658,7 +658,7 @@ void BufferCache<P>::RecordReadDownload(std::span<const std::pair<DAddr, u64>> r
                     });
             });
         }
-        if (check) [[unlikely]] {
+        if (check) {
             // Each byte a synchronous flush copies is in this download or an earlier one (kept).
             for (const Copy& entry : check_copies) {
                 const DAddr start = slot_buffers[entry.buffer_id].CpuAddr() + entry.copy.src_offset;
@@ -697,7 +697,7 @@ void BufferCache<P>::RecordReadDownload(std::span<const std::pair<DAddr, u64>> r
             std::vector<u8> as_landed;
         };
         boost::container::small_vector<LandedCopy, 4> landed_copies;
-        if (check && !early && !early_landed.empty()) [[unlikely]] {
+        if (check && !early && !early_landed.empty()) {
             const auto add_landed = [&](DAddr lower, DAddr upper, const u8* as_landed) {
                 ForEachBufferInRange(lower, upper - lower, [&](BufferId buffer_id, Buffer& buffer) {
                     const DAddr buffer_addr = buffer.CpuAddr();
@@ -745,7 +745,7 @@ void BufferCache<P>::RecordReadDownload(std::span<const std::pair<DAddr, u64>> r
             }
             download.staging = staging;
         }
-        if (check && !check_copies.empty()) [[unlikely]] {
+        if (check && !check_copies.empty()) {
             // The same bytes again, from the same point of the GPU's work: what a synchronous
             // flush would have written.
             check->staging = runtime.DownloadStagingBuffer(check_size, true);
@@ -820,11 +820,11 @@ void BufferCache<P>::OutdateReadDownloads(DAddr device_addr, u64 size) {
     // a synchronous flush doesn't download it, and guest memory gets the result once the query
     // cache writes it there. MarkWrittenBuffer's bytes are GPU-modified from now on, which
     // TakeEarlyLanded leaves out, and every way out of that forgets them too.
-    if (!early_landed.empty()) [[unlikely]] {
+    if (!early_landed.empty()) {
         ForgetEarlyLanded(device_addr, size);
     }
     // The bytes stay GPU-modified when the downloads land, so a later read downloads them.
-    if (!read_downloads.empty()) [[unlikely]] {
+    if (!read_downloads.empty()) {
         for (ReadDownload& download : read_downloads) {
             download.clean_ranges.Subtract(device_addr, size);
         }
@@ -1084,7 +1084,7 @@ void BufferCache<P>::WriteReadDownloads(u64 tick, VideoCore::AsyncReadback::Land
                     (std::max)(landing_end, static_cast<DAddr>(copy.src_offset + copy.size));
             };
             std::ranges::for_each(download.copies, cover);
-            if (download.check) [[unlikely]] {
+            if (download.check) {
                 std::ranges::for_each(download.check->copies, cover);
             }
             const VideoCore::DownloadLanding landing{landing_begin, landing_end};
@@ -1103,17 +1103,17 @@ void BufferCache<P>::WriteReadDownloads(u64 tick, VideoCore::AsyncReadback::Land
                     });
             }
             // TEST: what early downloads brought, for the reads they serve.
-            if (download.early && ReadChecks()) [[unlikely]] {
+            if (download.early && ReadChecks()) {
                 NoteEarlyLanded(download, cpu_written);
             }
             // TEST: what later reads' checks find of an earlier download where they kept its bytes.
             for (size_t later = 1; later < read_downloads.size(); ++later) {
-                if (read_downloads[later].check) [[unlikely]] {
+                if (read_downloads[later].check) {
                     NoteLandedBytes(*read_downloads[later].check, download.write_ranges,
                                     cpu_written);
                 }
             }
-            if (download.check) [[unlikely]] {
+            if (download.check) {
                 CheckReadDownload(*download.check, cpu_written, landed_by);
                 async_buffers_death_ring.push_back(download.check->staging);
             }
@@ -1333,14 +1333,14 @@ template <class P>
 void BufferCache<P>::ClearDownload(DAddr device_addr, u64 size) {
     ClearFenceDownloads(device_addr, size);
     // TEST (read-back verify): a newer value there, as without early downloads.
-    if (!early_landed.empty()) [[unlikely]] {
+    if (!early_landed.empty()) {
         ForgetEarlyLanded(device_addr, size);
     }
-    if (!read_downloads.empty()) [[unlikely]] {
+    if (!read_downloads.empty()) {
         for (ReadDownload& download : read_downloads) {
             download.write_ranges.Subtract(device_addr, size);
             download.clean_ranges.Subtract(device_addr, size);
-            if (download.check) [[unlikely]] {
+            if (download.check) {
                 download.check->changed.Add(device_addr, size);
             }
         }
@@ -2071,7 +2071,7 @@ template <class P>
 void BufferCache<P>::WriteDownloadedMemory(const Common::RangeSet<DAddr>& cpu_written,
                                            DAddr device_addr, const u8* data, u64 size) {
     // TEST (read-back verify): newer GPU bytes than an early download brought before.
-    if (!early_landed.empty()) [[unlikely]] {
+    if (!early_landed.empty()) {
         ForgetEarlyLanded(device_addr, size);
     }
     if (!cpu_written.Intersects(device_addr, size)) {

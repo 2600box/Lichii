@@ -995,7 +995,7 @@ private:
     /// then holds it while guest memory may hold the landed value again: no read compares those
     /// bytes, as a synchronous flush would not download them.
     void ForgetUploadedEarlyLanded(DAddr device_addr, u64 size) {
-        if (!early_landed.empty()) [[unlikely]] {
+        if (!early_landed.empty()) {
             ForgetRewrittenEarlyLanded(device_addr, size);
         }
     }
