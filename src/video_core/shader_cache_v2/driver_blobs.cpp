@@ -9,6 +9,7 @@
 #include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "video_core/pipeline_cache_files.h"
+#include "video_core/renderer_vulkan/vk_shader_cache_v2.h"
 #include "video_core/shader_cache_v2/cache_file.h"
 #include "video_core/shader_cache_v2/driver_blobs.h"
 #include "video_core/shader_cache_v2/payload_io.h"
@@ -98,9 +99,11 @@ std::optional<PipelineBinaries> DecodeBinaries(std::span<const u8> payload) {
 DriverBlobStore::DriverBlobStore(std::filesystem::path file_, const DeviceIdentity& identity,
                                  DriverBlobOptions options_)
     : file{std::move(file_)}, options{options_} {
+    Vulkan::V2BootTrace("ds_begin");
     {
         // Read without the lock, as the v2 log is: appends are complete records or a cut-off tail.
         const LogFile log = ReadLogFile(file);
+        Vulkan::V2BootTrace("ds_read");
         bool same_identity{};
         bool has_identity{};
         for (const LogRecord& record : log.parsed.live) {
@@ -145,12 +148,17 @@ DriverBlobStore::DriverBlobStore(std::filesystem::path file_, const DeviceIdenti
                         Common::FS::FileShareFlag::ShareReadWrite);
         }
     }
+    Vulkan::V2BootTrace("ds_scanned");
     writer.emplace(file, options.writer);
+    Vulkan::V2BootTrace("ds_writer");
     if (discarded != DriverBlobDiscard::None || loaded_bytes == 0) {
         const std::vector<u8> payload = EncodeIdentity(identity);
+        Vulkan::V2BootTrace("ds_encoded");
         writer->Append(RecordKind::DeviceIdentity, 0, payload);
+        Vulkan::V2BootTrace("ds_appended");
         file_bytes = FileHeaderSize + RecordSize(payload.size());
     }
+    Vulkan::V2BootTrace("ds_done");
 }
 
 DriverBlobStore::~DriverBlobStore() {

@@ -10,6 +10,7 @@
 #include "common/thread.h"
 #include "video_core/shader_cache_v2/cache_file.h"
 #include "video_core/shader_cache_v2/cache_writer.h"
+#include "video_core/renderer_vulkan/vk_shader_cache_v2.h"
 
 namespace VideoCommon::ShaderCacheV2 {
 
@@ -66,7 +67,9 @@ WriterStats CacheWriter::Stats() const {
 }
 
 void CacheWriter::Run(std::stop_token stop) {
+    Vulkan::V2BootTrace("cw_run");
     Common::SetCurrentThreadName("ShaderCacheWriter");
+    Vulkan::V2BootTrace("cw_named");
     std::unique_lock lock{mutex};
     while (!stop.stop_requested()) {
         const auto now = Clock::now();

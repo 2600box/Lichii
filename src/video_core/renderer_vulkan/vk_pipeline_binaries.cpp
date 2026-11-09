@@ -224,7 +224,9 @@ std::unique_ptr<PipelineBinaries> PipelineBinaries::Open(const Device& device,
 
 PipelineBinaries::PipelineBinaries(const Device& device_, std::filesystem::path file,
                                    const ShaderCacheV2::DeviceIdentity& identity)
-    : device{device_}, store{std::move(file), identity} {}
+    : device{device_}, store{std::move(file), identity} {
+    V2BootTrace("pb_ctor_done");
+}
 
 vk::Pipeline PipelineBinaries::CreateGraphicsPipeline(const VkGraphicsPipelineCreateInfo& ci,
                                                       VkPipelineCache cache, u64 key) {
