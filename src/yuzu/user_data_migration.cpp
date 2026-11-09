@@ -143,6 +143,7 @@ void UserDataMigrator::MigrateUserData(QMainWindow* main_window, const bool clea
     progress->setLabelText(QObject::tr("Migrating, this may take a while..."));
     progress->setRange(0, 0);
     progress->setCancelButton(nullptr);
+    progress->setWindowFlag(Qt::WindowCloseButtonHint, false);
     progress->setWindowModality(Qt::WindowModality::ApplicationModal);
 
     QThread* thread = new QThread(main_window);
@@ -151,19 +152,28 @@ void UserDataMigrator::MigrateUserData(QMainWindow* main_window, const bool clea
 
     thread->connect(thread, &QThread::started, worker, &MigrationWorker::process);
 
-    // Esc closes the progress dialog without stopping the worker, so wait for the worker itself.
+    // The worker can't be stopped, so wait for it rather than for the dialog, and show the dialog
+    // again if Esc closes it before the worker is done.
     QEventLoop loop;
+    bool worker_done = false;
+    QObject::connect(progress, &QDialog::rejected, progress, [progress, &worker_done] {
+        if (!worker_done) {
+            progress->show();
+        }
+    });
 
-    thread->connect(worker, &MigrationWorker::finished, progress,
-                    [=, this, &loop](const QString& success_text, const std::string& path) {
-                        progress->close();
-                        QMessageBox::information(main_window, QObject::tr("Migration"),
-                                                 success_text, QMessageBox::Ok);
+    thread->connect(
+        worker, &MigrationWorker::finished, progress,
+        [=, this, &loop, &worker_done](const QString& success_text, const std::string& path) {
+            worker_done = true;
+            progress->close();
+            QMessageBox::information(main_window, QObject::tr("Migration"), success_text,
+                                     QMessageBox::Ok);
 
-                        migrated = true;
-                        thread->quit();
-                        loop.quit();
-                    });
+            migrated = true;
+            thread->quit();
+            loop.quit();
+        });
 
     thread->connect(worker, &MigrationWorker::finished, worker, &QObject::deleteLater);
     thread->connect(thread, &QThread::finished, thread, &QObject::deleteLater);
