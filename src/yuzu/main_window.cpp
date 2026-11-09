@@ -393,9 +393,9 @@ MainWindow::MainWindow(bool has_broken_vulkan)
         // write there.
         using namespace Common::FS;
 
-        static constexpr std::array paths = {EdenPath::NANDDir, EdenPath::SDMCDir,
-                                             EdenPath::DumpDir, EdenPath::LoadDir,
-                                             EdenPath::TASDir,  EdenPath::SaveDir};
+        static constexpr std::array paths = {
+            EdenPath::NANDDir, EdenPath::SDMCDir, EdenPath::DumpDir,       EdenPath::LoadDir,
+            EdenPath::TASDir,  EdenPath::SaveDir, EdenPath::ScreenshotsDir};
 
         const auto old_root = GetLegacyPath(user_data_migrator.selected_emu.e_user_dir);
         const auto new_root = GetEdenPath(EdenPath::EdenDir);
