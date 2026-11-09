@@ -7,6 +7,7 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <numeric>
 #include <cstdlib>
 #include <limits>
@@ -1073,6 +1074,10 @@ void TextureCache<P>::UpdateRenderTargets(bool is_clear) {
         }
     } clearing_scope{clearing_render_targets};
     clearing_render_targets = is_clear;
+    egla98_rt_lookup = true;
+    SCOPE_EXIT {
+        egla98_rt_lookup = false;
+    };
     auto& flags = maxwell3d->dirty.flags;
     if (!flags[Dirty::RenderTargets]) {
         for (size_t index = 0; index < NUM_RT; ++index) {
@@ -2105,10 +2110,27 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
     ++images_uploaded;
     uploaded_bytes += image.guest_size_bytes;
     largest_upload = (std::max<u64>)(largest_upload, image.guest_size_bytes);
+    const auto upload_start = std::chrono::steady_clock::now();
     if (!UploadInChunks(image)) {
         auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
         UploadImageContents(image, staging);
         runtime.InsertUploadMemoryBarrier();
+    }
+    // TEST ONLY (EGLA-98): uploads over 3 ms with their shape, while the stutter trace is on.
+    if (StutterTrace::Enabled()) {
+        const double upload_ms = std::chrono::duration<double, std::milli>(
+                                     std::chrono::steady_clock::now() - upload_start)
+                                     .count();
+        if (upload_ms > 3.0) {
+            LOG_INFO(HW_GPU,
+                     "EGLA98 upload ms={:.1f} id={} guest_bytes={} map_bytes={} {}x{}x{} layers={} "
+                     "levels={} format={} type={} flags={:#x} rt_lookup={} clearing={}",
+                     upload_ms, image_id.index, image.guest_size_bytes, MapSizeBytes(image),
+                     image.info.size.width, image.info.size.height, image.info.size.depth,
+                     image.info.resources.layers, image.info.resources.levels,
+                     static_cast<u32>(image.info.format), static_cast<u32>(image.info.type),
+                     static_cast<u32>(image.flags), egla98_rt_lookup, clearing_render_targets);
+        }
     }
     // The host GPU has its own copy now and the guest rarely reads this memory again: TickFrame
     // marks it cold, so the OS pages it out before anything else when it needs RAM (title 1
@@ -3200,7 +3222,32 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
             break;
         }
     }
-    if (overwritten_by_clear()) {
+    const bool by_clear = overwritten_by_clear();
+    // TEST ONLY (EGLA-98): how large render-target-shaped images are made and first used.
+    if (StutterTrace::Enabled() && new_info.type == ImageType::e2D &&
+        new_info.resources.levels == 1 && new_info.num_samples == 1 &&
+        new_image.guest_size_bytes >= 4_MiB) {
+        const auto& surface = maxwell3d->regs.clear_surface;
+        size_t alias_copies = 0;
+        for (const JoinCopy& copy : join_copies_to_do) {
+            alias_copies += copy.is_alias ? 1 : 0;
+        }
+        LOG_INFO(HW_GPU,
+                 "EGLA98 rt-join id={} gpu={:#x} {}x{} layers={} format={} rt_lookup={} "
+                 "clearing={} clear_layer={} clear_rt={} rgba={}{}{}{} covers={} by_clear={} "
+                 "copied_whole={} copies={} alias_copies={} can_rescale={} frame={}",
+                 new_image_id.index, gpu_addr, new_info.size.width, new_info.size.height,
+                 new_info.resources.layers, static_cast<u32>(new_info.format), egla98_rt_lookup,
+                 clearing_render_targets, surface.layer.Value(), surface.RT.Value(),
+                 surface.R.Value(), surface.G.Value(), surface.B.Value(), surface.A.Value(),
+                 ClearCovers(new_info.size.width, new_info.size.height), by_clear, copied_whole,
+                 join_copies_to_do.size(), alias_copies, can_rescale, frame_tick);
+        if (egla98_traced.size() > 4096) {
+            egla98_traced.clear();
+        }
+        egla98_traced[new_image_id.index] = 8;
+    }
+    if (by_clear) {
         // Stays CpuModified: UpdateRenderTargets' PrepareImage drops the upload only when
         // IsFullClear agrees the clear covers the whole image, and uploads it otherwise.
         runtime.TransitionImageLayout(new_image);
@@ -4147,6 +4194,23 @@ void TextureCache<P>::PrepareImage(ImageId image_id, bool is_modification, bool 
         }
     }
     Image& image = slot_images[image_id];
+    if (StutterTrace::Enabled()) {
+        const auto traced = egla98_traced.find(image_id.index);
+        if (traced != egla98_traced.end()) {
+            const auto& surface = maxwell3d->regs.clear_surface;
+            LOG_INFO(HW_GPU,
+                     "EGLA98 rt-use id={} mod={} invalidate={} rt_lookup={} clearing={} "
+                     "clear_layer={} clear_rt={} rgba={}{}{}{} covers={} cpu_modified={} frame={}",
+                     image_id.index, is_modification, invalidate, egla98_rt_lookup,
+                     clearing_render_targets, surface.layer.Value(), surface.RT.Value(),
+                     surface.R.Value(), surface.G.Value(), surface.B.Value(), surface.A.Value(),
+                     ClearCovers(image.info.size.width, image.info.size.height),
+                     True(image.flags & ImageFlagBits::CpuModified), frame_tick);
+            if (--traced->second == 0) {
+                egla98_traced.erase(traced);
+            }
+        }
+    }
     if (invalidate) {
         image.flags &= ~(ImageFlagBits::CpuModified | ImageFlagBits::GpuModified);
         if (False(image.flags & ImageFlagBits::Tracked)) {
