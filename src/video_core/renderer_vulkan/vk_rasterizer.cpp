@@ -1447,7 +1447,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, u32 instance_count, Func&& d
     }
 
     // Stage B: records the draw from the packet alone.
-    if (Profile::Scope scope{Profile::Zone::Configure}; !pipeline->Record(packet)) {
+    if (Profile::Scope scope{Profile::Zone::Record}; !pipeline->Record(packet)) {
         // The dirty flags A took stay recorded for the next draw.
         RecordDynamicStates(packet.dynamic);
         report_failure("configure failed");

@@ -1734,7 +1734,10 @@ void BufferCache<P>::UpdateGraphicsUniformBuffers() {
 
 template <class P>
 void BufferCache<P>::UpdateGraphicsBuffers(const GraphicsBufferPacket& packet) {
-    BindPacketBuffers(packet);
+    {
+        Nx2Profile::Scope scope{Nx2Profile::Zone::PacketBind};
+        BindPacketBuffers(packet);
+    }
     do {
         channel_state->has_deleted_buffers = false;
         DoUpdateGraphicsBuffers(packet);
