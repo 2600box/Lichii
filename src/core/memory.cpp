@@ -37,6 +37,7 @@
 #include "video_core/gpu.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/host1x/host1x.h"
+#include "video_core/nx2_async_readback.h"
 #include "video_core/rasterizer_download_area.h"
 
 namespace Core::Memory {
@@ -961,6 +962,11 @@ struct Memory::Impl {
                 }
             }
             gpu_dirty_managers[core].Collect(address, size);
+            // A download writing to guest memory here may have looked at the collected writes
+            // before this one: its bytes would land over the ones stored after this returns.
+            if (VideoCore::AsyncReadback::Enabled()) {
+                VideoCore::DownloadLanding::Await(address, size);
+            }
         });
     }
 
