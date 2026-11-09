@@ -276,7 +276,15 @@ bool DmaPusher::Step() {
         // queued before it. The GPU fetches the list after that work only past a host-level wait
         // (NoteSync): later work is not ordered before the fetch, and the list does not wait for
         // it (nor for draws, which write memory too; draw-written lists wait for the last sync).
-        if (!gpu_written && VideoCommon::GpuSplit::Get().Active()) {
+        static const bool old_list_recheck =
+            std::getenv("EDEN_NX2_TEST_OLD_LIST_RECHECK") != nullptr;
+        if (old_list_recheck) {
+            if (!gpu_written && VideoCommon::GpuSplit::Get().Active() &&
+                VideoCommon::GpuSplit::Get().WaitForSyncedWritersOld()) {
+                gpu_written =
+                    IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
+            }
+        } else if (!gpu_written && VideoCommon::GpuSplit::Get().Active()) {
             VideoCommon::GpuSplit::Get().WaitForSyncedWriters();
             gpu_written =
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));

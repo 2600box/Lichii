@@ -318,6 +318,8 @@ public:
     /// the writers a command list fetched now is ordered after. Returns whether any of it was
     /// still queued.
     bool WaitForSyncedWriters();
+    /// TEST (EGLA-91 r9): the wait before #1056's review fix.
+    bool WaitForSyncedWritersOld();
 
     /// The entry just sent (Writes::Noted) writes [address, address + size) of `memory`.
     void NoteWrite(const Tegra::MemoryManager& memory, GPUVAddr address, u64 size);
