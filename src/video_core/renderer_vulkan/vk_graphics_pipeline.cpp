@@ -2609,6 +2609,52 @@ vk::Pipeline GraphicsPipeline::LinkLibraries(VkRenderPass render_pass, bool opti
 bool GraphicsPipeline::MakeLibraryPipeline(VkRenderPass render_pass) {
     PipelineStates states;
     FillStates(states);
+    // Values of states the draw sets (those in the dynamic list) are zeroed in the libraries'
+    // create info, and so in their keys: pipelines that differ only in them share one shader
+    // library. Vulkan ignores the static value of a dynamic state, so the linked pipeline draws
+    // the same. The monolithic route (MakePipeline, the fallback) keeps the real values. The
+    // fragment output library takes the same multisample state as the fragment shader library.
+    const auto is_dynamic = [&states](VkDynamicState state) {
+        return std::ranges::find(states.dynamic_states, state) != states.dynamic_states.end();
+    };
+    VkPipelineRasterizationStateCreateInfo& raster = states.rasterization_ci;
+    if (is_dynamic(VK_DYNAMIC_STATE_CULL_MODE_EXT)) {
+        raster.cullMode = VK_CULL_MODE_NONE;
+    }
+    if (is_dynamic(VK_DYNAMIC_STATE_FRONT_FACE_EXT)) {
+        raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    }
+    if (is_dynamic(VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE_EXT)) {
+        raster.depthBiasEnable = VK_FALSE;
+    }
+    if (is_dynamic(VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE_EXT)) {
+        raster.rasterizerDiscardEnable = VK_FALSE;
+    }
+    if (is_dynamic(VK_DYNAMIC_STATE_DEPTH_CLAMP_ENABLE_EXT)) {
+        raster.depthClampEnable = VK_FALSE;
+    }
+    if (is_dynamic(VK_DYNAMIC_STATE_LINE_RASTERIZATION_MODE_EXT)) {
+        // Rectangular, not default: valid with a static stipple enable on every device that
+        // stipples (FillStates enables stipple only with stippledRectangularLines).
+        states.line_state.lineRasterizationMode = VK_LINE_RASTERIZATION_MODE_RECTANGULAR_EXT;
+    }
+    if (is_dynamic(VK_DYNAMIC_STATE_LINE_STIPPLE_ENABLE_EXT)) {
+        states.line_state.stippledLineEnable = VK_FALSE;
+    }
+    if (is_dynamic(VK_DYNAMIC_STATE_CONSERVATIVE_RASTERIZATION_MODE_EXT)) {
+        states.conservative_raster.conservativeRasterizationMode =
+            VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT;
+    }
+    if (is_dynamic(VK_DYNAMIC_STATE_ALPHA_TO_COVERAGE_ENABLE_EXT)) {
+        states.multisample_ci.alphaToCoverageEnable = VK_FALSE;
+    }
+    if (is_dynamic(VK_DYNAMIC_STATE_ALPHA_TO_ONE_ENABLE_EXT)) {
+        states.multisample_ci.alphaToOneEnable = VK_FALSE;
+    }
+    if (is_dynamic(VK_DYNAMIC_STATE_DEPTH_BOUNDS)) {
+        states.depth_stencil_ci.minDepthBounds = 0.0f;
+        states.depth_stencil_ci.maxDepthBounds = 0.0f;
+    }
     static constexpr std::array parts{GplPart::PreRasterization, GplPart::Fragment};
     bool any_library{};
     for (size_t index = 0; index < parts.size(); ++index) {
