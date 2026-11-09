@@ -43,6 +43,7 @@
 #include "video_core/nx2.h"
 #include "video_core/nx2_async_readback.h"
 #include "video_core/nx2_profile.h"
+#include "video_core/nx2_stage_probe.h"
 #include "video_core/renderer_base.h"
 #include "video_core/shader_notify.h"
 
@@ -270,6 +271,7 @@ struct GPU::Impl {
             return raster_area;
         }
         raster_area.preemtive = true;
+        VideoCommon::Nx2StageProbe::NoteGuestRead(!raster_area.in_flight);
         // A guest CPU read of GPU-written memory (reactive flushing): count them, they decide
         // whether buffer data must be copied back at every fence (EDEN_NX2_BUFFER_DOWNLOADS).
         if (static std::atomic<u64> reads{}; (reads.fetch_add(1, std::memory_order_relaxed) & 63) == 0) {
