@@ -14,6 +14,7 @@ add_executable(tests
     video_core/nx2_stutter_trace.cpp
     video_core/host_mip_limits.cpp
     video_core/gpu_timestamp.cpp
+    video_core/semaphore_waiters.cpp
     core/nx2_streamplay.cpp
     core/nx2_video_ready.cpp
     core/nx2_debug_server.cpp
