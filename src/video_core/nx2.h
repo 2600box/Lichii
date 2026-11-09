@@ -6,9 +6,13 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <mutex>
+#include <optional>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -156,11 +160,110 @@ inline void Nx2RemoveSemaphoreRegion(u64 start) {
     }
 }
 
+inline bool Nx2InSemaphoreFirstPage(u64 address) {
+    for (const auto& region : g_nx2_semaphore_regions) {
+        const u64 start = region.load(std::memory_order_relaxed);
+        if (start != 0 && address >= start && address < start + 0x1000) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Some first-page words also get direct releases of their own counter (a queue's fence at
+/// offset 0). A mirrored release into such a word would show the guest CPU another counter's
+/// progress, so its waits end before the work they wait for has run. Mirrored releases into
+/// those words go to this table instead, and only GPU acquires read it. Words only the mirror
+/// writes keep getting guest memory writes. Keyed by device word address. Ported from
+/// jpasqui/Eglantine f8941169650 and ca73069b2e.
+class Nx2MirrorShadow {
+public:
+    static Nx2MirrorShadow& Get() {
+        static Nx2MirrorShadow instance;
+        return instance;
+    }
+
+    /// A release that is not the mirror's landed at gpu_address (device_address).
+    void NoteDirectRelease(u64 device_address, u64 gpu_address) {
+        if (!Nx2InSemaphoreFirstPage(gpu_address)) {
+            return;
+        }
+        const u64 word = device_address & ~u64{3};
+        std::scoped_lock lock{mutex};
+        if (direct_words.size() < MaxDirectWords) {
+            direct_words.insert(word);
+            has_direct.store(true, std::memory_order_release);
+        }
+        words.erase(word);
+    }
+
+    /// Whether a mirrored release into this word goes to the table instead of guest memory.
+    bool Diverts(u64 device_address) const {
+        // Test branch only (EGLA-94 A/B): the shadow is off unless EDEN_NX2_SEM_MIRROR_SHADOW=1.
+        static const bool on = [] {
+            const char* value = std::getenv("EDEN_NX2_SEM_MIRROR_SHADOW");
+            return value != nullptr && value[0] == '1';
+        }();
+        if (!on || !has_direct.load(std::memory_order_acquire)) {
+            return false;
+        }
+        std::scoped_lock lock{mutex};
+        return direct_words.contains(device_address & ~u64{3});
+    }
+
+    /// guest: what guest memory holds at the word now.
+    void Set(u64 device_address, u32 value, u32 guest) {
+        std::scoped_lock lock{mutex};
+        words.insert_or_assign(device_address & ~u64{3}, Word{value, guest});
+        has_words.store(true, std::memory_order_release);
+    }
+
+    /// The mirrored value of a word whose guest memory holds guest, or none. Once the guest word
+    /// changed (a direct release or a CPU write), it is newer than the mirrored value.
+    std::optional<u32> Read(u64 device_address, u32 guest) {
+        if (!has_words.load(std::memory_order_acquire)) {
+            return std::nullopt;
+        }
+        std::scoped_lock lock{mutex};
+        const auto it = words.find(device_address & ~u64{3});
+        if (it == words.end()) {
+            return std::nullopt;
+        }
+        if (it->second.guest != guest) {
+            words.erase(it);
+            return std::nullopt;
+        }
+        return it->second.value;
+    }
+
+    void Clear() {
+        std::scoped_lock lock{mutex};
+        direct_words.clear();
+        words.clear();
+        has_direct.store(false, std::memory_order_release);
+        has_words.store(false, std::memory_order_release);
+    }
+
+private:
+    struct Word {
+        u32 value;
+        u32 guest;
+    };
+    static constexpr size_t MaxDirectWords = 1024;
+
+    mutable std::mutex mutex;
+    std::atomic<bool> has_direct{};
+    std::atomic<bool> has_words{};
+    std::unordered_set<u64> direct_words;
+    std::unordered_map<u64, Word> words;
+};
+
 /// A new emulation session starts: no queue has a region yet.
 inline void Nx2ClearSemaphoreRegions() {
     for (auto& region : g_nx2_semaphore_regions) {
         region.store(0);
     }
+    Nx2MirrorShadow::Get().Clear();
 }
 
 // Switch 2 sparse regions (nx2:gpu 214, word 7 bit 0x200: title 1's terrain texture arrays and

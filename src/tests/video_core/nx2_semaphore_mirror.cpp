@@ -32,3 +32,36 @@ TEST_CASE("Nx2SemaphoreMirror maps second-page releases to the first page", "[vi
     Tegra::Nx2ClearSemaphoreRegions();
     CHECK(Tegra::Nx2SemaphoreMirror(other + 0x1010) == 0);
 }
+
+
+TEST_CASE("Nx2MirrorShadow keeps mirrored values out of words with direct releases", "[video_core][nx2]") {
+    constexpr u64 region = 0x2106027000;
+    constexpr u64 device = 0x80001000;
+    auto& shadow = Tegra::Nx2MirrorShadow::Get();
+    Tegra::Nx2ClearSemaphoreRegions();
+    Tegra::Nx2AddSemaphoreRegion(region);
+
+    CHECK_FALSE(shadow.Diverts(device));
+    shadow.NoteDirectRelease(device + 0x10, region + 0x1010);
+    CHECK_FALSE(shadow.Diverts(device + 0x10));
+
+    shadow.NoteDirectRelease(device, region);
+    CHECK(shadow.Diverts(device));
+    CHECK(shadow.Diverts(device + 2));
+    CHECK_FALSE(shadow.Diverts(device + 4));
+
+    CHECK_FALSE(shadow.Read(device, 7).has_value());
+    shadow.Set(device, 42, 7);
+    CHECK(shadow.Read(device, 7) == 42u);
+    CHECK(shadow.Read(device, 8) == std::nullopt);
+    CHECK(shadow.Read(device, 7) == std::nullopt);
+
+    shadow.Set(device, 43, 7);
+    shadow.NoteDirectRelease(device, region);
+    CHECK(shadow.Read(device, 7) == std::nullopt);
+
+    shadow.Set(device, 44, 7);
+    Tegra::Nx2ClearSemaphoreRegions();
+    CHECK_FALSE(shadow.Diverts(device));
+    CHECK(shadow.Read(device, 7) == std::nullopt);
+}

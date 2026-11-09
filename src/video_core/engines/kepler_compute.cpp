@@ -25,6 +25,7 @@
 #include "video_core/fire_emblem_upscale.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_acquire_test.h"
 #include "video_core/engines/fermi_2d.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/native_upscale.h"
@@ -374,6 +375,8 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                                                           memory_manager.Read<u32>(address), payload);
                         memory_manager.Write<u32>(address, value);
                         if (const auto device = memory_manager.GpuToCpuAddress(address)) {
+                            Tegra::Nx2MirrorShadow::Get().NoteDirectRelease(*device, address);
+                            VideoCommon::Nx2AcquireTest::Stats::Get().FirstPageWrite(address);
                             Tegra::Nx2SemaphoreWaiters::Get().OnWrite(*device, value);
                         }
                         static const u64 watch = [] {
@@ -398,6 +401,8 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                         const u32 value = (std::max)(memory_manager.Read<u32>(address), payload);
                         memory_manager.Write<u32>(address, value);
                         if (const auto device = memory_manager.GpuToCpuAddress(address)) {
+                            Tegra::Nx2MirrorShadow::Get().NoteDirectRelease(*device, address);
+                            VideoCommon::Nx2AcquireTest::Stats::Get().FirstPageWrite(address);
                             Tegra::Nx2SemaphoreWaiters::Get().OnWrite(*device, value);
                         }
                     });

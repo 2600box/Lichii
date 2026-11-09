@@ -81,6 +81,11 @@ public:
             mirror_words.insert(address & ~u64{3});
         }
     }
+    void Shadowed() {
+        if (g_stats) {
+            shadowed.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
     void Mirrored() {
         if (g_stats) {
             mirrored.fetch_add(1, std::memory_order_relaxed);
@@ -147,8 +152,10 @@ public:
             mirror_count = mirror_words.size();
         }
         LOG_INFO(HW_GPU,
-                 "EGLA94 words since boot: first-page direct {}, mirror targets {}, both {}",
-                 direct_count, mirror_count, shared_words);
+                 "EGLA94 words since boot: first-page direct {}, mirror targets {}, both {}; "
+                 "shadowed releases {}",
+                 direct_count, mirror_count, shared_words,
+                 shadowed.exchange(0, std::memory_order_relaxed));
         LOG_INFO(HW_GPU,
                  "EGLA94 mirror {}: mirrored releases {}, first-page direct writes {}, regions {}, "
                  "first-page suspends {} (second page already met {}), first-page waits {} "
@@ -165,7 +172,7 @@ public:
 private:
     std::array<std::atomic<u64>, 6> buckets{};
     std::atomic<u64> total_us{}, max_us{};
-    std::atomic<u64> mirrored{}, first_page_writes{}, first_page_suspends{}, second_page_meets_count{};
+    std::atomic<u64> shadowed{}, mirrored{}, first_page_writes{}, first_page_suspends{}, second_page_meets_count{};
     std::atomic<u64> first_page_waits{}, first_page_total_us{}, first_page_max_us{};
     std::atomic<s64> last_ms{};
     std::mutex words_mutex;

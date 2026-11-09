@@ -35,18 +35,23 @@ namespace {
 constexpr u32 Gf100BindClassMask = 0xffff;
 constexpr u32 Gf100BindValidMask =  0x1f0000 | Gf100BindClassMask;
 
-// Reads a semaphore word, flushing a GPU-written copy out of the buffer cache first.
+// Reads a semaphore word as a GPU acquire sees it, flushing a GPU-written copy out of the buffer
+// cache first. A mirrored release the guest memory does not hold counts (Nx2MirrorShadow).
 u32 ReadSemaphoreWord(DmaPusher& dma_pusher, GPUVAddr address) {
-    if (const auto device = dma_pusher.memory_manager.GpuToCpuAddress(address);
-        device && dma_pusher.rasterizer->MustFlushRegion(*device, sizeof(u32),
-                                                          VideoCommon::CacheType::BufferCache)) {
+    const auto device = dma_pusher.memory_manager.GpuToCpuAddress(address);
+    if (device && dma_pusher.rasterizer->MustFlushRegion(*device, sizeof(u32),
+                                                         VideoCommon::CacheType::BufferCache)) {
         VideoCommon::GpuSplit::Get().Run(
             [rasterizer = dma_pusher.rasterizer, device = *device] {
                 rasterizer->FlushRegion(device, sizeof(u32), VideoCommon::CacheType::BufferCache);
             },
             VideoCommon::DrainSite::SemaphoreFlush);
     }
-    return dma_pusher.memory_manager.Read<u32>(address);
+    const u32 guest = dma_pusher.memory_manager.Read<u32>(address);
+    if (!device) {
+        return guest;
+    }
+    return Nx2MirrorShadow::Get().Read(*device, guest).value_or(guest);
 }
 
 // With the GPU thread split (gpu_split.h) the rasterizer belongs to the back thread: work that
@@ -268,7 +273,8 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
             rasterizer->Query(sequence_address, VideoCommon::QueryType::Payload, properties, payload, 0);
             if (mirror != 0) {
                 VideoCommon::Nx2AcquireTest::t_mirrored_query = true;
-                rasterizer->Query(mirror, VideoCommon::QueryType::Payload, properties, payload, 0);
+                rasterizer->Query(mirror, VideoCommon::QueryType::Payload,
+                                  properties | VideoCommon::QueryPropertiesFlags::Nx2Mirror, payload, 0);
                 VideoCommon::Nx2AcquireTest::t_mirrored_query = false;
             }
         });
@@ -389,7 +395,10 @@ void Puller::ProcessSemaphoreExecute(DmaPusher& dma_pusher, u32 argument) {
     DrainBack();
     VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Fence);
     ReleaseFences(dma_pusher);
-    const u32 word = dma_pusher.memory_manager.Read<u32>(address);
+    u32 word = dma_pusher.memory_manager.Read<u32>(address);
+    if (const auto device = dma_pusher.memory_manager.GpuToCpuAddress(address)) {
+        word = Nx2MirrorShadow::Get().Read(*device, word).value_or(word);
+    }
     const bool ready = operation == 0   ? word == payload
                        : operation == 2 ? word >= payload
                        : operation == 3 ? static_cast<s32>(word - payload) >= 0
