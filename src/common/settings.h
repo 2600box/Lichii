@@ -679,7 +679,8 @@ struct Values {
     SwitchableSetting<bool> shader_calls_not_inlined{linkage, true, "shader_calls_not_inlined",
                                                      Category::RendererAdvanced};
 
-    // Threads of the shader precache on the loading screen, 0 for every CPU thread.
+    // Threads of the shader precache on the loading screen, 0 for every CPU thread that fits
+    // the free commit memory (Windows).
     // EDEN_NX2_WARM_THREADS overrides.
     SwitchableSetting<u32, true> shader_warm_threads{linkage,
                                                      0,

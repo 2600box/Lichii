@@ -27,6 +27,7 @@
 #include "common/fs/fs.h"
 #include "common/fs/fs_util.h"
 #include "common/fs/path_util.h"
+#include "common/memory_detect.h"
 #include "common/thread.h"
 #include "common/thread_worker.h"
 #include "core/core.h"
@@ -1733,7 +1734,7 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
 
 namespace {
 /// Threads of the shader precache: EDEN_NX2_WARM_THREADS=N (1 to 64), else the
-/// shader_warm_threads setting, where 0 is every CPU thread.
+/// shader_warm_threads setting, where 0 is every CPU thread that fits the free commit memory.
 size_t PrecacheThreads() {
     const size_t all = std::clamp<size_t>(std::thread::hardware_concurrency(), 1, 64);
     const u32 setting = Settings::values.shader_warm_threads.GetValue();
@@ -1755,7 +1756,29 @@ size_t PrecacheThreads() {
         }
         return static_cast<size_t>(parsed);
     }();
-    return forced != 0 ? forced : chosen;
+    if (forced != 0 || setting != 0) {
+        return forced != 0 ? forced : chosen;
+    }
+    // Every CPU thread, unless the system is short of commit memory: each warm-up thread holds a
+    // driver compile, and on a 16 GB machine all 12 threads plus the guest memory hit the commit
+    // limit (#741). Windows reports the commit charge; elsewhere the count stays as is.
+    constexpr u64 BytesPerThread = 2ULL << 30;
+    constexpr u64 Headroom = 2ULL << 30;
+    const auto usage = Common::GetProcessMemoryUsage();
+    if (usage.system_commit_limit == 0 || usage.system_commit >= usage.system_commit_limit) {
+        return chosen;
+    }
+    const u64 free_commit = usage.system_commit_limit - usage.system_commit;
+    const size_t fit = static_cast<size_t>(
+        std::max<u64>(free_commit > Headroom ? (free_commit - Headroom) / BytesPerThread : 0, 1));
+    if (fit < chosen) {
+        LOG_INFO(Render_Vulkan,
+                 "Shader precache: {} MiB of commit memory free, {} threads instead of {} "
+                 "(shader_warm_threads or EDEN_NX2_WARM_THREADS set a fixed count)",
+                 free_commit >> 20, fit, chosen);
+        return fit;
+    }
+    return chosen;
 }
 
 bool ComputeNoInline();
