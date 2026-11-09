@@ -785,7 +785,7 @@ void BufferCache<P>::RecordReadDownload(std::span<const std::pair<DAddr, u64>> r
 }
 
 template <class P>
-void BufferCache<P>::FinishReadDownloads(DAddr device_addr, u64 size) {
+std::optional<u64> BufferCache<P>::FinishReadDownloads(DAddr device_addr, u64 size) {
     if constexpr (!IS_OPENGL) {
         std::unique_lock lock{mutex};
         // The newest one over the range: those before it are written first.
@@ -798,19 +798,23 @@ void BufferCache<P>::FinishReadDownloads(DAddr device_addr, u64 size) {
             }
         }
         if (!tick) {
-            return;
+            return std::nullopt;
         }
+        u64 waited = 0;
         if (!runtime.IsFree(*tick)) {
             lock.unlock();
             const u64 wait_start = VideoCore::AsyncReadback::Now();
             runtime.WaitForHostRead(*tick);
-            VideoCore::AsyncReadback::CountHostWait(VideoCore::AsyncReadback::Now() - wait_start);
+            waited = (std::max)(VideoCore::AsyncReadback::Now() - wait_start, u64{1});
+            VideoCore::AsyncReadback::CountHostWait(waited);
             lock.lock();
         }
         WriteReadDownloads(*tick, VideoCore::AsyncReadback::t_reading
                                       ? VideoCore::AsyncReadback::Landing::Reader
                                       : VideoCore::AsyncReadback::Landing::GpuSideWrite);
+        return waited;
     }
+    return std::nullopt;
 }
 
 template <class P>
@@ -1366,7 +1370,9 @@ void BufferCache<P>::NoteLandedBytes(ReadCheck& check, const Common::RangeSet<DA
 
 template <class P>
 void BufferCache<P>::ClearDownload(DAddr device_addr, u64 size) {
-    FinishReadDownloads(device_addr, size);
+    if (const std::optional<u64> waited = FinishReadDownloads(device_addr, size)) {
+        VideoCore::AsyncReadback::CountClearLanding(*waited);
+    }
     ClearReplacedDownload(device_addr, size);
 }
 

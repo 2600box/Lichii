@@ -1046,12 +1046,15 @@ TEST_CASE("Newer bytes that guest memory doesn't hold yet land the read download
     std::ranges::fill(Access::Get(*f.cache, id).bytes, 0x12);
     Access::Dirty(*f.cache, 0x20000, 0x1000);
     f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    auto& counters = VideoCore::AsyncReadback::g_counters;
+    const u64 landings = counters.clear_landings.load();
+    const u64 waits = counters.clear_waits.load();
     SECTION("an indirect dispatch's arguments, written by the GPU and discarded") {
         (void)f.cache->ObtainCPUBuffer(0x20040, 12,
                                        VideoCommon::ObtainBufferSynchronize::FullSynchronize,
                                        VideoCommon::ObtainBufferOperation::DiscardWrite);
     }
-    SECTION("a write to guest memory from the GPU's side (PrepareRegionWrite)") {
+    SECTION("a DMA copy's destination (ClearDownload)") {
         f.cache->ClearDownload(0x20040, 12);
     }
     // The read that took the download finds the GPU's bytes, as its synchronous flush wrote them.
@@ -1061,6 +1064,9 @@ TEST_CASE("Newer bytes that guest memory doesn't hold yet land the read download
     REQUIRE(f.bytes[0x10fff] == 0x12);
     REQUIRE(f.runtime.host_read_waits == 1);
     REQUIRE(VideoCore::g_read_downloads == 0);
+    // The landing went on the GPU thread and waited for the host GPU (the profile line counts it).
+    REQUIRE(counters.clear_landings.load() - landings == 1);
+    REQUIRE(counters.clear_waits.load() - waits == 1);
 }
 
 TEST_CASE("Read downloads land oldest first and leave newer GPU writes to download",

@@ -102,6 +102,12 @@ struct Counters {
     std::atomic<u64> dma_waited{};
     std::atomic<u64> dma_drained{};
     std::atomic<u64> dma_wait_ns{};
+    /// Landings BufferCache::ClearDownload forced on the GPU thread before a write guest memory
+    /// doesn't hold yet (a DMA copy, a discarded write), those that waited for the host GPU (also
+    /// among gpu_side_waits) and the time they waited
+    std::atomic<u64> clear_landings{};
+    std::atomic<u64> clear_waits{};
+    std::atomic<u64> clear_wait_ns{};
     std::atomic<u64> window_start{};
 };
 
@@ -136,6 +142,14 @@ inline void CountDmaRead(bool waited, bool drained, u64 ns) {
     Add(g_counters.dma_waited, waited ? 1 : 0);
     Add(g_counters.dma_drained, drained ? 1 : 0);
     Add(g_counters.dma_wait_ns, ns);
+}
+
+/// BufferCache::ClearDownload landed read downloads, waiting ns for the host GPU (0: their copies
+/// had run).
+inline void CountClearLanding(u64 ns) {
+    Add(g_counters.clear_landings, 1);
+    Add(g_counters.clear_waits, ns != 0 ? 1 : 0);
+    Add(g_counters.clear_wait_ns, ns);
 }
 
 /// Logs the totals every 10 s and resets them, on whichever thread counting comes first.
@@ -175,6 +189,9 @@ inline void MaybeReport() {
     const u64 dma_waited = take(c.dma_waited);
     const u64 dma_drained = take(c.dma_drained);
     const u64 dma_wait_ns = take(c.dma_wait_ns);
+    const u64 clear_landings = take(c.clear_landings);
+    const u64 clear_waits = take(c.clear_waits);
+    const u64 clear_wait_ns = take(c.clear_wait_ns);
     constexpr auto async = static_cast<size_t>(Read::Async);
     constexpr auto in_flight = static_cast<size_t>(Read::InFlight);
     LOG_INFO(HW_GPU,
@@ -183,13 +200,16 @@ inline void MaybeReport() {
              "waited on their fence "
              "{:.0f} times, {:.1f} ms (longest {:.2f} ms) | GPU-side writes fell back to a host "
              "GPU wait {:.0f} times, {:.1f} ms | macro DMA reads {:.0f}, {:.0f} waited for the "
-             "split's back ({:.1f} ms), {:.0f} drained it",
+             "split's back ({:.1f} ms), {:.0f} drained it | GPU thread landed read downloads before "
+             "writes guest memory doesn't hold {:.0f} times, {:.0f} waited for the host GPU "
+             "({:.1f} ms)",
              per_second(reads[async]), ms_per_second(read_ns[async]),
              per_second(reads[in_flight]), ms_per_second(read_ns[in_flight]),
              ms_per_second(flush_ns), per_second(reader_waits), ms_per_second(reader_wait_ns),
              static_cast<double>(reader_max_wait_ns) / 1e6, per_second(gpu_side_waits),
              ms_per_second(gpu_side_wait_ns), per_second(dma_reads), per_second(dma_waited),
-             ms_per_second(dma_wait_ns), per_second(dma_drained));
+             ms_per_second(dma_wait_ns), per_second(dma_drained), per_second(clear_landings),
+             per_second(clear_waits), ms_per_second(clear_wait_ns));
 }
 
 } // namespace VideoCore::AsyncReadback
