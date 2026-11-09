@@ -501,16 +501,17 @@ jobs:
             codesign --force --sign - --entitlements dist/eglantine.entitlements "$app"
           fi
           codesign --verify --deep --strict "$app"
-          # libnxformat must resolve inside the bundle: lichii names it through @rpath or
-          # @executable_path, every LC_RPATH of lichii is bundle-relative, the dylib is where they
-          # point, and the dylib itself depends only on @rpath and system libraries.
+          # libnxformat must resolve inside the bundle: lichii names it through @rpath,
+          # @executable_path or @loader_path (as macdeployqt rewrites it), every LC_RPATH of lichii
+          # is bundle-relative, the dylib is where they point, and the dylib itself depends only on
+          # @rpath and system libraries.
           exe="$app/Contents/MacOS/lichii"
           echo "otool -L lichii:"; otool -L "$exe"
           rpaths=$(otool -l "$exe" | awk '/cmd LC_RPATH/ {getline; getline; print $2}')
           echo "LC_RPATH lichii:"; echo "$rpaths"
           ref=$(otool -L "$exe" | awk '/libnxformat\.dylib/ {print $1}')
           case "$ref" in
-            @rpath/*|@executable_path/*) ;;
+            @rpath/*|@executable_path/*|@loader_path/*) ;;
             *) echo "::error::lichii references libnxformat as '$ref'"; exit 1 ;;
           esac
           for rpath in $rpaths; do
@@ -528,8 +529,12 @@ jobs:
                 dylib="$dir/${ref#@rpath/}"
               fi
             done
-          elif [ -f "${ref/#@executable_path/$app/Contents/MacOS}" ]; then
-            dylib=${ref/#@executable_path/$app/Contents/MacOS}
+          else
+            target=${ref/#@executable_path/$app/Contents/MacOS}
+            target=${target/#@loader_path/$app/Contents/MacOS}
+            if [ -f "$target" ]; then
+              dylib=$target
+            fi
           fi
           if [ -z "$dylib" ]; then
             echo "::error::$ref does not resolve inside lichii.app"
