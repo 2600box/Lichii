@@ -1155,6 +1155,12 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, u32 instance_count, Func&& d
     if (frame_dump.Capturing()) {
         frame_dump.DrainIfFull();
     }
+    // Stage A's recordings (texture uploads, copies, clears, render target changes) go to the
+    // draw's command list; B splices it in before its own. A draw that stops early splices here.
+    scheduler.BeginCommandList();
+    SCOPE_EXIT {
+        scheduler.SpliceCommandList();
+    };
 
     const auto report_failure = [&](std::string_view reason) {
         TraceDrawFailure(reason);
@@ -1447,6 +1453,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, u32 instance_count, Func&& d
     }
 
     // Stage B: records the draw from the packet alone.
+    scheduler.SpliceCommandList();
     if (Profile::Scope scope{Profile::Zone::Record}; !pipeline->Record(packet)) {
         // The dirty flags A took stay recorded for the next draw.
         RecordDynamicStates(packet.dynamic);

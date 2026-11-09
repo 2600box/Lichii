@@ -10,9 +10,12 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <queue>
 #include <source_location>
@@ -189,12 +192,35 @@ public:
         on_submit = std::move(func);
     }
 
+    /// Draw packets, stage A (docs/nx2/cmdlist.md): until SpliceCommandList, recorded commands
+    /// go to the draw's command list. A submit or dispatch records the list first.
+    void BeginCommandList();
+    /// Stage B: records the draw's command list, in order, ahead of its own commands.
+    void SpliceCommandList() {
+        capturing = false;
+        if (!command_list->Empty()) {
+            SpliceCommands();
+        }
+    }
+
     /// Send work to a separate thread.
     template <typename T>
         requires std::is_invocable_v<T, vk::CommandBuffer, vk::CommandBuffer>
     void RecordWithUploadBuffer(T&& command) {
         if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
             VideoCommon::GpuSplit::CheckOwner("Scheduler::Record");
+        }
+        if (cmdlist_verify) {
+            NoteRecorded(CommandTag<std::remove_cvref_t<T>>(), HashCommand(command));
+        }
+        if (capturing) {
+            if (command_list->Record(command)) {
+                return;
+            }
+            ++cmdlist_stats.full_joins;
+            SpliceCommands();
+            (void)command_list->Record(command);
+            return;
         }
         if (chunk->Record(command)) {
             return;
@@ -327,11 +353,18 @@ private:
     std::chrono::steady_clock::time_point last_flush{};
     bool flush_pending{};
 
+    class CommandChunk;
+
     class Command {
     public:
         virtual ~Command() = default;
 
         virtual void Execute(vk::CommandBuffer cmdbuf, vk::CommandBuffer upload_cmdbuf) const = 0;
+
+        /// Moves the command to the end of `chunk`; false when it doesn't fit.
+        virtual bool MoveTo(CommandChunk& chunk) = 0;
+
+        [[nodiscard]] virtual uintptr_t Tag() const = 0;
 
         Command* GetNext() const {
             return next;
@@ -357,6 +390,12 @@ private:
         void Execute(vk::CommandBuffer cmdbuf, vk::CommandBuffer upload_cmdbuf) const override {
 
             command(cmdbuf, upload_cmdbuf);
+        }
+
+        bool MoveTo(CommandChunk& chunk) override;
+
+        [[nodiscard]] uintptr_t Tag() const override {
+            return CommandTag<T>();
         }
 
     private:
@@ -390,6 +429,20 @@ private:
 
         void MarkSubmit() {
             submit = true;
+        }
+
+        /// Empties the chunk, passing each command in order to `take` before destroying it.
+        template <typename Func>
+        void TakeAll(Func&& take) {
+            Command* command = std::exchange(first, nullptr);
+            last = nullptr;
+            command_offset = 0;
+            while (command != nullptr) {
+                Command* const next = command->GetNext();
+                take(*command);
+                command->~Command();
+                command = next;
+            }
         }
 
         bool Empty() const {
@@ -455,6 +508,32 @@ private:
 
     void AcquireNewChunk();
 
+    /// Records the command list into the chunk (a join when stage A is still capturing).
+    void SpliceCommands();
+
+    /// One identity per command type, for EDEN_NX2_CMDLIST_VERIFY.
+    template <typename T>
+    static uintptr_t CommandTag() {
+        static const char anchor{};
+        return reinterpret_cast<uintptr_t>(&anchor);
+    }
+
+    /// The captured arguments' bytes, or only their size when the capture has padding.
+    template <typename T>
+    static u64 HashCommand(const T& command) {
+        u64 hash = 0xcbf29ce484222325ULL ^ sizeof(T);
+        if constexpr (std::has_unique_object_representations_v<T>) {
+            const auto* const bytes = reinterpret_cast<const unsigned char*>(&command);
+            for (size_t index = 0; index < sizeof(T); ++index) {
+                hash = (hash ^ bytes[index]) * 0x100000001b3ULL;
+            }
+        }
+        return hash;
+    }
+
+    void NoteRecorded(uintptr_t tag, u64 hash);
+    void NoteInserted(uintptr_t tag, u64 hash, u64 sequence);
+
     const Device& device;
     StateTracker& state_tracker;
 
@@ -515,6 +594,28 @@ private:
     std::unique_ptr<CommandChunk> chunk;
     std::function<void()> on_submit;
 
+    /// Stage A's commands for the current draw packet, while capturing.
+    std::unique_ptr<CommandChunk> command_list = std::make_unique<CommandChunk>();
+    bool capturing{};
+    const bool cmdlist_verify{std::getenv("EDEN_NX2_CMDLIST_VERIFY") != nullptr};
+    struct CommandListVerifyEntry {
+        uintptr_t tag;
+        u64 hash;
+        u64 sequence;
+    };
+    struct {
+        u64 draws{};
+        u64 lists{};          ///< Draws whose list held commands
+        u64 commands{};       ///< Commands spliced
+        u64 flush_joins{};    ///< Lists recorded early by a submit or dispatch during stage A
+        u64 full_joins{};     ///< Lists recorded early because the list was full
+        u64 recorded{};       ///< Verify: commands in recording order
+        u64 inserted{};       ///< Verify: commands in command buffer order
+        u64 differences{};
+        std::vector<CommandListVerifyEntry> pending; ///< Verify: the list's commands
+        std::chrono::steady_clock::time_point last_report{};
+    } cmdlist_stats;
+
     State state;
     u64 recording_epoch = 0;
 
@@ -537,5 +638,10 @@ private:
     u64 max_frame_count{};
     u64 frame_counter{};
 };
+
+template <typename T>
+bool Scheduler::TypedCommand<T>::MoveTo(CommandChunk& chunk) {
+    return chunk.Record(command);
+}
 
 } // namespace Vulkan

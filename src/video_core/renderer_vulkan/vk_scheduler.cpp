@@ -284,6 +284,10 @@ void Scheduler::DispatchWork() {
     if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
         VideoCommon::GpuSplit::CheckOwner("Scheduler::DispatchWork");
     }
+    if (!command_list->Empty()) {
+        ++cmdlist_stats.flush_joins;
+        SpliceCommands();
+    }
     if (chunk && !chunk->Empty()) {
         // Waking the worker is a system call (~2% of the GPU thread at one dispatch per 8
         // draws): skip it while the worker is still busy, it pops the queue before waiting.
@@ -799,6 +803,12 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
         g_profile_submits.fetch_add(1, std::memory_order_relaxed);
         ReportSubmitCounts();
     }
+    // Stage A's commands so far go first, and the submit's own commands go to the chunk.
+    const bool was_capturing = std::exchange(capturing, false);
+    if (!command_list->Empty()) {
+        ++cmdlist_stats.flush_joins;
+        SpliceCommands();
+    }
     EndPendingOperations();
     InvalidateState();
 
@@ -866,7 +876,76 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
     });
     chunk->MarkSubmit();
     DispatchWork();
+    capturing = was_capturing;
     return signal_value;
+}
+
+void Scheduler::BeginCommandList() {
+    capturing = true;
+    if (!cmdlist_verify) {
+        return;
+    }
+    ++cmdlist_stats.draws;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - cmdlist_stats.last_report < std::chrono::seconds{10}) {
+        return;
+    }
+    cmdlist_stats.last_report = now;
+    LOG_INFO(Render_Vulkan,
+             "Command list verify: {} commands checked, {} differ, {} draws, {} with a list "
+             "({} commands), {} joins by a submit or dispatch, {} by a full list",
+             cmdlist_stats.inserted, cmdlist_stats.differences, cmdlist_stats.draws,
+             cmdlist_stats.lists, cmdlist_stats.commands, cmdlist_stats.flush_joins,
+             cmdlist_stats.full_joins);
+}
+
+void Scheduler::SpliceCommands() {
+    const bool was_capturing = std::exchange(capturing, false);
+    ++cmdlist_stats.lists;
+    size_t index = 0;
+    command_list->TakeAll([&](Command& command) {
+        ++cmdlist_stats.commands;
+        if (!command.MoveTo(*chunk)) {
+            DispatchWork();
+            (void)command.MoveTo(*chunk);
+        }
+        if (cmdlist_verify) {
+            const CommandListVerifyEntry entry = cmdlist_stats.pending[index++];
+            if (entry.tag != command.Tag() && cmdlist_stats.differences++ < 16) {
+                LOG_ERROR(Render_Vulkan,
+                          "Command list verify: command {} (hash {:016x}) changed type when "
+                          "spliced",
+                          entry.sequence, entry.hash);
+            }
+            NoteInserted(entry.tag, entry.hash, entry.sequence);
+        }
+    });
+    if (cmdlist_verify) {
+        auto& pending = cmdlist_stats.pending;
+        pending.erase(pending.begin(), pending.begin() + static_cast<std::ptrdiff_t>(index));
+    }
+    capturing = was_capturing;
+}
+
+void Scheduler::NoteRecorded(uintptr_t tag, u64 hash) {
+    const u64 sequence = cmdlist_stats.recorded++;
+    if (capturing) {
+        cmdlist_stats.pending.push_back({tag, hash, sequence});
+        return;
+    }
+    NoteInserted(tag, hash, sequence);
+}
+
+void Scheduler::NoteInserted(uintptr_t tag, u64 hash, u64 sequence) {
+    // The direct path records each command where it is called: the command buffer must take
+    // them in recording order.
+    const u64 expected = cmdlist_stats.inserted++;
+    if (sequence != expected && cmdlist_stats.differences++ < 16) {
+        LOG_ERROR(Render_Vulkan,
+                  "Command list verify: command {} (type {:x}, hash {:016x}) reached the command "
+                  "buffer in place of command {}",
+                  sequence, tag, hash, expected);
+    }
 }
 
 void Scheduler::AllocateNewContext() {

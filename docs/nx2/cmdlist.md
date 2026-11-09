@@ -1,4 +1,4 @@
-# Draw packets (stage 1 of the GPUBack command list)
+# Draw packets and command lists (stages 1 and 2 of the GPUBack command list)
 
 GPUBack prepares every graphics draw in two stages. Stage A reads what the draw needs from the
 Maxwell registers, dirty flags and guest memory as they are at the draw and writes it into a
@@ -95,6 +95,38 @@ Stage 1 keeps these on GPUBack's shared state. Each is a stage 3/4 item.
 - `DeleteBuffer` and `RefreshRepackedVertexBuffers` no longer set the index and vertex dirty
   flags. They set resolve and rebind bits the buffer cache owns, so a deletion during a draw no
   longer records the vertex input again.
+
+## Command lists (stage 2)
+
+Stage A records into a command list, not the command buffer. `RasterizerVulkan::PrepareDraw`
+calls `Scheduler::BeginCommandList` after `FlushWork`. From then on, `Scheduler::Record` and
+`RecordWithUploadBuffer` put commands in the scheduler's one reusable list (a `CommandChunk`).
+That covers the texture cache runtime's uploads, copies, clears and render target barriers, the
+uniform buffer copies, render pass ends, and anything else A records. The texture cache itself is
+unchanged.
+
+`Scheduler::SpliceCommandList` runs right before `GraphicsPipeline::Record`, or at any early
+return from the draw. It moves the list's commands, in order, to the end of the chunk. B's
+commands follow them.
+
+- **Empty lists:** splicing an empty list costs one flag store and one test. No list is
+  allocated per draw.
+- **Joins:** a submit (`Flush`, `Finish`) or a dispatch (`DispatchWork`, `WaitWorker`)
+  during stage A splices the list first, and records its own commands into the chunk. A full
+  list is spliced early too. Capturing continues after either.
+- **State:** the scheduler's state (render pass, pipeline, deferred clears) still changes when A
+  calls into it. On one thread this matches the order the commands land in, because nothing
+  records between A and the splice. Stage 4 has to carry that state with the list.
+
+`EDEN_NX2_CMDLIST_VERIFY=1` gives every recorded command a type tag and a hash of its captured
+arguments. It numbers commands in the order they are recorded, which is the order the old direct
+path put them in the command buffer, and checks that the command buffer receives them in that
+order. A spliced command that comes out of the move as a different type also counts as a
+difference. The first 16 differences get their own line. Every 10 s a `Command list verify`
+line logs:
+- commands checked and those that differ (must stay 0);
+- draws, and how many of them had a list, with the commands those lists held;
+- joins by a submit or dispatch, and by a full list.
 
 ## Verify
 
