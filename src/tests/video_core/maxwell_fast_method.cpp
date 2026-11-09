@@ -26,6 +26,7 @@
 #include "video_core/gpu.h"
 #include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
+#include "video_core/nx2_async_readback.h"
 #include "video_core/renderer_null/null_rasterizer.h"
 
 namespace VideoCommon {
@@ -233,6 +234,16 @@ u32 RandomArgument(std::mt19937& rng, u32 method, const Maxwell3D& engine) {
     }
     return rng() % 64;
 }
+
+/// EDEN_NX2_ASYNC_READBACK's mode for a test, restored after it.
+struct ReadbackModeScope {
+    explicit ReadbackModeScope(VideoCore::AsyncReadback::Mode mode)
+        : previous{VideoCore::AsyncReadback::g_mode.exchange(mode)} {}
+    ~ReadbackModeScope() {
+        VideoCore::AsyncReadback::g_mode = previous;
+    }
+    VideoCore::AsyncReadback::Mode previous;
+};
 
 /// A Turing MME instruction that sends the next macro parameter to `method` (as in
 /// native_macro_fifo.cpp); `end` makes the instruction after it the macro's last.
@@ -1037,6 +1048,11 @@ TEST_CASE("Split macro DMA reads wait only for the queued work that can write th
           "[video_core][gpu_split_dependencies]") {
     using Access = VideoCommon::GpuSplitTestAccess;
     using Writes = VideoCommon::GpuSplit::Writes;
+    using VideoCore::AsyncReadback::Mode;
+    auto& counters = VideoCore::AsyncReadback::g_counters;
+    const ReadbackModeScope readback{Mode::On};
+    // No per-second report resets the counters while the test reads them.
+    counters.window_start = VideoCore::AsyncReadback::Now();
     Fixture f;
     f.system.Initialize();
     Kernel::KProcess process{f.system.Kernel()};
@@ -1103,7 +1119,7 @@ TEST_CASE("Split macro DMA reads wait only for the queued work that can write th
     SCOPE_EXIT {
         split.Stop();
     };
-    std::array<std::atomic<bool>, 3> release{};
+    std::array<std::atomic<bool>, 5> release{};
     std::atomic<bool> done{};
     std::thread reader;
     SCOPE_EXIT {
@@ -1186,8 +1202,12 @@ TEST_CASE("Split macro DMA reads wait only for the queued work that can write th
     // Work that writes nothing and a write of other words, still queued: the read goes ahead.
     blocking(release[0], Writes::Noted);
     upload(other, 0x33333333);
+    u64 reads = counters.dma_reads;
+    u64 waited = counters.dma_waited;
     read_on_reader(word);
     REQUIRE(finishes());
+    CHECK(counters.dma_reads == reads + 1);
+    CHECK(counters.dma_waited == waited);
     reader.join();
     release[0] = true;
     split.Drain(VideoCommon::DrainSite::Other);
@@ -1197,10 +1217,16 @@ TEST_CASE("Split macro DMA reads wait only for the queued work that can write th
     // A write of the word through its other GPU address: the read waits for it and sees it.
     blocking(release[1], Writes::Noted);
     upload(alias + 0x40, 0x44444444);
+    reads = counters.dma_reads;
+    waited = counters.dma_waited;
+    const u64 drained = counters.dma_drained;
     read_on_reader(word);
     REQUIRE(waits());
     release[1] = true;
     REQUIRE(finishes());
+    CHECK(counters.dma_reads == reads + 1);
+    CHECK(counters.dma_waited == waited + 1);
+    CHECK(counters.dma_drained == drained);
     reader.join();
     split.Drain(VideoCommon::DrainSite::Other);
     CHECK(engine.regs.reg_array[state] == 0x44444444);
@@ -1214,4 +1240,31 @@ TEST_CASE("Split macro DMA reads wait only for the queued work that can write th
     reader.join();
     split.Drain(VideoCommon::DrainSite::Other);
     CHECK(engine.regs.reg_array[state] == 0x33333333);
+
+    // Without EDEN_NX2_ASYNC_READBACK every read drains the split, as before: queued work that
+    // writes nothing holds it back.
+    {
+        const ReadbackModeScope off{Mode::Off};
+        blocking(release[3], Writes::Noted);
+        read_on_reader(other);
+        REQUIRE(waits());
+        release[3] = true;
+        REQUIRE(finishes());
+        reader.join();
+        split.Drain(VideoCommon::DrainSite::Other);
+        CHECK(engine.regs.reg_array[state] == 0x33333333);
+    }
+
+    // With =verify, a read that needn't drain drains anyway to compare its words.
+    {
+        const ReadbackModeScope verify{Mode::Verify};
+        blocking(release[4], Writes::Noted);
+        read_on_reader(other);
+        REQUIRE(waits());
+        release[4] = true;
+        REQUIRE(finishes());
+        reader.join();
+        split.Drain(VideoCommon::DrainSite::Other);
+        CHECK(engine.regs.reg_array[state] == 0x33333333);
+    }
 }
