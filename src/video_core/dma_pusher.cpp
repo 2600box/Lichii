@@ -240,7 +240,7 @@ bool DmaPusher::Step() {
             // An entry parsed from memory instead of its submit-time copy is the way a command
             // ring the game already refilled gets read as this frame's commands (garbage methods,
             // unbound subchannels, render targets of absurd size). Count how often the words
-            // differ, by the reason the copy was skipped. Bounded: the first entries only.
+            // differ, by the reason the copy was skipped. Off unless EDEN_NX2_LIVE_READ_CHECK is set.
             enum Reason : u32 { Resumed, SuspendedCopy, SuspensionsChanged, GpuWritten, SafeDirty, Count };
             static std::array<std::atomic<u64>, Count> checked{};
             static std::array<std::atomic<u64>, Count> differing{};
@@ -248,9 +248,8 @@ bool DmaPusher::Step() {
             static constexpr std::array<const char*, Count> names{
                 "resumed entry", "copied during a suspension", "suspension count changed",
                 "GPU-written page", "safe read of dirty memory"};
-            // EDEN_NX2_LIVE_READ_CHECK=1: check every such entry, not only the first 50000.
-            static const bool check_all = std::getenv("EDEN_NX2_LIVE_READ_CHECK") != nullptr;
-            if (check_all || total_checked.load(std::memory_order_relaxed) < 50000) {
+            static const bool check = std::getenv("EDEN_NX2_LIVE_READ_CHECK") != nullptr;
+            if (check) [[unlikely]] {
                 const Reason reason = command_resume_offset != 0                      ? Resumed
                                       : (command_list.snapshot_suspensions & 1) != 0  ? SuspendedCopy
                                       : command_list.snapshot_suspensions !=
