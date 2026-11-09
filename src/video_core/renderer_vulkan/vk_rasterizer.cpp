@@ -2361,9 +2361,9 @@ void RasterizerVulkan::FinishRead(DAddr addr, u64 size) {
     buffer_cache.FinishReadDownloads(addr, size);
 }
 
-void RasterizerVulkan::NoteReportPending(DAddr addr, u64 size) {
+bool RasterizerVulkan::NoteReportPending(DAddr addr, u64 size) {
     std::scoped_lock lock{buffer_cache.mutex};
-    buffer_cache.NoteReportPending(addr, size);
+    return buffer_cache.NoteReportPending(addr, size);
 }
 
 void RasterizerVulkan::FinishReport(DAddr addr, u64 size) {

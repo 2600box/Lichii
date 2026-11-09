@@ -284,12 +284,19 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
     u8* pointer = impl->device_memory.template GetPointer<u8>(cpu_addr);
     u8* pointer_timestamp = impl->device_memory.template GetPointer<u8>(cpu_addr + 8);
     const u64 report_size = has_timestamp ? 16 : 4;
+    const bool immediate =
+        !is_fence && !Settings::IsGPULevelHigh() && counter_type == QueryType::Payload;
+    // Written later: the buffer cache keeps GPU writes over it until then (NoteReportPending).
+    const bool report_noted =
+        !immediate && impl->rasterizer.NoteReportPending(cpu_addr, report_size);
     std::function<void()> operation([this, streamer, query_base = query, query_location,
                                      pointer, pointer_timestamp, cpu_addr, addr,
                                      asid = gpu_memory->GetID(), counter_type, mirrored,
-                                     report_size] {
+                                     report_size, report_noted] {
         SCOPE_EXIT {
-            impl->rasterizer.FinishReport(cpu_addr, report_size);
+            if (report_noted) {
+                impl->rasterizer.FinishReport(cpu_addr, report_size);
+            }
         };
         if (True(query_base->flags & QueryFlagBits::IsInvalidated)) {
             if (const u64 trace = QueryTrace::Sample(QueryTrace::Event::Discard)) {
@@ -347,12 +354,11 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
         impl->pending_unregister.push_back(query_location);
     });
     if (is_fence) {
-        impl->rasterizer.NoteReportPending(cpu_addr, report_size);
         VideoCore::g_signaling_query_report_fence = true;
         impl->rasterizer.SignalFence(std::move(operation));
         VideoCore::g_signaling_query_report_fence = false;
     } else {
-        if (!Settings::IsGPULevelHigh() && counter_type == QueryType::Payload) {
+        if (immediate) {
             FinishReads(cpu_addr, has_timestamp ? 16 : 4);
             auto& shadow = Tegra::Nx2MirrorShadow::Get();
             if (mirrored && shadow.Diverts(cpu_addr)) {
@@ -382,7 +388,6 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
             streamer->Free(new_query_id);
             return;
         }
-        impl->rasterizer.NoteReportPending(cpu_addr, report_size);
         impl->rasterizer.SyncOperation(std::move(operation));
     }
     auto [cont_addr, base] = gen_caching_indexing(cpu_addr);

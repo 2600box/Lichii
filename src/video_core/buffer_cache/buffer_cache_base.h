@@ -301,10 +301,11 @@ public:
     /// A query result over [device_addr, device_addr + size) that the query cache writes to guest
     /// memory later, at a fence or sync point (QueryCacheBase::CounterReport). On a page that gets
     /// early downloads, a GPU write over it after the report stays GPU-modified when a download
-    /// lands it: the older result lands over it, and a later read downloads it again.
-    void NoteReportPending(DAddr device_addr, u64 size);
+    /// lands it: the older result lands over it, and a later read downloads it again. True when
+    /// it keeps the result, which FinishReport then ends.
+    [[nodiscard]] bool NoteReportPending(DAddr device_addr, u64 size);
 
-    /// The query cache wrote that result to guest memory, or dropped it.
+    /// The query cache wrote a result NoteReportPending kept to guest memory, or dropped it.
     void FinishReport(DAddr device_addr, u64 size);
 
     /// The GPU thread recorded a draw or dispatch (`mutex` held). After a dispatch, the downloads
