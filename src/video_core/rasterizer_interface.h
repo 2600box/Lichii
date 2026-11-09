@@ -125,6 +125,11 @@ public:
     /// before it reads, and the GPU's side before it writes guest memory there.
     virtual void FinishRead([[maybe_unused]] DAddr addr, [[maybe_unused]] u64 size) {}
 
+    /// A query result the query cache writes to guest memory later, at a fence or sync point.
+    /// FinishReport once it wrote or dropped it.
+    virtual void NoteReportPending([[maybe_unused]] DAddr addr, [[maybe_unused]] u64 size) {}
+    virtual void FinishReport([[maybe_unused]] DAddr addr, [[maybe_unused]] u64 size) {}
+
     /// Switch 2, from the GPU thread's front: where a GPU-written command list's words are.
     enum class GpuWrittenList {
         Unknown, ///< Neither: the caller drains, flushes the page and notes it synced

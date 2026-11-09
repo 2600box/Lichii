@@ -298,6 +298,15 @@ public:
     /// the writes it records; the query cache's copies of its results call it themselves.
     void OutdateReadDownloads(DAddr device_addr, u64 size);
 
+    /// A query result over [device_addr, device_addr + size) that the query cache writes to guest
+    /// memory later, at a fence or sync point (QueryCacheBase::CounterReport). On a page that gets
+    /// early downloads, a GPU write over it after the report stays GPU-modified when a download
+    /// lands it: the older result lands over it, and a later read downloads it again.
+    void NoteReportPending(DAddr device_addr, u64 size);
+
+    /// The query cache wrote that result to guest memory, or dropped it.
+    void FinishReport(DAddr device_addr, u64 size);
+
     /// The GPU thread recorded a draw or dispatch (`mutex` held). After a dispatch, the downloads
     /// of the pages written since that the guest reads after each write go right behind it
     /// (RecordEarlyDownloads). Those the host GPU has run land in guest memory.
@@ -1039,6 +1048,13 @@ private:
     static constexpr u64 EarlyBytesPerFrame = 1_MiB;
     static constexpr u32 MaxPendingEarlyDownloads = 32;
     std::vector<ReadBackPage> read_back_pages; ///< Sorted by page
+    /// NoteReportPending's results not yet written, oldest first.
+    struct PendingReport {
+        DAddr addr;
+        u64 size;
+        bool rewritten; ///< A GPU write over it since the report
+    };
+    std::vector<PendingReport> pending_reports;
     /// Pages to download once the work writing them is recorded.
     boost::container::small_vector<DAddr, 8> early_pages;
     u64 read_back_reads{};
