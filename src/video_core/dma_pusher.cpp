@@ -296,7 +296,9 @@ bool DmaPusher::Step() {
         static const bool live_read_check = std::getenv("EDEN_NX2_LIVE_READ_CHECK") != nullptr;
         const CommandHeader* const submitted_copy =
             live_read_check && !submitted &&
-                    dma_pushbuffer_subindex < command_list.submitted_offsets.size()
+                    dma_pushbuffer_subindex < command_list.submitted_offsets.size() &&
+                    !std::ranges::binary_search(command_list.deferred_entries,
+                                                static_cast<u32>(dma_pushbuffer_subindex))
                 ? command_list.submitted_words.data() +
                       command_list.submitted_offsets[dma_pushbuffer_subindex]
                 : nullptr;
