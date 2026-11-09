@@ -7,6 +7,7 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <numeric>
 #include <cstdlib>
 #include <limits>
@@ -181,7 +182,11 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
     // Images whose GPU data must reach guest memory first are downloaded together, with one wait
     // for the GPU: a wait per image made each collection in Mario Kart World's Free Roam wait
     // 36-43 ms (6-17 waits). A batch is capped so the staging memory held at once stays bounded.
-    constexpr size_t MaxDownloadBatchBytes = 64_MiB;
+    // TEST ONLY (EGLA-98 A/B): EDEN_NX2_TC_GC_BATCH=0 waits for the GPU once per image again.
+    static const size_t MaxDownloadBatchBytes = [] {
+        const char* value = std::getenv("EDEN_NX2_TC_GC_BATCH");
+        return value != nullptr && value[0] == '0' ? size_t{0} : size_t{64_MiB};
+    }();
     using DownloadMap = decltype(runtime.DownloadStagingBuffer(size_t{}));
     using DownloadCopies = decltype(FullDownloadCopies(std::declval<const ImageInfo&>()));
     struct PendingDownload {
@@ -2153,10 +2158,26 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
     ++images_uploaded;
     uploaded_bytes += image.guest_size_bytes;
     largest_upload = (std::max<u64>)(largest_upload, image.guest_size_bytes);
+    const auto upload_start = std::chrono::steady_clock::now();
     if (!UploadInChunks(image)) {
         auto staging = runtime.UploadStagingBuffer(MapSizeBytes(image));
         UploadImageContents(image, staging);
         runtime.InsertUploadMemoryBarrier();
+    }
+    // TEST ONLY (EGLA-98): uploads over 3 ms with their shape, while the stutter trace is on.
+    if (StutterTrace::Enabled()) {
+        const double upload_ms = std::chrono::duration<double, std::milli>(
+                                     std::chrono::steady_clock::now() - upload_start)
+                                     .count();
+        if (upload_ms > 3.0) {
+            LOG_INFO(HW_GPU,
+                     "EGLA98 upload ms={:.1f} guest_bytes={} map_bytes={} {}x{}x{} layers={} "
+                     "levels={} format={} type={} flags={:#x}",
+                     upload_ms, image.guest_size_bytes, MapSizeBytes(image), image.info.size.width,
+                     image.info.size.height, image.info.size.depth, image.info.resources.layers,
+                     image.info.resources.levels, static_cast<u32>(image.info.format),
+                     static_cast<u32>(image.info.type), static_cast<u32>(image.flags));
+        }
     }
     // The host GPU has its own copy now and the guest rarely reads this memory again: TickFrame
     // marks it cold, so the OS pages it out before anything else when it needs RAM (title 1
