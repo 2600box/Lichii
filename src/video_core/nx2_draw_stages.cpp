@@ -69,6 +69,22 @@ void Configure() {
     g_counting = g_checking || Nx2Profile::Enabled();
 }
 
+bool BackStagesRequested() {
+    static const bool requested = [] {
+        const char* const value = std::getenv("EDEN_NX2_BACK_STAGES");
+        return value != nullptr && value[0] == '1';
+    }();
+    return requested;
+}
+
+bool BackStagesVerifyRequested() {
+    static const bool requested = [] {
+        const char* const value = std::getenv("EDEN_NX2_BACK_STAGES_VERIFY");
+        return value != nullptr && value[0] == '1';
+    }();
+    return requested;
+}
+
 void Violation(Stage owner, const char* where) {
     if (g_counters.violations.fetch_add(1, std::memory_order_relaxed) < 16) {
         LOG_ERROR(HW_GPU, "Draw stage owner check: {} belongs to {} but runs in {}", where,
@@ -191,6 +207,10 @@ void NoteReadImpl(u32 slot, u64 begin, u64 size) {
     thread.ring.Read(slot, begin, size, thread.packets);
 }
 
+void NoteReadAtImpl(u32 slot, u64 begin, u64 size, u64 packet) {
+    Thread().ring.Read(slot, begin, size, packet);
+}
+
 void EndPacketImpl() {
     t_stage = Stage::Outside;
     ++Thread().packets;
@@ -203,8 +223,16 @@ void NoteWriteImpl(Join site, u64 begin, u64 size) {
         return;
     }
     DrawThread& thread = Thread();
-    if (thread.ring.Overlaps(begin, size, thread.packets)) {
-        Count(site);
+    if (!g_threaded) {
+        if (thread.ring.Overlaps(begin, size, thread.packets)) {
+            Count(site);
+        }
+        return;
+    }
+    // Stage A noted the ranges at each packet's sequence: those B has not consumed are live.
+    if (PacketsInFlight() &&
+        thread.ring.Overlaps(begin, size, RingConsumed() + OverlapRing::Window)) {
+        JoinNow(site);
     }
 }
 
@@ -247,10 +275,11 @@ std::string FormatJoins(u64 window_ns) {
         }
     }
     DrawThread& thread = Thread();
+    const u64 clock = g_threaded ? RingConsumed() + OverlapRing::Window : thread.packets;
     line += fmt::format(" packets in flight hold {} ranges ({} overflows) | owner violations {}",
-                        thread.ring.Live(thread.packets), thread.ring.overflows,
+                        thread.ring.Live(clock), thread.ring.overflows,
                         g_counters.violations.load(std::memory_order_relaxed));
-    return line;
+    return line + FormatRing(window_ns);
 }
 
 } // namespace VideoCommon::DrawStages

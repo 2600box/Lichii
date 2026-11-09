@@ -62,6 +62,11 @@ inline constexpr std::array<const char*, JoinCount> join_names{
 
 /// Whether the stage marker and the join counters run, as of Configure.
 inline bool g_counting{};
+/// Stage B runs on its own thread (EDEN_NX2_BACK_STAGES=1, test only): set while the
+/// rasterizer's ring runs. Joins then wait for B, and the owner checks are thread checks.
+inline bool g_threaded{};
+/// EDEN_NX2_BACK_STAGES_VERIFY=1 with the ring running.
+inline bool g_threaded_verify{};
 /// Owner checks (EDEN_NX2_SPLIT_CHECK), as of Configure.
 inline bool g_checking{};
 inline thread_local Stage t_stage{};
@@ -71,13 +76,27 @@ inline thread_local bool t_draw_thread{};
 /// Reads the switches (when the split starts and when the rasterizer is made).
 void Configure();
 
+/// EDEN_NX2_BACK_STAGES=1 and EDEN_NX2_BACK_STAGES_VERIFY=1, read once.
+[[nodiscard]] bool BackStagesRequested();
+[[nodiscard]] bool BackStagesVerifyRequested();
+
 /// The thread that draws enters a stage.
 inline void Enter(Stage stage) {
-    if (g_counting) {
+    if (g_counting || g_threaded) {
         t_stage = stage;
         t_draw_thread = true;
     }
 }
+
+/// Stage 4: hands the packets in flight to B and waits until B consumed them, counting `site`
+/// (nx2_back_stages.cpp; JoinB is the inline check).
+void JoinNow(Join site);
+/// Stage 4: packets A committed that B has not consumed yet.
+[[nodiscard]] bool PacketsInFlight();
+/// Stage 4: packets B consumed.
+[[nodiscard]] u64 RingConsumed();
+/// Stage 4: the ring's part of the GPU profile line (empty while B runs inline).
+std::string FormatRing(u64 window_ns);
 
 [[nodiscard]] inline bool In(Stage stage) {
     return g_counting && t_stage == stage;
@@ -87,8 +106,14 @@ void Violation(Stage owner, const char* where);
 
 /// `where` belongs to `owner`'s state: with EDEN_NX2_SPLIT_CHECK, reports it running in the other
 /// stage (between draws either may run).
+/// With stage B on its own thread, B's state between draws also needs B idle.
 inline void Expect(Stage owner, const char* where) {
-    if (g_checking && t_stage != Stage::Outside && t_stage != owner) {
+    if (!g_checking) {
+        return;
+    }
+    if (t_stage != Stage::Outside ? t_stage != owner
+                                  : owner == Stage::B && g_threaded && t_draw_thread &&
+                                        PacketsInFlight()) {
         Violation(owner, where);
     }
 }
@@ -115,15 +140,20 @@ inline void CountInA(Join site) {
     }
 }
 
-/// A join point whose operation then uses both stages' state: in stage 4 B is idle while it
-/// holds, so the owner checks treat it as between draws.
+/// A join point whose operation then uses both stages' state: B is idle while it holds (with B on
+/// its own thread the thread that draws waits for it), so the owner checks treat it as between
+/// draws.
 class JoinScope {
 public:
     explicit JoinScope(Join site, bool when = true) {
-        if (!g_counting || !when) {
+        if (!when || !(g_counting || g_threaded)) {
             return;
         }
-        Count(site);
+        if (!g_threaded) {
+            Count(site);
+        } else if (t_draw_thread && PacketsInFlight()) {
+            JoinNow(site);
+        }
         previous = std::exchange(t_stage, Stage::Outside);
         active = true;
     }
@@ -208,6 +238,7 @@ private:
 };
 
 void NoteReadImpl(u32 slot, u64 begin, u64 size);
+void NoteReadAtImpl(u32 slot, u64 begin, u64 size, u64 packet);
 void EndPacketImpl();
 void NoteWriteImpl(Join site, u64 begin, u64 size);
 void NoteGpuWriteImpl(Join site, const Tegra::MemoryManager& memory, GPUVAddr address, u64 size);
@@ -219,6 +250,12 @@ inline void NoteRead(u32 slot, u64 begin, u64 size) {
     }
 }
 
+/// Stage 4: stage A notes a range B reads for packet `packet` (the ring's sequence), so writes
+/// over it join while the packet is in flight.
+inline void NoteReadAt(u32 slot, u64 begin, u64 size, u64 packet) {
+    NoteReadAtImpl(slot, begin, size, packet);
+}
+
 /// The current draw ends: its packet joins the ones in flight.
 inline void EndPacket() {
     if (g_counting) {
@@ -226,9 +263,10 @@ inline void EndPacket() {
     }
 }
 
-/// A method writes guest memory at this device range.
+/// A method writes guest memory at this device range: with B on its own thread, a write over a
+/// range a packet in flight reads waits for B.
 inline void NoteWrite(Join site, u64 begin, u64 size) {
-    if (g_counting) {
+    if (g_counting || g_threaded) {
         NoteWriteImpl(site, begin, size);
     }
 }
@@ -236,7 +274,7 @@ inline void NoteWrite(Join site, u64 begin, u64 size) {
 /// A method writes guest memory at this GPU range.
 inline void NoteGpuWrite(Join site, const Tegra::MemoryManager& memory, GPUVAddr address,
                          u64 size) {
-    if (g_counting) {
+    if (g_counting || g_threaded) {
         NoteGpuWriteImpl(site, memory, address, size);
     }
 }
@@ -268,7 +306,7 @@ template <typename DmaRegs>
 /// A MaxwellDMA launch starts.
 template <typename DmaRegs>
 void NoteDma(const Tegra::MemoryManager& memory, const DmaRegs& regs) {
-    if (g_counting) {
+    if (g_counting || g_threaded) {
         NoteGpuWrite(Join::Dma, memory, regs.offset_out, DmaDestinationBytes(regs));
     }
 }
