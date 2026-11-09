@@ -3,7 +3,7 @@
 """Shader cache bench for the owner's PC: boots games cold and warm, A against B.
 
   cache_bench.py run --config bench.json [--dry-run] [--resume DIR] [--games oot,mkw]
-                     [--cache cold,warm] [--mesh mesh,no_mesh] [--paths A,B] [--repeats N]
+                     [--cache cold,warm,second] [--mesh mesh,no_mesh] [--paths A,B] [--repeats N]
   cache_bench.py restore --config bench.json --session DIR
 
 Every run boots one game through lichii.exe -g with EDEN_NX2_DEBUG_SERVER and
@@ -14,7 +14,8 @@ Shader caches: before the first run every cache directory a run will touch (the 
 <user>/cache/shader/<title id>, and the driver cache directories the config names) is copied
 with a sha256 manifest. Each run then moves the real directory aside (a rename in the same
 folder), so the emulator never opens the originals: a cold run starts with no directory, a warm
-run with a fresh copy of the recorded one. After the run the directory the run wrote is moved
+run with a fresh copy of the recorded one, and a second run (opt-in) with a copy of what its
+cold run left, which measures the boot after one session of that build. After the run the directory the run wrote is moved
 into the run's folder, the original is renamed back and checked against the manifest. Nothing
 is deleted, and nothing outside the cache directories is touched: saves (nand, sdmc) never.
 If the bench stops halfway, 'restore' puts every original back.
@@ -43,7 +44,8 @@ from debug_mcp import Emulator, EmulatorError, default_timeout  # noqa: E402
 ASIDE_SUFFIX = ".bench-aside"
 FORBIDDEN_PARTS = {"nand", "sdmc", "save", "saves", "keys"}
 MESH_ENV = {"mesh": {}, "no_mesh": {"EDEN_NX2_FORCE_MESH_FALLBACK": "1"}}
-CACHE_STATES = ("cold", "warm")
+CACHE_STATES = ("cold", "warm", "second")
+DEFAULT_CACHE_STATES = ("cold", "warm")
 TIME = re.compile(r"^\[\s*(\d+\.\d+)\]")
 CACHE_PATH_LINE = re.compile(r"(?:Vulkan driver pipelines cached at|Loaded Vulkan driver pipeline "
                              r"cache): (.+)$")
@@ -131,12 +133,14 @@ class CacheDir:
         if self.aside.exists():
             raise BenchError(f"{self.aside} exists: run restore first")
 
-    def prepare(self, state):
-        """Moves the original aside; a warm run gets a copy of the recorded directory."""
+    def prepare(self, state, cold_output=None):
+        """Moves the original aside; a warm run gets a copy of the recorded directory, a second
+        run a copy of cold_output, what its cold run left of this directory."""
         if self.path.exists():
             os.replace(self.path, self.aside)
-        if state == "warm" and self.backup.exists():
-            shutil.copytree(self.backup, self.path)
+        source = {"warm": self.backup, "second": cold_output}.get(state)
+        if source is not None and Path(source).exists():
+            shutil.copytree(source, self.path)
 
     def holds_run_output(self):
         """Whether the directory at path is one a run wrote, not the original."""
@@ -208,7 +212,7 @@ def make_plan(config, games=None, caches=None, meshes=None, paths=None, repeats=
     """Runs in order: per repeat and game, every cache state and mesh mode, with A and B
     alternating which goes first from one repeat to the next."""
     games = games or list(config["games"])
-    caches = caches or list(config.get("cache_states", CACHE_STATES))
+    caches = caches or list(config.get("cache_states", DEFAULT_CACHE_STATES))
     meshes = meshes or list(config.get("mesh_modes", MESH_ENV))
     paths = paths or list(config["paths"])
     repeats = repeats if repeats is not None else int(config.get("repeats", 3))
@@ -217,6 +221,8 @@ def make_plan(config, games=None, caches=None, meshes=None, paths=None, repeats=
         unknown = [v for v in value if v not in known]
         if unknown:
             raise BenchError(f"unknown {what}: {unknown}")
+    if "second" in caches and ("cold" not in caches or caches.index("cold") > caches.index("second")):
+        raise BenchError("a second run boots from what its cold run left: list cold before second")
     plan = []
     for repeat in range(repeats):
         for game in games:
@@ -450,7 +456,7 @@ def print_plan(config, plan, session, out=None):
                 out.write(f"  {directory.path} -> {directory.backup}: "
                           f"{describe_dir(directory.path)}\n")
     out.write("\nEach run: rename the originals to <dir>" + ASIDE_SUFFIX + "; cold starts with no "
-              "directory, warm with a copy of the backup; boot, steps, measure, kill, copy the "
+              "directory, warm with a copy of the backup, second with a copy of what its cold run left; boot, steps, measure, kill, copy the "
               "log; move what the run wrote into its folder; rename the originals back; verify "
               "the sha256 manifest.\n\n")
     for name, game in config["games"].items():
@@ -518,10 +524,15 @@ def run_bench(config, plan, session):
         wait_closed(address)
         result = dict(run)
         prepared = []
+        cold_dir = session / "runs" / f"r{run['repeat']}-{run['game']}-cold-{run['mesh']}-{run['path']}"
         try:
+            if run["cache"] == "second":
+                with open(cold_dir / "run.json", encoding="utf-8") as stream:
+                    if "error" in json.load(stream):
+                        raise BenchError(f"its cold run {cold_dir.name} failed")
             for directory in dirs:
                 prepared.append(directory)
-                directory.prepare(run["cache"])
+                directory.prepare(run["cache"], cold_dir / "after" / directory.key)
             result.update(boot_and_measure(config, run, run_dir))
         except (BenchError, EmulatorError, OSError) as error:
             result["error"] = str(error)

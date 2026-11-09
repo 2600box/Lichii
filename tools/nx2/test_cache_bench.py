@@ -172,6 +172,8 @@ class BenchTest(unittest.TestCase):
         self.assertEqual({run["mesh"] for run in plan}, {"mesh", "no_mesh"})
         with self.assertRaises(cache_bench.BenchError):
             cache_bench.make_plan(self.config, games=["zelda"])
+        with self.assertRaises(cache_bench.BenchError):
+            cache_bench.make_plan(self.config, caches=["second", "cold"])
 
     def test_run_env(self):
         run = {"game": "oot", "path": "B", "mesh": "no_mesh"}
@@ -254,13 +256,14 @@ class BenchTest(unittest.TestCase):
         self.addCleanup(lambda: (setattr(cache_bench, "boot_and_measure", originals[0]),
                                  setattr(cache_bench, "lichii_running", originals[1]),
                                  setattr(cache_bench, "port_open", originals[2])))
-        plan = cache_bench.make_plan(self.config, games=["oot"], meshes=["mesh"], paths=["A"],
-                                     repeats=1)
+        plan = cache_bench.make_plan(self.config, games=["oot"], caches=["cold", "warm", "second"],
+                                     meshes=["mesh"], paths=["A"], repeats=1)
         with redirect_stdout(io.StringIO()):
             summary = cache_bench.run_bench(self.config, plan, self.session)
-        self.assertEqual([state for state, _ in seen], ["cold", "warm"])
+        self.assertEqual([state for state, _ in seen], ["cold", "warm", "second"])
         self.assertIsNone(seen[0][1])
         self.assertEqual(seen[1][1], self.original)
+        self.assertEqual(seen[2][1], {"vulkan.fork-v54.bin": b"written by r0-oot-cold-mesh-A"})
         self.assertEqual(tree(self.shader), self.original)
         self.saves_untouched()
         for run in plan:
