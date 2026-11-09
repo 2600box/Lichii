@@ -286,12 +286,14 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
     // A fence-flagged payload release writes a constant, so at low accuracy with Default fences
     // it stays synchronized as before #337: its fence may be skipped and the query freed at once.
     // Only reports of GPU counters wait for their fence to run.
+    // A release over a report still pending waits too, so the older report can't land after it.
+    const u64 report_size = has_timestamp ? 16 : 4;
     const bool is_synced = is_fence && counter_type == QueryType::Payload &&
                            (Settings::IsGPUFenceBehaviorDefault()
                                 ? !Settings::IsGPULevelHigh()
                                 : !Settings::IsGPUFenceBehaviorBalanced() &&
-                                      !Settings::IsGPUFenceBehaviorAccurate());
-    const u64 report_size = has_timestamp ? 16 : 4;
+                                      !Settings::IsGPUFenceBehaviorAccurate()) &&
+                           !HoldsQueries(cpu_addr, report_size);
     const bool immediate =
         !is_fence && !Settings::IsGPULevelHigh() && counter_type == QueryType::Payload;
     // Written later: the buffer cache keeps GPU writes over it until then (NoteReportPending).
