@@ -54,6 +54,12 @@ if (NOT TARGET stb::headers)
 endif()
 
 AddJsonPackage(NAME zbic DOWNLOAD_ONLY)
+
+# xxHash (header only)
+AddJsonPackage(NAME xxhash DOWNLOAD_ONLY)
+add_library(xxhash INTERFACE)
+target_include_directories(xxhash INTERFACE "${xxhash_SOURCE_DIR}")
+
 set(ZBIC_INCLUDE_DIR
     "${zbic_SOURCE_DIR}/src"
     PARENT_SCOPE)
