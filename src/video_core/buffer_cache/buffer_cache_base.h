@@ -867,6 +867,9 @@ private:
         /// the offsets the copies have in `staging`.
         std::vector<u8> landed_bytes;
         Common::RangeSet<DAddr> landed;
+        /// A check alone, its read's bytes all brought by other downloads: the bytes it compares,
+        /// which its read waits for as for a download of its own.
+        Common::RangeSet<DAddr> own;
     };
     struct ReadCheckTotals {
         u64 every{};      ///< Tests: check 1 in `every` read downloads, over EDEN_NX2_READ_CHECK
@@ -892,6 +895,9 @@ private:
         return every;
     }
     void CheckReadDownload(const ReadCheck& check, const Common::RangeSet<DAddr>& cpu_written);
+    [[nodiscard]] bool ReadChecks() const {
+        return read_check.every != 0 || ReadCheckEvery() != 0;
+    }
     /// A download landed `written`: what guest memory holds now over a later check's `kept`.
     void NoteLandedBytes(ReadCheck& check, const Common::RangeSet<DAddr>& written);
 
@@ -918,6 +924,25 @@ private:
     /// All the read downloads' clean_ranges (they don't overlap): GPU-modified bytes already on
     /// their way, which later reads wait for rather than download again.
     Common::RangeSet<DAddr> read_download_ranges;
+
+    /// TEST (EDEN_NX2_READ_CHECK): the bytes early downloads brought to a page's guest memory, and
+    /// what guest memory held there as they landed, until newer downloaded bytes or values replace
+    /// them. The read they serve compares them with the GPU's bytes then: a GPU write in between
+    /// that took nothing out of them shows.
+    struct EarlyLanded {
+        Common::RangeSet<DAddr> bytes;
+        std::vector<u8> as_landed; ///< The page, DEVICE_PAGESIZE bytes
+    };
+    std::unordered_map<DAddr, EarlyLanded> early_landed;
+    /// Whether an early download serves this read: in check mode it flushes (and is compared).
+    [[nodiscard]] bool EarlyDownloadServes(DAddr device_addr, u64 size) const;
+    void NoteEarlyLanded(const ReadDownload& download, const Common::RangeSet<DAddr>& cpu_written);
+    /// Calls func(begin, end, the bytes as they landed) for what early downloads brought to
+    /// [device_addr, device_addr + size) that no GPU write changed since, which a read takes:
+    /// a later read compares only what lands after it.
+    template <typename Func>
+    void TakeEarlyLanded(DAddr device_addr, u64 size, Func&& func);
+    void ForgetEarlyLanded(DAddr device_addr, u64 size);
 
     /// A page the guest CPU read GPU writes from. Switch 2 titles read compute results back every
     /// frame, milliseconds after the dispatch that wrote them: a download recorded at the read
