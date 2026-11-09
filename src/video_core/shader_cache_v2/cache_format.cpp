@@ -167,7 +167,6 @@ void EncodeRecord(std::vector<u8>& out, RecordKind kind, u64 key, std::span<cons
     std::array<u8, RecordHashSize> hash{};
     Store<u64>(hash.data(), PayloadHash(static_cast<u16>(kind), key, payload));
     const size_t end = out.size() + RecordSize(payload.size());
-    out.reserve(end);
     out.insert(out.end(), header.begin(), header.end());
     out.insert(out.end(), payload.begin(), payload.end());
     out.insert(out.end(), hash.begin(), hash.end());
