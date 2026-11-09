@@ -216,6 +216,11 @@ the `previous` and current `on` state, so a test script can boot through the log
 unlimited. Without `on` it only reports the state. Use it through `--call`; the MCP adapter does
 not list it.
 
+**`host_timing`** `{margin_us?, stats?}`. Sets the HostTiming wait test switch live
+(`EDEN_NX2_HOSTTIMING_WAIT`; -1 is the default hardware wait) and its per-second stats line
+(`EDEN_NX2_HOSTTIMING_STATS`), and returns the `previous` and current values. See
+`tools/nx2/hosttiming-wait-bench.md`. Use it through `--call`.
+
 **`reject_shaders`** `{hashes?, reject?, timeout_s?}`. This is `EDEN_NX2_REJECT_HASH` at
 runtime: the same keys (native program key or shader hash) and the same effect. Pipeline
 invalidation turned out to be tractable:
