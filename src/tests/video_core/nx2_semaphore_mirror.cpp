@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
+
 #include <catch2/catch_test_macros.hpp>
 
 #include "video_core/nx2.h"
@@ -59,6 +61,15 @@ TEST_CASE("Nx2MirrorShadow keeps mirrored values out of words with direct releas
     shadow.Set(device, 43, 7);
     shadow.NoteDirectRelease(device, region);
     CHECK(shadow.Read(device, 7) == std::nullopt);
+
+    const auto max_with = [](u32 payload) { return [payload](u32 current) { return std::max(current, payload); }; };
+    shadow.Set(device, 10, 0);
+    CHECK(shadow.NoteCombinedRelease(device, region, 0, 3, max_with(3)) == 10u);
+    CHECK(shadow.Read(device, 3) == 10u);
+    CHECK(shadow.NoteCombinedRelease(device, region, 3, 12, max_with(12)) == 12u);
+    CHECK(shadow.Read(device, 12) == 12u);
+    CHECK(shadow.NoteCombinedRelease(device + 4, region + 4, 5, 6, max_with(6)) == 6u);
+    CHECK(shadow.Read(device + 4, 6) == std::nullopt);
 
     shadow.Set(device, 44, 7);
     Tegra::Nx2ClearSemaphoreRegions();

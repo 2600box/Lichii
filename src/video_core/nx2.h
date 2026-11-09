@@ -196,6 +196,22 @@ public:
         words.erase(word);
     }
 
+    /// A direct release that combines with the word it lands on (a QMD max or reduction) took guest
+    /// memory from guest_before to guest_after. While the word holds a mirrored value, GPU acquires
+    /// see combine(mirrored), what the word would hold without the shadow. Returns what they see.
+    template <typename Combine>
+    u32 NoteCombinedRelease(u64 device_address, u64 gpu_address, u32 guest_before, u32 guest_after,
+                            Combine&& combine) {
+        const auto mirrored = Read(device_address, guest_before);
+        NoteDirectRelease(device_address, gpu_address);
+        if (!mirrored) {
+            return guest_after;
+        }
+        const u32 seen = combine(*mirrored);
+        Set(device_address, seen, guest_after);
+        return seen;
+    }
+
     /// Whether a mirrored release into this word goes to the table instead of guest memory.
     bool Diverts(u64 device_address) const {
         if (!has_direct.load(std::memory_order_acquire)) {
