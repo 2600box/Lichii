@@ -300,10 +300,11 @@ bool Fsr4Upscaler::Upscale(const Inputs& in) {
     if (failed.load()) {
         return false;
     }
-    if (context == nullptr || in.render_size.width != render_extent.width ||
-        in.render_size.height != render_extent.height ||
-        in.upscale_size.width != upscale_extent.width ||
-        in.upscale_size.height != upscale_extent.height) {
+    const bool new_context = context == nullptr || in.render_size.width != render_extent.width ||
+                             in.render_size.height != render_extent.height ||
+                             in.upscale_size.width != upscale_extent.width ||
+                             in.upscale_size.height != upscale_extent.height;
+    if (new_context) {
         if (!CreateContext(in.render_size, in.upscale_size)) {
             failed = true;
             return false;
@@ -337,7 +338,7 @@ bool Fsr4Upscaler::Upscale(const Inputs& in) {
     dispatch.sharpness = in.sharpness;
     dispatch.frameTimeDelta = in.frame_time_ms;
     dispatch.preExposure = 1.0f;
-    dispatch.reset = in.reset;
+    dispatch.reset = in.reset || new_context;
     dispatch.cameraNear = in.camera_near;
     dispatch.cameraFar = in.camera_far;
     dispatch.cameraFovAngleVertical = in.vertical_fov;
