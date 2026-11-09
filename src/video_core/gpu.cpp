@@ -41,6 +41,8 @@
 #include "video_core/host1x/syncpoint_manager.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_async_readback.h"
+#include "video_core/nx2_profile.h"
 #include "video_core/renderer_base.h"
 #include "video_core/shader_notify.h"
 
@@ -275,21 +277,42 @@ struct GPU::Impl {
                      raster_area.start_address, raster_area.end_address,
                      reads.load(std::memory_order_relaxed));
         }
+        namespace AsyncReadback = VideoCore::AsyncReadback;
+        const u64 request = AsyncReadback::Now();
+        const bool async = AsyncReadback::Enabled();
+        const u64 area_size = raster_area.end_address - raster_area.start_address;
         // In flight: an earlier read's downloads cover the area, only FinishRead is left.
         if (!raster_area.in_flight) {
-            const u64 fence = RequestSyncOperation([this, raster_area]() {
+            const u64 fence = RequestSyncOperation([this, raster_area, async, area_size]() {
+                const u64 start = AsyncReadback::Now();
                 // Apply collected guest writes before downloading GPU data over guest memory.
                 InvalidateGPUCache();
-                renderer->ReadRasterizer()->FlushRegionForRead(
-                    raster_area.start_address, raster_area.end_address - raster_area.start_address);
+                if (async) {
+                    renderer->ReadRasterizer()->FlushRegionForRead(raster_area.start_address,
+                                                                   area_size);
+                } else {
+                    renderer->ReadRasterizer()->FlushRegion(raster_area.start_address, area_size);
+                }
+                AsyncReadback::Add(AsyncReadback::g_counters.flush_ns,
+                                   AsyncReadback::Now() - start);
             });
             gpu_thread.TickGPU(is_async);
             WaitForSyncOperation(fence);
         }
-        // The GPU thread submitted the downloads without waiting for the host GPU: this thread
-        // waits for them and writes them to guest memory, while the GPU thread goes on.
-        renderer->ReadRasterizer()->FinishRead(raster_area.start_address,
-                                               raster_area.end_address - raster_area.start_address);
+        if (async) {
+            // The GPU thread submitted the downloads without waiting for the host GPU: this
+            // thread waits for them and writes them to guest memory, while the GPU thread goes on.
+            AsyncReadback::t_reading = true;
+            renderer->ReadRasterizer()->FinishRead(raster_area.start_address, area_size);
+            AsyncReadback::t_reading = false;
+        }
+        AsyncReadback::CountRead(!async                 ? AsyncReadback::Read::Sync
+                                 : raster_area.in_flight ? AsyncReadback::Read::InFlight
+                                                         : AsyncReadback::Read::Async,
+                                 AsyncReadback::Now() - request);
+        if (async || VideoCommon::Nx2Profile::Enabled()) {
+            AsyncReadback::MaybeReport();
+        }
         return raster_area;
     }
 
