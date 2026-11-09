@@ -308,8 +308,9 @@ struct NxTools::Job {
 
     // Adds an NSP or XCI to the command, decrypted on the fly. Returns why it cannot be,
     // empty on success.
-    QString AddPackage(const FileSys::VirtualFilesystem& vfs, const std::filesystem::path& path) {
-        const auto file = vfs->OpenFile(ToUtf8(path), FileSys::OpenMode::Read);
+    QString AddPackage(const FileSys::VirtualFilesystem& filesystem,
+                       const std::filesystem::path& path) {
+        const auto file = filesystem->OpenFile(ToUtf8(path), FileSys::OpenMode::Read);
         std::string error = "file not found";
         auto decrypted = file != nullptr ? FileSys::OpenDecryptedPackage(file, error) : nullptr;
         if (decrypted == nullptr) {
