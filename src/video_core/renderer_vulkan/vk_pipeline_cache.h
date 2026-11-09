@@ -148,7 +148,16 @@ private:
     /// may be skipped while it builds (asynchronous shaders, CanDiscardPendingDraw).
     [[nodiscard]] GraphicsPipeline* BuiltPipeline(GraphicsPipeline* pipeline) noexcept;
 
-    std::unique_ptr<GraphicsPipeline> CreateGraphicsPipeline();
+    using PointerKeeps = std::array<std::vector<u64>, GraphicsPipeline::NUM_PROGRAMS>;
+
+    std::unique_ptr<GraphicsPipeline> CreateGraphicsPipeline(const PointerKeeps* keep_pointers = nullptr);
+
+    /// Whether a slot that was null when the pipeline's native programs were translated now
+    /// holds a mapped pointer, so the translation reads zeros where the game has data.
+    [[nodiscard]] bool StaleNullPointerSlot(const GraphicsPipeline& pipeline) const;
+
+    /// The pipeline in `slot`, translated again when one of its null pointer slots went stale.
+    GraphicsPipeline* CheckPointerSlots(std::unique_ptr<GraphicsPipeline>& slot);
 
     /// Shader cache v2, run-time misses: the stages translated at once on shader_jobs' CPU workers
     /// while the GPU thread waited (VideoCommon::TranslateStages)
@@ -281,6 +290,10 @@ private:
     s64 native_wait_used_us{}; ///< Budget spent since the last 10 s log line.
     std::deque<std::pair<u64, std::unique_ptr<GraphicsPipeline>>> evicted_pipelines; ///< (tick, pipeline)
     std::unordered_set<u64> used_and_evicted; ///< Key hashes of pipelines used this session, evicted since
+    /// Key hash -> the pointers an evicted pipeline's programs bound, kept by its next translation
+    std::unordered_map<u64, PointerKeeps> evicted_pointer_keeps;
+    u64 null_slot_translations{}; ///< Graphics translations with null pointer slots
+    u64 stale_null_slots{};       ///< Graphics pipelines found with a stale null pointer slot
 
     ::Common::unordered_map<ComputePipelineCacheKey, ComputePipelineCacheEntry> compute_cache;
     /// Replaced compute pipelines, destroyed once the GPU and their queued build are done with

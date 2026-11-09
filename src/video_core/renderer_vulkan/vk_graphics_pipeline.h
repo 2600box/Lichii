@@ -251,6 +251,43 @@ public:
         return used;
     }
 
+    static constexpr size_t NUM_PROGRAMS = Tegra::Engines::Maxwell3D::Regs::MaxShaderProgram;
+
+    [[nodiscard]] const GraphicsPipelineCacheKey& Key() const noexcept {
+        return key;
+    }
+
+    /// A native program's constant buffer slot that held a null pointer when it was translated:
+    /// the translation binds no storage buffer for it and reads zeros through it.
+    struct NullPointerSlot {
+        u32 program;
+        u32 index;
+        u32 offset;
+    };
+
+    void SetPointerSlots(std::vector<NullPointerSlot> null_slots,
+                         std::array<std::vector<u64>, NUM_PROGRAMS> mapped) {
+        null_pointer_slots = std::move(null_slots);
+        mapped_pointers = std::move(mapped);
+    }
+
+    [[nodiscard]] const std::vector<NullPointerSlot>& NullPointerSlots() const noexcept {
+        return null_pointer_slots;
+    }
+
+    /// The constant buffer slots each program binds as storage buffer pointers
+    [[nodiscard]] const std::array<std::vector<u64>, NUM_PROGRAMS>& MappedPointers() const noexcept {
+        return mapped_pointers;
+    }
+
+    [[nodiscard]] u32 PointerRebuilds() const noexcept {
+        return pointer_rebuilds;
+    }
+
+    void SetPointerRebuilds(u32 rebuilds) noexcept {
+        pointer_rebuilds = rebuilds;
+    }
+
     /// Forgets the transitions, which may point to pipelines the cache evicted.
     void ClearTransitions() noexcept {
         transition_keys.clear();
@@ -371,6 +408,9 @@ private:
     std::vector<GraphicsPipeline*> transitions;
     u64 last_use_frame{};
     bool used{};
+    std::vector<NullPointerSlot> null_pointer_slots;
+    std::array<std::vector<u64>, NUM_PROGRAMS> mapped_pointers;
+    u32 pointer_rebuilds{};
 
     std::array<vk::ShaderModule, NUM_STAGES> spv_modules;
 
