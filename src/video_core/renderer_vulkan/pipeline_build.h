@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -15,6 +16,55 @@
 #include "video_core/shader_jobs.h"
 
 namespace Vulkan {
+
+/// Bytes of translated IR that pipelines hold until their job emits the SPIR-V. The scheduler
+/// counts a job's bytes only while one of its stages runs, so a pipeline whose IR doesn't fit
+/// beside the queued IR emits its SPIR-V where it was translated instead.
+class QueuedIrBudget {
+public:
+    class Reservation {
+    public:
+        Reservation(const Reservation&) = delete;
+        Reservation& operator=(const Reservation&) = delete;
+
+        ~Reservation() {
+            queued->fetch_sub(bytes, std::memory_order_relaxed);
+        }
+
+    private:
+        friend class QueuedIrBudget;
+        Reservation(std::shared_ptr<std::atomic<u64>> queued_, u64 bytes_)
+            : queued{std::move(queued_)}, bytes{bytes_} {}
+
+        std::shared_ptr<std::atomic<u64>> queued;
+        u64 bytes;
+    };
+
+    explicit QueuedIrBudget(u64 budget_) : budget{budget_} {}
+
+    /// Null when `bytes` don't fit beside the IR queued now
+    std::unique_ptr<Reservation> TryReserve(u64 bytes) {
+        u64 current = queued->load(std::memory_order_relaxed);
+        do {
+            if (bytes > budget - std::min(current, budget)) {
+                if (!logged.exchange(true, std::memory_order_relaxed)) {
+                    LOG_INFO(Render_Vulkan,
+                             "{} MiB of IR waits for SPIR-V emission: pipelines past {} MiB emit "
+                             "theirs where they were translated",
+                             current >> 20, budget >> 20);
+                }
+                return nullptr;
+            }
+        } while (
+            !queued->compare_exchange_weak(current, current + bytes, std::memory_order_relaxed));
+        return std::unique_ptr<Reservation>{new Reservation{queued, bytes}};
+    }
+
+private:
+    const u64 budget;
+    std::shared_ptr<std::atomic<u64>> queued = std::make_shared<std::atomic<u64>>(0);
+    std::atomic_bool logged{};
+};
 
 /// Where a pipeline is built. Without jobs it is built in its constructor.
 struct PipelineBuildQueue {

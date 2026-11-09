@@ -245,6 +245,15 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual({row["verdict"] for row in report["stages"]}, {"unreplayable"})
 
+    def test_summary_lists_a_record_only_one_side_has(self):
+        sides = ({"label": "A", "path": "v2"}, {"label": "B", "path": "v2"})
+        record = {"kind": "graphics", "record_key": "k", "entry": 1, "offset": 12,
+                  "environments": [{"offset": 16, "stage": "vertex"}]}
+        _, rows = sweep.pair_records(0, "cache", [record], [], sides)
+        summary = sweep.replay_summary(rows, [], [], sides)
+        self.assertIn("| cache | 000-a000001 | 16 | vertex | None |  |  | one-sided | "
+                      "only side A has this record |", summary)
+
     def test_key_collision_in_path_b_is_fatal(self):
         code, report, _ = self.replay("legacy", "alias")
         self.assertEqual(code, 1)

@@ -298,13 +298,15 @@ std::vector<ShaderCacheV2::LogAppend> RelinkPipelineRecords(
     return appends;
 }
 
-std::unordered_map<u64, u8> UsedPipelinesFromLog(
-    std::span<const ShaderCacheV2::LogRecord> live, u8 max_age, std::vector<u64>& expired) {
-    struct Session {
-        u64 key;
-        ShaderCacheV2::UsedRecord used;
-    };
-    std::vector<Session> sessions;
+namespace {
+struct UsedSession {
+    u64 key;
+    ShaderCacheV2::UsedRecord used;
+};
+
+/// The log's Used records, newest first
+std::vector<UsedSession> UsedSessions(std::span<const ShaderCacheV2::LogRecord> live) {
+    std::vector<UsedSession> sessions;
     for (const ShaderCacheV2::LogRecord& record : live) {
         if (record.kind != RecordKind::Used) {
             continue;
@@ -314,7 +316,14 @@ std::unordered_map<u64, u8> UsedPipelinesFromLog(
         }
     }
     std::ranges::stable_sort(sessions, std::ranges::greater{},
-                             [](const Session& session) { return session.used.session_time; });
+                             [](const UsedSession& session) { return session.used.session_time; });
+    return sessions;
+}
+} // Anonymous namespace
+
+std::unordered_map<u64, u8> UsedPipelinesFromLog(std::span<const ShaderCacheV2::LogRecord> live,
+                                                 u8 max_age, std::vector<u64>& expired) {
+    const std::vector<UsedSession> sessions = UsedSessions(live);
     std::unordered_map<u64, u8> pipelines;
     for (size_t age = 0; age < sessions.size(); ++age) {
         if (age >= max_age) {
@@ -326,6 +335,49 @@ std::unordered_map<u64, u8> UsedPipelinesFromLog(
         }
     }
     return pipelines;
+}
+
+std::vector<ShaderCacheV2::LogAppend> RelinkUsedPipelines(
+    std::span<const ShaderCacheV2::LogRecord> live,
+    std::span<const ShaderCacheV2::LogAppend> appends, u8 max_age,
+    std::unordered_map<u64, u8>& used) {
+    // A graphics record whose key moved is followed by the old key's tombstone. Used lists hold
+    // key hashes, which are the record keys.
+    std::unordered_map<u64, u64> moved;
+    for (size_t index = 0; index + 1 < appends.size(); ++index) {
+        if (appends[index].kind == RecordKind::Graphics &&
+            appends[index + 1].kind == RecordKind::Tombstone) {
+            moved.emplace(appends[index + 1].key, appends[index].key);
+        }
+    }
+    std::vector<ShaderCacheV2::LogAppend> result;
+    if (moved.empty()) {
+        return result;
+    }
+    const auto new_key = [&moved](u64 key) {
+        const auto it = moved.find(key);
+        return it == moved.end() ? key : it->second;
+    };
+    std::unordered_map<u64, u8> relinked_used;
+    for (const auto& [key, age] : used) {
+        const auto it = relinked_used.try_emplace(new_key(key), age).first;
+        it->second = std::min(it->second, age);
+    }
+    used = std::move(relinked_used);
+
+    std::vector<UsedSession> sessions = UsedSessions(live);
+    sessions.resize(std::min<size_t>(sessions.size(), max_age));
+    for (UsedSession& session : sessions) {
+        std::vector<u64>& pipelines = session.used.pipelines;
+        if (std::ranges::none_of(pipelines, [&moved](u64 key) { return moved.contains(key); })) {
+            continue;
+        }
+        std::ranges::transform(pipelines, pipelines.begin(), new_key);
+        std::ranges::sort(pipelines);
+        pipelines.erase(std::ranges::unique(pipelines).begin(), pipelines.end());
+        result.push_back({RecordKind::Used, session.key, ShaderCacheV2::EncodeUsed(session.used)});
+    }
+    return result;
 }
 
 } // namespace Vulkan

@@ -239,3 +239,17 @@ TEST_CASE("Production verification selects the reference when emitted words diff
     REQUIRE(job.Emit(reference) == reference);
     REQUIRE(job.Emit() == emitted);
 }
+
+TEST_CASE("Queued IR past its budget is emitted where it was translated", "[video_core]") {
+    Vulkan::QueuedIrBudget budget{100};
+    auto first = budget.TryReserve(60);
+    REQUIRE(first);
+    REQUIRE_FALSE(budget.TryReserve(41));
+    auto second = budget.TryReserve(40);
+    REQUIRE(second);
+    REQUIRE_FALSE(budget.TryReserve(1));
+    first.reset();
+    REQUIRE(budget.TryReserve(60));
+    REQUIRE_FALSE(budget.TryReserve(61));
+    REQUIRE_FALSE(budget.TryReserve(101));
+}

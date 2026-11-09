@@ -115,4 +115,12 @@ struct RekeyedRecord {
     std::span<const VideoCommon::ShaderCacheV2::LogRecord> live, u8 max_age,
     std::vector<u64>& expired);
 
+/// The Used records of the newest `max_age` sessions that name a graphics pipeline `appends`
+/// (RelinkPipelineRecords) moved to another key, with the pipeline under its new key. `used`
+/// (UsedPipelinesFromLog) moves the same way.
+[[nodiscard]] std::vector<VideoCommon::ShaderCacheV2::LogAppend> RelinkUsedPipelines(
+    std::span<const VideoCommon::ShaderCacheV2::LogRecord> live,
+    std::span<const VideoCommon::ShaderCacheV2::LogAppend> appends, u8 max_age,
+    std::unordered_map<u64, u8>& used);
+
 } // namespace Vulkan

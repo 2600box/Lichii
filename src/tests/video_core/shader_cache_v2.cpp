@@ -1062,3 +1062,39 @@ TEST_CASE("Shader cache v2: used pipelines age by the sessions that used them",
     std::ranges::sort(expired);
     REQUIRE(expired == std::vector<u64>{100, 101, 200});
 }
+
+TEST_CASE("Shader cache v2: used pipelines follow the graphics records a relink moves",
+          "[video_core][shader_cache_v2]") {
+    const auto header = V2::EncodeFileHeader(1);
+    std::vector<u8> bytes(header.begin(), header.end());
+    V2::EncodeRecord(bytes, RecordKind::Used, 100,
+                     V2::EncodeUsed({.session_time = 10, .pipelines = {1}}));
+    V2::EncodeRecord(bytes, RecordKind::Used, 101,
+                     V2::EncodeUsed({.session_time = 20, .pipelines = {3}}));
+    V2::EncodeRecord(bytes, RecordKind::Used, 102,
+                     V2::EncodeUsed({.session_time = 30, .pipelines = {1, 2, 9}}));
+    const V2::ParsedLog parsed = V2::ParseLog(bytes);
+    std::vector<u64> expired;
+    auto used = Vulkan::UsedPipelinesFromLog(parsed.live, 2, expired);
+    REQUIRE(used == std::unordered_map<u64, u8>{{1, 0}, {2, 0}, {9, 0}, {3, 1}});
+
+    // 1 moves to 5 and 3 to 9; 4 keeps its key, and the compute record of key 2 moved
+    const std::vector<V2::LogAppend> appends{
+        {RecordKind::Graphics, 5, {}},
+        {RecordKind::Tombstone, 1, V2::TombstonePayload(RecordKind::Graphics)},
+        {RecordKind::Graphics, 4, {}},
+        {RecordKind::Compute, 7, {}},
+        {RecordKind::Tombstone, 2, V2::TombstonePayload(RecordKind::Compute)},
+        {RecordKind::Graphics, 9, {}},
+        {RecordKind::Tombstone, 3, V2::TombstonePayload(RecordKind::Graphics)},
+    };
+    const auto rewritten = Vulkan::RelinkUsedPipelines(parsed.live, appends, 2, used);
+    REQUIRE(used == std::unordered_map<u64, u8>{{5, 0}, {2, 0}, {9, 0}});
+    // The expired session stays as it is
+    REQUIRE(
+        rewritten ==
+        std::vector<V2::LogAppend>{
+            {RecordKind::Used, 102, V2::EncodeUsed({.session_time = 30, .pipelines = {2, 5, 9}})},
+            {RecordKind::Used, 101, V2::EncodeUsed({.session_time = 20, .pipelines = {9}})}});
+    REQUIRE(Vulkan::RelinkUsedPipelines(parsed.live, {}, 2, used).empty());
+}

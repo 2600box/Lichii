@@ -352,7 +352,8 @@ def replay_summary(rows, collisions, input_errors, sides, listings=()):
                 detail = f"only {side} failed: {row.get('error_' + side.lower(), {}).get('message', '')}"
             detail = detail.replace("|", "\\|").replace("\n", " ")
             lines.append(f"| {row['source']} | {row['record']} | {row['env_offset']} | {row['stage']} | "
-                         f"{row['slot']} | {row['key_a']} | {row['key_b']} | {row['verdict']} | {detail} |")
+                         f"{row['slot']} | {row.get('key_a', '')} | {row.get('key_b', '')} | {row['verdict']} | "
+                         f"{detail} |")
     if collisions:
         lines += ["", "## Key collisions in B", "",
                   "| Source | Key B | Stage | First record (env offset) | Second record (env offset) |",

@@ -455,12 +455,14 @@ vk::ShaderModule EmitComputeModule(const Device& device, const Shader::Profile& 
 
 /// A compute program whose SPIR-V the CPU stage of its pipeline's job emits (shader cache v2)
 struct DeferredCompute {
+    std::unique_ptr<QueuedIrBudget::Reservation> reservation;
     std::shared_ptr<ShaderPools> pools;
     Shader::IR::Program program;
     std::vector<u32> reference_spirv;
 };
 
 struct DeferredStages {
+    std::unique_ptr<QueuedIrBudget::Reservation> reservation;
     std::shared_ptr<ShaderPools> pools;
     /// Pools of the stages translated on workers (ParallelTranslation)
     std::vector<std::shared_ptr<ShaderPools>> stage_pools;
@@ -1294,6 +1296,11 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
                                             .key = append.key,
                                             .offset = 0,
                                             .payload = append.payload});
+            }
+            for (const CacheV2::LogAppend& append :
+                 RelinkUsedPipelines(log->parsed.live, relinked_appends, MaxUsedPipelineAge(device),
+                                     used_pipelines)) {
+                cache_v2->Writer().Append(append.kind, append.key, append.payload);
             }
             for (const CacheV2::ProgramRecord& program : revalidated.unchanged) {
                 cache_v2->RecordProgram(program);
@@ -2461,6 +2468,13 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                 storage_buffers + auxiliary_buffers, auxiliary_buffers, set_limit);
         }
     }
+    u64 deferred_ir_bytes = 0;
+    std::unique_ptr<QueuedIrBudget::Reservation> ir_reservation;
+    if (emit_pools) {
+        deferred_ir_bytes = IrBytes(programs);
+        ir_reservation = queued_ir.TryReserve(deferred_ir_bytes);
+    }
+    const bool defer_emission = ir_reservation != nullptr;
     std::array<const Shader::Info*, Maxwell::MaxShaderStage> infos{};
     std::array<vk::ShaderModule, Maxwell::MaxShaderStage> modules;
     std::array<std::optional<Shader::RuntimeInfo>, Maxwell::MaxShaderStage> deferred_runtime_infos;
@@ -2512,7 +2526,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                            static_cast<std::streamsize>(code.size() * sizeof(u32)));
             }
         }
-        if (emit_pools) {
+        if (defer_emission) {
             deferred_runtime_infos[stage_index] = runtime_info;
             if (VideoCommon::Nx2Perf::Verify()) {
                 reference_spirv[stage_index] = EmitSPIRV(profile, runtime_info, program, binding);
@@ -2527,10 +2541,10 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         }
         previous_stage = &program;
     }
-    const u64 deferred_ir_bytes = emit_pools ? IrBytes(programs) : 0;
     std::function<std::array<vk::ShaderModule, Maxwell::MaxShaderStage>()> emit_stages;
-    if (emit_pools) {
+    if (defer_emission) {
         auto job = std::make_shared<DeferredStages>();
+        job->reservation = std::move(ir_reservation);
         job->pools = emit_pools;
         job->stage_pools = std::move(stage_pools);
         stage_pools.clear();
@@ -2568,7 +2582,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     return std::make_unique<GraphicsPipeline>(
         scheduler, buffer_cache, texture_cache, vulkan_pipeline_cache, pipeline_binaries.get(),
         &shader_notify, device, descriptor_pool, guest_descriptor_queue, descriptor_buffer_ring,
-        BuildQueue(build_in_parallel, deferred_ir_bytes), statistics,
+        BuildQueue(build_in_parallel, defer_emission ? deferred_ir_bytes : 0), statistics,
         render_pass_cache, key, std::move(modules), infos, std::move(emit_stages),
         std::move(mesh_emulation));
 
@@ -2832,12 +2846,13 @@ ComputePipelineCacheEntry PipelineCache::CreateComputePipeline(
         program.shared_memory_size = max_shared_memory;
     }
     std::unique_ptr<ComputePipeline> pipeline;
-    if (emit_pools) {
+    const u64 ir_bytes = emit_pools ? IrBytes(std::span(&program, 1)) : 0;
+    if (auto ir_reservation = emit_pools ? queued_ir.TryReserve(ir_bytes) : nullptr) {
         auto job = std::make_shared<DeferredCompute>();
         if (VideoCommon::Nx2Perf::Verify()) {
             job->reference_spirv = EmitComputeShader(profile, program, key.unique_hash);
         }
-        const u64 ir_bytes = IrBytes(std::span(&program, 1));
+        job->reservation = std::move(ir_reservation);
         job->pools = std::move(emit_pools);
         job->program = std::move(program);
         // Copied by the pipeline before its job can run
