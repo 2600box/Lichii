@@ -25,6 +25,10 @@
 
 // EDEN_NX2_GPU_PROFILE: time where the GPU thread spends its time. Each zone counts its own
 // (exclusive) time, nested zones excluded; every 10 s the thread logs each zone's share.
+namespace VideoCommon::DrawStages {
+std::string FormatJoins(u64 window_ns);
+}
+
 namespace VideoCommon::Nx2Profile {
 
 enum class Zone : u32 {
@@ -384,6 +388,7 @@ inline void Report(const char* thread_name = "GPU thread", bool report_all_conte
         drains.pop_back();
         line += " | waits for the back by site:" + drains;
     }
+    line += DrawStages::FormatJoins(window);
     std::string gpu_waits;
     for (size_t i = 0; i < data.gpu_wait_count.size(); ++i) {
         if (data.gpu_wait_count[i] != 0) {

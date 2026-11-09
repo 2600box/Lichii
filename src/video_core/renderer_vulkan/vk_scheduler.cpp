@@ -284,6 +284,8 @@ void Scheduler::DispatchWork() {
     if (VideoCommon::GpuSplit::check_owner) [[unlikely]] {
         VideoCommon::GpuSplit::CheckOwner("Scheduler::DispatchWork");
     }
+    const VideoCommon::DrawStages::JoinScope join{VideoCommon::DrawStages::Join::ASubmit,
+                                                  capturing};
     if (!command_list->Empty()) {
         ++cmdlist_stats.flush_joins;
         SpliceCommands();
@@ -394,6 +396,9 @@ void Scheduler::RealizeDeferredClear() {
 
 bool Scheduler::DeferColorClear(const Framebuffer* framebuffer, u32 rt_slot,
                                 const VkClearValue& value) {
+    const VideoCommon::DrawStages::JoinScope join{
+        VideoCommon::DrawStages::Join::ADeferredClear,
+        VideoCommon::DrawStages::In(VideoCommon::DrawStages::Stage::A)};
     if (IsRenderPassActive()) {
         return false;
     }
@@ -408,6 +413,9 @@ bool Scheduler::DeferColorClear(const Framebuffer* framebuffer, u32 rt_slot,
 }
 
 bool Scheduler::DeferDepthStencilClear(const Framebuffer* framebuffer, const VkClearValue& value) {
+    const VideoCommon::DrawStages::JoinScope join{
+        VideoCommon::DrawStages::Join::ADeferredClear,
+        VideoCommon::DrawStages::In(VideoCommon::DrawStages::Stage::A)};
     if (IsRenderPassActive()) {
         return false;
     }
@@ -425,11 +433,15 @@ void Scheduler::FlushDeferredClear() {
     if (deferred_clear.framebuffer == nullptr) {
         return;
     }
+    const VideoCommon::DrawStages::JoinScope join{
+        VideoCommon::DrawStages::Join::ADeferredClear,
+        VideoCommon::DrawStages::In(VideoCommon::DrawStages::Stage::A)};
     RealizeDeferredClear();
     EndRenderPass();
 }
 
 void Scheduler::RequestRenderpass(const Framebuffer* framebuffer, std::source_location location) {
+    VideoCommon::DrawStages::Expect(VideoCommon::DrawStages::Stage::B, "RequestRenderpass");
     if (deferred_clear.framebuffer == framebuffer) {
         RealizeDeferredClear();
         return;
@@ -458,6 +470,9 @@ void Scheduler::RequestRenderpass(const Framebuffer* framebuffer, std::source_lo
 }
 
 void Scheduler::RequestOutsideRenderPassOperationContext(std::source_location location) {
+    const VideoCommon::DrawStages::JoinScope join{
+        VideoCommon::DrawStages::Join::ARenderPassEnd,
+        state.renderpass && VideoCommon::DrawStages::In(VideoCommon::DrawStages::Stage::A)};
     if (state.renderpass) {
         CountRenderPassEnd(location.file_name(), location.line());
     }
@@ -491,6 +506,7 @@ bool Scheduler::UpdateGraphicsPipeline(GraphicsPipeline* pipeline) {
 }
 
 bool Scheduler::RefreshesStateEnable(const GraphicsPipeline* pipeline) const {
+    VideoCommon::DrawStages::CountInA(VideoCommon::DrawStages::Join::ASchedulerRead);
     return pipeline != nullptr && state.needs_state_enable_refresh &&
            pipeline->UsesExtendedDynamicState();
 }
@@ -804,6 +820,8 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
         ReportSubmitCounts();
     }
     // Stage A's commands so far go first, and the submit's own commands go to the chunk.
+    const VideoCommon::DrawStages::JoinScope join{VideoCommon::DrawStages::Join::ASubmit,
+                                                  capturing};
     const bool was_capturing = std::exchange(capturing, false);
     if (!command_list->Empty()) {
         ++cmdlist_stats.flush_joins;

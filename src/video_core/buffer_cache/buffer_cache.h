@@ -30,6 +30,7 @@
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
 #include "video_core/nx2_perf.h"
+#include "video_core/nx2_draw_stages.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/texture_cache/util.h"
 
@@ -1573,6 +1574,7 @@ void BufferCache<P>::DisableGraphicsUniformBuffer(size_t stage, u32 index) {
 
 template <class P>
 void BufferCache<P>::ReadGraphicsGeometry(GraphicsBufferPacket& packet) {
+    DrawStages::Expect(DrawStages::Stage::A, "ReadGraphicsGeometry");
     const auto& draw_state = maxwell3d->draw_manager.draw_state;
     auto& flags = maxwell3d->dirty.flags;
     packet.topology = draw_state.topology;
@@ -1724,6 +1726,7 @@ Binding BufferCache<P>::ResolveVertexBuffer(u32 index) const {
 
 template <class P>
 void BufferCache<P>::UpdateGraphicsUniformBuffers() {
+    DrawStages::Expect(DrawStages::Stage::A, "UpdateGraphicsUniformBuffers");
     do {
         channel_state->has_deleted_buffers = false;
         BufferOperations([&]() {
@@ -1736,6 +1739,7 @@ void BufferCache<P>::UpdateGraphicsUniformBuffers() {
 
 template <class P>
 void BufferCache<P>::UpdateGraphicsBuffers(const GraphicsBufferPacket& packet) {
+    DrawStages::Expect(DrawStages::Stage::B, "UpdateGraphicsBuffers");
     // A buffer deletion also sets resolve and rebind bits, so A's index and vertex bindings go
     // to the cache first; the other lists are bound and resolved from the packet below.
     if (packet.index_dirty) {
@@ -1757,6 +1761,34 @@ void BufferCache<P>::UpdateGraphicsBuffers(const GraphicsBufferPacket& packet) {
         channel_state->has_deleted_buffers = false;
         DoUpdateGraphicsBuffers(packet);
     } while (channel_state->has_deleted_buffers);
+    if (!DrawStages::g_counting) {
+        return;
+    }
+    // What B reads for this packet: a write over it while the packet is in flight is a join.
+    if (packet.is_indexed) {
+        const Binding& index = channel_state->index_buffer;
+        DrawStages::NoteRead(DrawStages::IndexSlot, index.device_addr, index.size);
+    }
+    for (u32 mask = enabled_vertex_buffers_mask; mask != 0; mask &= mask - 1) {
+        const u32 index = static_cast<u32>(std::countr_zero(mask));
+        const Binding& binding = channel_state->vertex_buffers[index];
+        DrawStages::NoteRead(DrawStages::VertexSlot(index), binding.device_addr, binding.size);
+    }
+    for (u32 stage = 0; stage < NUM_STAGES; ++stage) {
+        if (((packet.storage_stages >> stage) & 1) == 0) {
+            continue;
+        }
+        ForEachEnabledBit(channel_state->enabled_storage_buffers[stage], [&](u32 index) {
+            const Binding& binding = channel_state->storage_buffers[stage][index];
+            DrawStages::NoteRead(DrawStages::StorageSlot(stage, index), binding.device_addr,
+                                 binding.size);
+        });
+        ForEachEnabledBit(channel_state->enabled_texture_buffers[stage], [&](u32 index) {
+            const TextureBufferBinding& binding = channel_state->texture_buffers[stage][index];
+            DrawStages::NoteRead(DrawStages::TexelSlot(stage, index), binding.device_addr,
+                                 binding.size);
+        });
+    }
 }
 
 template <class P>
@@ -1802,6 +1834,7 @@ u64 BufferCache<P>::KeptGraphicsBindingsHash(bool vertex, bool storage, bool tex
 
 template <class P>
 void BufferCache<P>::BindHostGeometryBuffers(const GraphicsBufferPacket& packet) {
+    DrawStages::Expect(DrawStages::Stage::B, "BindHostGeometryBuffers");
     if (packet.is_indexed) {
         BindHostIndexBuffer(packet);
     } else if constexpr (!HAS_FULL_INDEX_AND_PRIMITIVE_SUPPORT) {
@@ -1819,6 +1852,7 @@ void BufferCache<P>::BindHostGeometryBuffers(const GraphicsBufferPacket& packet)
 
 template <class P>
 void BufferCache<P>::BindHostStageBuffers(size_t stage) {
+    DrawStages::Expect(DrawStages::Stage::B, "BindHostStageBuffers");
     if (channel_state->enabled_storage_buffers[stage] != 0) {
         BindHostGraphicsStorageBuffers(stage);
     }
@@ -1928,6 +1962,7 @@ template <class P>
 void BufferCache<P>::BindGraphicsStorageBuffer(GraphicsBufferPacket& packet, size_t stage,
                                                size_t ssbo_index, u32 cbuf_index, u32 cbuf_offset,
                                                bool is_written, u32 indirect_offset) {
+    DrawStages::Expect(DrawStages::Stage::A, "BindGraphicsStorageBuffer");
     if (stage >= NUM_STAGES || ssbo_index >= NUM_STORAGE_BUFFERS) {
         LOG_ERROR(HW_GPU, "Invalid graphics storage buffer binding: stage {}, index {}",
                   stage, ssbo_index);
@@ -1984,6 +2019,7 @@ void BufferCache<P>::BindGraphicsTextureBuffer(GraphicsBufferPacket& packet, siz
                                                size_t tbo_index, GPUVAddr gpu_addr, u32 size,
                                                PixelFormat format, bool is_written,
                                                bool is_image) {
+    DrawStages::Expect(DrawStages::Stage::A, "BindGraphicsTextureBuffer");
     packet.texture_buffers.push_back({
         .stage = static_cast<u32>(stage),
         .index = static_cast<u32>(tbo_index),
@@ -2604,6 +2640,7 @@ void BufferCache<P>::BindHostDrawIndirectBuffers(const GraphicsBufferPacket& pac
 
 template <class P>
 void BufferCache<P>::BindHostGraphicsUniformBuffers(size_t stage) {
+    DrawStages::Expect(DrawStages::Stage::A, "BindHostGraphicsUniformBuffers");
     u32 dirty = ~0U;
     if constexpr (HAS_PERSISTENT_UNIFORM_BUFFER_BINDINGS) {
         dirty = std::exchange(channel_state->dirty_uniform_buffers[stage], 0);
@@ -3740,6 +3777,7 @@ template <class P>
 BufferId BufferCache<P>::CreateBuffer(DAddr device_addr, u32 wanted_size,
                                       bool sparse_compatible) {
     const StutterTrace::SiteScope site{StutterTrace::Site::BufferCreate};
+    DrawStages::CountInA(DrawStages::Join::ABufferChange);
     DAddr device_addr_end = Common::AlignUp(device_addr + wanted_size, CACHING_PAGESIZE);
     device_addr = Common::AlignDown(device_addr, CACHING_PAGESIZE);
     wanted_size = static_cast<u32>(device_addr_end - device_addr);
@@ -3919,6 +3957,7 @@ void BufferCache<P>::SynchronizeGeometryBuffer(u32 slot, BufferId buffer_id, DAd
 template <class P>
 void BufferCache<P>::UploadMemory(Buffer& buffer, u64 total_size_bytes, u64 largest_copy,
                                   std::span<BufferCopy> copies) {
+    DrawStages::CountInA(DrawStages::Join::ABufferUpload);
     if constexpr (USE_MEMORY_MAPS_FOR_UPLOADS) {
         MappedUploadMemory(buffer, total_size_bytes, copies);
     } else {
@@ -4171,6 +4210,7 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
 template <class P>
 void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
     const StutterTrace::SiteScope site{StutterTrace::Site::BufferDelete};
+    DrawStages::CountInA(DrawStages::Join::ABufferChange);
     ++buffer_deletions;
     if constexpr (requires { runtime.OnBufferDeleted(slot_buffers[buffer_id]); }) {
         runtime.OnBufferDeleted(slot_buffers[buffer_id]);

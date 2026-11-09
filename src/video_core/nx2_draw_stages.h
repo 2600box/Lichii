@@ -1,0 +1,280 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#pragma once
+
+#include <array>
+#include <atomic>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include "common/common_types.h"
+#include "video_core/gpu_split.h"
+
+namespace Tegra {
+class MemoryManager;
+}
+
+// Stage A and stage B of a draw (docs/nx2/cmdlist.md), still on one thread. The thread that draws
+// marks which stage runs; with EDEN_NX2_SPLIT_CHECK each stage's entry points check it. Join
+// points are where stage 4's A waits until B consumed every packet A sent: here they only count,
+// with EDEN_NX2_GPU_PROFILE (the back's profile line names each site) or EDEN_NX2_SPLIT_CHECK.
+namespace VideoCommon::DrawStages {
+
+enum class Stage : u8 {
+    Outside, ///< Between draws: methods, clears, compute (either stage's state)
+    A,       ///< From the draw's start to its command list splice
+    B,       ///< From the splice to the draw's end
+};
+
+enum class Join : u32 {
+    Dma,            ///< MaxwellDMA launches whose destination overlaps a packet in flight
+    DmaImageBuffer, ///< DMA image<->buffer copies (the texture cache calls the buffer cache)
+    Inline,         ///< I2M and inline writes that overlap
+    CbData,         ///< CB_DATA writes that overlap
+    Query,          ///< Query, report and semaphore writes that overlap
+    GuestFlushRead, ///< Guest reads of GPU-written memory that ask for a flush
+    BufferFlush,    ///< Buffer cache flushes (FlushRegion, any thread)
+    Present,
+    ASubmit,        ///< Stage A submits or dispatches the scheduler's work
+    AListFull,      ///< Stage A's command list filled up
+    ARenderPassEnd, ///< Stage A ends the scheduler's render pass
+    ADeferredClear, ///< Stage A defers or realizes a clear
+    ASchedulerRead, ///< Stage A reads scheduler state (render pass, fragment barrier, refresh)
+    ABufferChange,  ///< Stage A creates or deletes a buffer (uniform resolve)
+    ABufferUpload,  ///< Stage A uploads buffer data (uniform sync)
+    BDynamicState,  ///< Stage B takes the dynamic state from the registers after a submit
+    Count,
+};
+
+inline constexpr size_t JoinCount = static_cast<size_t>(Join::Count);
+
+inline constexpr std::array<const char*, JoinCount> join_names{
+    "DMA",           "DMA image<->buffer", "I2M",
+    "CB_DATA",       "query",              "guest flush reads",
+    "buffer flushes", "present",           "A submits",
+    "A list full",   "A render pass ends", "A deferred clears",
+    "A scheduler reads", "A buffer changes", "A buffer uploads",
+    "B dynamic state after a submit",
+};
+
+/// Whether the stage marker and the join counters run, as of Configure.
+inline bool g_counting{};
+/// Owner checks (EDEN_NX2_SPLIT_CHECK), as of Configure.
+inline bool g_checking{};
+inline thread_local Stage t_stage{};
+/// The thread that draws: the packet ring is its own.
+inline thread_local bool t_draw_thread{};
+
+/// Reads the switches (when the split starts and when the rasterizer is made).
+void Configure();
+
+/// The thread that draws enters a stage.
+inline void Enter(Stage stage) {
+    if (g_counting) {
+        t_stage = stage;
+        t_draw_thread = true;
+    }
+}
+
+[[nodiscard]] inline bool In(Stage stage) {
+    return g_counting && t_stage == stage;
+}
+
+void Violation(Stage owner, const char* where);
+
+/// `where` belongs to `owner`'s state: with EDEN_NX2_SPLIT_CHECK, reports it running in the other
+/// stage (between draws either may run).
+inline void Expect(Stage owner, const char* where) {
+    if (g_checking && t_stage != Stage::Outside && t_stage != owner) {
+        Violation(owner, where);
+    }
+}
+
+struct Counters {
+    std::array<std::atomic<u64>, JoinCount> joins{};
+    std::array<std::atomic<u64>, JoinCount> checked{}; ///< Writes checked for overlap, by site
+    std::array<std::atomic<u64>, static_cast<size_t>(DrainSite::Count)> front_waits{};
+    std::atomic<u64> violations{};
+};
+inline Counters g_counters;
+
+/// A join point: in stage 4 the caller waits for stage B. Here it counts.
+inline void Count(Join site) {
+    if (g_counting) {
+        g_counters.joins[static_cast<size_t>(site)].fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+/// A join point that only stage A reaches (stage B and between draws own the state anyway).
+inline void CountInA(Join site) {
+    if (In(Stage::A)) {
+        Count(site);
+    }
+}
+
+/// A join point whose operation then uses both stages' state: in stage 4 B is idle while it
+/// holds, so the owner checks treat it as between draws.
+class JoinScope {
+public:
+    explicit JoinScope(Join site, bool when = true) {
+        if (!g_counting || !when) {
+            return;
+        }
+        Count(site);
+        previous = std::exchange(t_stage, Stage::Outside);
+        active = true;
+    }
+    ~JoinScope() {
+        if (active) {
+            t_stage = previous;
+        }
+    }
+    JoinScope(const JoinScope&) = delete;
+    JoinScope& operator=(const JoinScope&) = delete;
+
+private:
+    Stage previous{};
+    bool active{};
+};
+
+/// The split's front waited for the back at `site`: stage 4's back must have run B as well.
+inline void NoteFrontWait(DrainSite site) {
+    if (g_counting && site != DrainSite::RingFull) {
+        g_counters.front_waits[static_cast<size_t>(site)].fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+/// Read slots, so a binding that stays the same costs one compare.
+inline constexpr u32 IndexSlot = 0;
+inline constexpr u32 SlotCount = 1 + 32 + 5 * 64 + 5 * 32;
+[[nodiscard]] constexpr u32 VertexSlot(u32 index) {
+    return 1 + index;
+}
+[[nodiscard]] constexpr u32 StorageSlot(size_t stage, u32 index) {
+    return 33 + static_cast<u32>(stage) * 64 + index;
+}
+[[nodiscard]] constexpr u32 TexelSlot(size_t stage, u32 index) {
+    return 33 + 5 * 64 + static_cast<u32>(stage) * 32 + index;
+}
+
+/// The device ranges stage B read for the last Window packets, standing in for the packets in
+/// flight in stage 4: index buffers, vertex streams, storage and texel buffers. A 64 KiB page
+/// filter keeps the write checks cheap. The stage 0 probe's ring (EDEN_NX2_STAGE_PROBE).
+class OverlapRing {
+public:
+    static constexpr u64 Window = 64;
+    static constexpr size_t Capacity = 1024;
+
+    OverlapRing();
+
+    /// Packet number `packet` read [begin, begin + size).
+    void Read(u32 slot, u64 begin, u64 size, u64 packet);
+
+    /// Whether [begin, begin + size) overlaps a range one of the last Window packets read,
+    /// `packets` packets having completed.
+    [[nodiscard]] bool Overlaps(u64 begin, u64 size, u64 packets);
+
+    [[nodiscard]] size_t Live(u64 packets) const;
+
+    u64 overflows{}; ///< Reads not kept: more than Capacity ranges in the window
+
+private:
+    struct Entry {
+        u64 begin;
+        u64 end;
+        u64 last;
+    };
+    struct Memo {
+        u64 begin{};
+        u64 end{};
+        u32 entry{};
+    };
+
+    static constexpr size_t IndexSize = 2 * Capacity;
+    static constexpr u32 FilterBits = 18;
+
+    void Compact(u64 packets);
+    void Mark(u64 begin, u64 end);
+    [[nodiscard]] size_t HashSlot(u64 begin, u64 end) const;
+
+    std::vector<Entry> entries;
+    std::vector<u32> index;  ///< Entry + 1, or 0
+    std::vector<u64> filter; ///< One bit per hashed 64 KiB page
+    std::vector<Memo> memo;
+    bool filter_all{}; ///< A range too large to mark is in the table
+};
+
+void NoteReadImpl(u32 slot, u64 begin, u64 size);
+void EndPacketImpl();
+void NoteWriteImpl(Join site, u64 begin, u64 size);
+void NoteGpuWriteImpl(Join site, const Tegra::MemoryManager& memory, GPUVAddr address, u64 size);
+
+/// Stage B read this device range for the current packet (thread that draws).
+inline void NoteRead(u32 slot, u64 begin, u64 size) {
+    if (g_counting) {
+        NoteReadImpl(slot, begin, size);
+    }
+}
+
+/// The current draw ends: its packet joins the ones in flight.
+inline void EndPacket() {
+    if (g_counting) {
+        EndPacketImpl();
+    }
+}
+
+/// A method writes guest memory at this device range.
+inline void NoteWrite(Join site, u64 begin, u64 size) {
+    if (g_counting) {
+        NoteWriteImpl(site, begin, size);
+    }
+}
+
+/// A method writes guest memory at this GPU range.
+inline void NoteGpuWrite(Join site, const Tegra::MemoryManager& memory, GPUVAddr address,
+                         u64 size) {
+    if (g_counting) {
+        NoteGpuWriteImpl(site, memory, address, size);
+    }
+}
+
+/// The bytes a MaxwellDMA launch writes from regs.offset_out (block linear: width x height x
+/// depth x bytes per pixel, without the block padding).
+template <typename DmaRegs>
+[[nodiscard]] u64 DmaDestinationBytes(const DmaRegs& regs) {
+    const auto& launch = regs.launch_dma;
+    using Layout = typename std::remove_cvref_t<decltype(launch)>::MemoryLayout;
+    const u64 pixel = launch.remap_enable != 0
+                          ? u64{regs.remap_const.num_dst_components_minus_one + 1U} *
+                                (regs.remap_const.component_size_minus_one + 1U)
+                          : 1;
+    const u64 line = u64{regs.line_length_in} * pixel;
+    if (launch.multi_line_enable == 0) {
+        return line;
+    }
+    if (launch.dst_memory_layout == Layout::PITCH) {
+        const u64 lines = regs.line_count != 0 ? regs.line_count : 1;
+        const s64 pitch = static_cast<s64>(regs.pitch_out);
+        return (lines - 1) * static_cast<u64>(pitch < 0 ? -pitch : pitch) + line;
+    }
+    const auto& dst = regs.dst_params;
+    return u64{dst.width} * (dst.height != 0 ? dst.height : 1U) *
+           (dst.depth != 0 ? dst.depth : 1U) * pixel;
+}
+
+/// A MaxwellDMA launch starts.
+template <typename DmaRegs>
+void NoteDma(const Tegra::MemoryManager& memory, const DmaRegs& regs) {
+    if (g_counting) {
+        NoteGpuWrite(Join::Dma, memory, regs.offset_out, DmaDestinationBytes(regs));
+    }
+}
+
+/// The joins since the last call, per second of `window_ns`, for the GPU profile line of the
+/// thread that draws; empty on other threads.
+std::string FormatJoins(u64 window_ns);
+
+} // namespace VideoCommon::DrawStages

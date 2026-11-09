@@ -29,6 +29,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_fast_draw.h"
+#include "video_core/nx2_draw_stages.h"
 #include "video_core/nx2_profile.h"
 
 namespace VideoCommon {
@@ -117,6 +118,7 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     }
     system = &system_;
     check_owner = std::getenv("EDEN_NX2_SPLIT_CHECK") != nullptr;
+    DrawStages::Configure();
     const char* const verify = std::getenv("EDEN_NX2_ACQUIRE_VERIFY");
     g_acquire_verify = verify != nullptr && verify[0] == '1';
     g_acquire_counting = g_acquire_verify || Nx2Profile::Enabled();
@@ -220,6 +222,7 @@ void GpuSplit::Drain(DrainSite site) {
         return;
     }
     Publish();
+    DrawStages::NoteFrontWait(site);
     Nx2Profile::Scope scope{Nx2Profile::Zone::SplitDrain};
     const u64 start = Nx2Profile::Enabled() ? Nx2Profile::Ticks() : 0;
     // Everything consumed is not enough: the back submits deferred work (Scheduler::DeferFlush)
@@ -350,6 +353,7 @@ bool GpuSplit::WaitFor(u64 target, DrainSite site) {
     if (consumed_cache >= target) {
         return false;
     }
+    DrawStages::NoteFrontWait(site);
     Nx2Profile::Scope scope{Nx2Profile::Zone::WriterWait};
     wait_target.store(target, std::memory_order_seq_cst);
     Publish();

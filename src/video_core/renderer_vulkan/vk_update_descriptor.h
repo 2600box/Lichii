@@ -11,6 +11,7 @@
 #include <span>
 #include <variant>
 #include <vector>
+#include "video_core/nx2_draw_stages.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace Vulkan {
@@ -110,6 +111,7 @@ public:
     /// Leaves `count` entries for BeginFill and returns where they start, counted from UpdateData:
     /// stage A of a draw leaves each stage's storage and texel buffer entries to stage B.
     u32 Skip(u32 count) noexcept {
+        VideoCommon::DrawStages::Expect(VideoCommon::DrawStages::Stage::A, "descriptor Skip");
         const u32 first = static_cast<u32>(UpdateCount());
         payload_cursor += count;
         return first;
@@ -117,6 +119,7 @@ public:
 
     /// Until EndFill, entries go to those Skip left at `first`.
     void BeginFill(u32 first) noexcept {
+        VideoCommon::DrawStages::Expect(VideoCommon::DrawStages::Stage::B, "descriptor BeginFill");
         fill_end = payload_cursor;
         payload_cursor = upload_start + first;
     }

@@ -74,6 +74,7 @@
 #include "video_core/nx2.h"
 #include "video_core/nx2_debug_control.h"
 #include "video_core/nx2_fast_draw.h"
+#include "video_core/nx2_draw_stages.h"
 #include "video_core/nx2_profile.h"
 
 namespace Vulkan {
@@ -780,6 +781,7 @@ RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra
       accelerate_dma(buffer_cache, texture_cache, scheduler),
       fence_manager(*this, gpu, texture_cache, buffer_cache, query_cache, device, scheduler),
       frame_dump(device, memory_allocator, scheduler) {
+    VideoCommon::DrawStages::Configure();
     scheduler.SetQueryCache(query_cache);
     buffer_cache.SetPendingCpuWrites(
         [this](const std::function<void(DAddr, size_t)>& callback) {
@@ -1158,8 +1160,10 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, u32 instance_count, Func&& d
     // Stage A's recordings (texture uploads, copies, clears, render target changes) go to the
     // draw's command list; B splices it in before its own. A draw that stops early splices here.
     scheduler.BeginCommandList();
+    VideoCommon::DrawStages::Enter(VideoCommon::DrawStages::Stage::A);
     SCOPE_EXIT {
         scheduler.SpliceCommandList();
+        VideoCommon::DrawStages::EndPacket();
     };
 
     const auto report_failure = [&](std::string_view reason) {
@@ -1454,6 +1458,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, u32 instance_count, Func&& d
 
     // Stage B: records the draw from the packet alone.
     scheduler.SpliceCommandList();
+    VideoCommon::DrawStages::Enter(VideoCommon::DrawStages::Stage::B);
     if (Profile::Scope scope{Profile::Zone::Record}; !pipeline->Record(packet)) {
         // The dirty flags A took stay recorded for the next draw.
         RecordDynamicStates(packet.dynamic);
@@ -1512,6 +1517,8 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, u32 instance_count, Func&& d
         Profile::Scope scope{Profile::Zone::DynamicState};
         // A submit since A reset the command buffer's dynamic state: take all of it again.
         if (scheduler.CurrentTick() != prepared_tick) {
+            const VideoCommon::DrawStages::JoinScope join{
+                VideoCommon::DrawStages::Join::BDynamicState};
             UpdateDynamicStates(pipeline, packet.dynamic);
         }
         RecordDynamicStates(packet.dynamic);
@@ -2687,6 +2694,9 @@ void RasterizerVulkan::ResetCounter(VideoCommon::QueryType type) {
 
 void RasterizerVulkan::Query(GPUVAddr gpu_addr, VideoCommon::QueryType type,
                              VideoCommon::QueryPropertiesFlags flags, u32 payload, u32 subreport) {
+    VideoCommon::DrawStages::NoteGpuWrite(
+        VideoCommon::DrawStages::Join::Query, *gpu_memory, gpu_addr,
+        True(flags & VideoCommon::QueryPropertiesFlags::HasTimeout) ? 16 : 4);
     query_cache.CounterReport(gpu_addr, type, flags, payload, subreport);
 }
 
@@ -2766,6 +2776,7 @@ void RasterizerVulkan::FlushRegion(DAddr addr, u64 size, VideoCommon::CacheType 
     }
     if ((True(which & VideoCommon::CacheType::BufferCache))) {
         std::scoped_lock lock{buffer_cache.mutex};
+        VideoCommon::DrawStages::Count(VideoCommon::DrawStages::Join::BufferFlush);
         buffer_cache.DownloadMemory(addr, size);
     }
     if ((True(which & VideoCommon::CacheType::QueryCache))) {
@@ -3740,6 +3751,8 @@ void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_si
         return;
     }
     gpu_memory->WriteBlockUnsafe(address, memory.data(), copy_size);
+    VideoCommon::DrawStages::NoteWrite(VideoCommon::DrawStages::Join::Inline, *cpu_addr,
+                                       copy_size);
     // EDEN_NX2_INLINE_DEFER=0: invalidate every cache at once (for comparisons).
     static const bool defer = [] {
         const char* value = std::getenv("EDEN_NX2_INLINE_DEFER");
@@ -3921,6 +3934,7 @@ bool AccelerateDMA::DmaBufferImageCopy(const Tegra::DMA::ImageCopy& copy_info,
     const auto [buffer, offset] =
         buffer_cache.ObtainBuffer(buffer_operand.address, buffer_size, sync_info, post_op);
 
+    VideoCommon::DrawStages::Count(VideoCommon::DrawStages::Join::DmaImageBuffer);
     const auto [image, copy] = texture_cache.DmaBufferImageCopy(
         copy_info, buffer_operand, image_operand, image_id, IS_IMAGE_UPLOAD);
     const std::span copy_span{&copy, 1};
@@ -3952,6 +3966,7 @@ bool AccelerateDMA::BufferToImage(const Tegra::DMA::ImageCopy& copy_info,
 
 void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* pipeline,
                                            DynamicStatePacket& out) {
+    VideoCommon::DrawStages::Expect(VideoCommon::DrawStages::Stage::A, "UpdateDynamicStates");
     using G = DynamicStatePacket;
     auto& regs = maxwell3d->regs;
     auto& flags = maxwell3d->dirty.flags;
@@ -4159,6 +4174,7 @@ void RasterizerVulkan::UpdateDynamicStates(const GraphicsPipeline* pipeline,
 }
 
 void RasterizerVulkan::RecordDynamicStates(const DynamicStatePacket& state) {
+    VideoCommon::DrawStages::Expect(VideoCommon::DrawStages::Stage::B, "RecordDynamicStates");
     using G = DynamicStatePacket;
     for (u64 mask = state.mask; mask != 0; mask &= mask - 1) {
         switch (static_cast<G::Group>(std::countr_zero(mask))) {

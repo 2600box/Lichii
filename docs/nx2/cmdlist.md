@@ -67,24 +67,72 @@ If B can't record the draw, it still records the dynamic state, so the flags A t
 If a submit happened since A (the scheduler's tick moved), the new command buffer has no dynamic
 state, so B takes every group again before it records them.
 
-## State B still shares
+## Owners and joins (stage 3)
 
-Stage 1 keeps these on GPUBack's shared state. Each is a stage 3/4 item.
+`VideoCommon::DrawStages` (`src/video_core/nx2_draw_stages.h`) marks which stage the thread that
+draws is in. `PrepareDraw` enters A after `BeginCommandList`, B at the splice, and leaves both
+at the draw's end. Between draws (methods, clears, compute) either stage's state may be used.
+With `EDEN_NX2_SPLIT_CHECK=1`, each owner's entry points check the marker and log the first 16
+violations. In stage 4 the same checks become thread checks.
 
-- A reads scheduler state: the fast draw's `TakeReusableDraw`/`DeltaStillHolds` and
-  `NoteResolvedDraw`, `HasFragmentBarrier`, `RefreshesStateEnable`, and the uniform stream
-  buffer's reuse tick.
-- After a submit between A and B, B reads the dynamic state from the registers and dirty flags.
-- A acquires and writes the guest descriptor queue's payload, and B fills the room A left in it.
-  Once A runs ahead, A must not acquire payload B hasn't recorded yet, and `TickFrame` must not
-  reuse it before B has.
+| Owner | State | Checked entry points |
+|---|---|---|
+| A | Registers and dirty flags (the state tracker's `Touch*` take them) | `UpdateDynamicStates`, `ReadGraphicsGeometry` |
+| A | Texture cache calls | Not checked inside the texture cache (EGLA-98's files). No B path calls it, apart from the diagnostics listed below |
+| A | Uniform resolve, binds and the uniform stream; storage and texture buffer reads into the packet | `UpdateGraphicsUniformBuffers`, `BindHostGraphicsUniformBuffers`, `BindGraphicsStorageBuffer`, `BindGraphicsTextureBuffer` |
+| A | Descriptor payload acquire and writes | `GraphicsPipeline::Prepare`/`PrepareDelta`, `AcquireDescriptors`, `UpdateDescriptorQueue::Skip` |
+| B | The scheduler outside A's command list | `Scheduler::Record` when not capturing, `RequestRenderpass` |
+| B | Buffer cache binding, resolve, sync and upload | `UpdateGraphicsBuffers`, `BindHostGeometryBuffers`, `BindHostStageBuffers` |
+| B | The descriptor room A left | `UpdateDescriptorQueue::BeginFill` |
+| B | Dynamic state records | `GraphicsPipeline::Record`, `RecordDynamicStates` |
+
+Join points are where stage 4's A waits until B consumed every packet A sent. On one thread a
+join only counts. Counting runs with `EDEN_NX2_GPU_PROFILE` or `EDEN_NX2_SPLIT_CHECK`; otherwise
+each site tests one flag. The back's GPU profile line names each site in its "draw stage joins
+per second" part.
+
+- **Front waits:** every drain or position wait of the split's front that waited, by drain site
+  (acquire, list writers, list sync, list flush, fence release and the others, ring full
+  excepted). In stage 4 the back's consumed position has to include B.
+- **Writes over packets in flight:** DMA launches, I2M and inline writes, CB_DATA writes and
+  query writes are checked against the device ranges B read for the last 64 packets. This is the
+  stage 0 probe's ring, standing in for stage 4's packet ring. They count as "joins of writes
+  checked".
+- **DMA image<->buffer copies:** the texture cache calls the buffer cache.
+- **Guest flush reads:** `GPU::OnCPURead` flushes that aren't already in flight, and buffer cache
+  `FlushRegion` calls.
+- **Present.**
+- **Stage A on B's state:**
+  - A submit or dispatch during A (`SubmitExecution`, `DispatchWork`).
+  - A full command list.
+  - A render pass end during A. The texture cache ends the scheduler's render pass for uploads,
+    copies and clears.
+  - A clear deferred or realized during A.
+  - A reading scheduler state: `HasFragmentBarrier`, `RefreshesStateEnable`,
+    `IsRenderPassActive` and `RenderPassSerial`, which the fast draw's reuse checks call.
+  - A creating or deleting a buffer, and A uploading buffer data. Both come from the uniform
+    resolve, which shares `FindBuffer` and `SynchronizeBuffer` with B.
+- **B on A's state:** B takes the dynamic state from the registers again after a submit since
+  A.
+
+While a join holds, the owner checks treat the thread as between draws, as stage 4's B would be
+idle.
+
+### Still shared, not yet a join
+
+- The guest descriptor queue: A acquires and writes the payload, and B fills the room A left. In
+  stage 4, A must not acquire payload B hasn't recorded yet, and `TickFrame` must not reuse it
+  before B has.
+- The command list is the scheduler's, not the packet's. Stage 4 needs one per packet in the
+  ring, and the scheduler state A changes has to travel with it. The A-on-B-state join counts
+  show how often that happens.
 - B reads the page table for multi-range storage segments, and guest memory for uploads and uint8
   index widening.
 - A writes the vertex repack layout into the buffer cache runtime and the mesh emulation buffers
-  into the pipeline; B's `ConfigureDraw` reads the mesh group count and task buffers from the
+  into the pipeline. B's `ConfigureDraw` reads the mesh group count and task buffers from the
   pipeline.
-- Diagnostics between B's configure and its dynamic state (render state trace, frame dump, Ocarina
-  tracking, indirect trace) read the registers and caches directly.
+- The diagnostics between B's configure and its dynamic state (render state trace, frame dump,
+  Ocarina tracking, indirect trace) read the registers and caches directly.
 
 ## Ordering changes against the old path
 
@@ -116,7 +164,7 @@ commands follow them.
   list is spliced early too. Capturing continues after either.
 - **State:** the scheduler's state (render pass, pipeline, deferred clears) still changes when A
   calls into it. On one thread this matches the order the commands land in, because nothing
-  records between A and the splice. Stage 4 has to carry that state with the list.
+  records between A and the splice. Where A changes it, stage 3 has a join point (below).
 
 `EDEN_NX2_CMDLIST_VERIFY=1` gives every recorded command a type tag and a hash of its captured
 arguments. It numbers commands in the order they are recorded, which is the order the old direct

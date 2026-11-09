@@ -119,6 +119,8 @@ add_library(video_core STATIC
     nx2_cmdpage_diag.h
     nx2_debug_control.cpp
     nx2_debug_control.h
+    nx2_draw_stages.cpp
+    nx2_draw_stages.h
     nx2_fast_draw.cpp
     nx2_fast_draw.h
     nx2_profile.h

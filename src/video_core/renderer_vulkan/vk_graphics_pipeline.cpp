@@ -654,6 +654,7 @@ void GraphicsPipeline::AddTransition(GraphicsPipeline* transition) {
 
 template <typename Spec>
 bool GraphicsPipeline::ConfigureImpl(DrawPacket& packet) {
+    VideoCommon::DrawStages::Expect(VideoCommon::DrawStages::Stage::A, "GraphicsPipeline::Prepare");
     // A draw that can't be recorded returns before it takes any dirty flag.
     if (mesh_emulation &&
         (!mesh_output_buffer ||
@@ -1069,6 +1070,7 @@ bool GraphicsPipeline::DeltaImagesChange() const noexcept {
 
 bool GraphicsPipeline::PrepareDelta(DrawPacket& packet) {
     namespace Profile = VideoCommon::Nx2Profile;
+    VideoCommon::DrawStages::Expect(VideoCommon::DrawStages::Stage::A, "PrepareDelta");
     // ConfigureImpl without reading handles and resolving image views, samplers and texture
     // buffers: the buffers are read as it does.
     buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);
@@ -1174,6 +1176,7 @@ bool GraphicsPipeline::PrepareDelta(DrawPacket& packet) {
 }
 
 inline void GraphicsPipeline::AcquireDescriptors() {
+    VideoCommon::DrawStages::Expect(VideoCommon::DrawStages::Stage::A, "descriptor Acquire");
     VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::DescriptorAcquire};
     guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
 }
@@ -1285,6 +1288,7 @@ void GraphicsPipeline::VerifyPacket(const DrawPacket& packet,
 
 bool GraphicsPipeline::Record(const DrawPacket& packet) {
     namespace Profile = VideoCommon::Nx2Profile;
+    VideoCommon::DrawStages::Expect(VideoCommon::DrawStages::Stage::B, "GraphicsPipeline::Record");
     if (packet.buffers.transform_feedback) {
         scheduler.RequestOutsideRenderPassOperationContext();
     }
