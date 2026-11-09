@@ -31,6 +31,8 @@ PRECACHE_END = re.compile(r"Shader precache: (finished|skipped|stopped), (\d+) b
 TOTAL_PIPELINES = re.compile(r"Total Pipeline Count: (\d+)")
 RUNTIME_10S = re.compile(r"Runtime pipelines in the last 10 s: (\d+) built, ([\d.]+) ms on the GPU thread")
 RUNTIME_ONE = re.compile(r"(Graphics|Compute) pipeline built on the GPU thread in ([\d.]+) ms")
+# Nx2StutterSummary histograms: 1 ms bins, the last holding every longer frame
+OVERFLOW_BIN_MS = 299
 DKB_FRAME = re.compile(r"DKB renderer .*cpu_frame_wall_ms=([\d.]+)")
 
 FRAME_MS_60 = 1000.0 / 60.0
@@ -105,7 +107,8 @@ def split_sessions(lines):
 
 
 def percentile_from_histogram(histogram, fraction):
-    """Midpoint of the 1 ms bin holding the given fraction of frames (resolution 1 ms)."""
+    """Midpoint of the 1 ms bin holding the given fraction of frames (resolution 1 ms); None when
+    that is the last bin, which holds every frame of OVERFLOW_BIN_MS and longer."""
     total = sum(histogram.values())
     if not total:
         return None
@@ -114,8 +117,8 @@ def percentile_from_histogram(histogram, fraction):
     for bin_ms in sorted(histogram):
         seen += histogram[bin_ms]
         if seen >= rank:
-            return bin_ms + 0.5
-    return max(histogram) + 0.5
+            break
+    return None if bin_ms >= OVERFLOW_BIN_MS else bin_ms + 0.5
 
 
 def percentile(values, fraction):

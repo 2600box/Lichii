@@ -43,6 +43,12 @@ class BenchTest(unittest.TestCase):
         write(self.user / "sdmc" / "file.bin", b"sd card")
         self.original = tree(self.shader)
         self.session = self.root / "session"
+        self.running = False
+        originals = (cache_bench.lichii_running, cache_bench.port_open)
+        cache_bench.lichii_running = lambda name: self.running
+        cache_bench.port_open = lambda address: self.running
+        self.addCleanup(lambda: (setattr(cache_bench, "lichii_running", originals[0]),
+                                 setattr(cache_bench, "port_open", originals[1])))
         self.config = {
             "user_dir": str(self.user), "output_dir": str(self.root / "out"),
             "paths": {"A": {"package": str(self.root / "pkg-a")},
@@ -152,6 +158,29 @@ class BenchTest(unittest.TestCase):
         report = cache_bench.restore_all(self.config, self.session)
         self.assertTrue(any("matches its backup" in line for line in report))
 
+    def test_restore_waits_for_the_emulator(self):
+        directory = self.cache_dir()
+        directory.back_up()
+        directory.prepare("warm")
+        self.running = True
+        with self.assertRaises(cache_bench.BenchError):
+            cache_bench.restore_all(self.config, self.session)
+        self.assertTrue(directory.aside.exists())
+        self.running = False
+        cache_bench.restore_all(self.config, self.session)
+        self.assertEqual(tree(self.shader), self.original)
+
+    def test_restore_removes_a_cache_that_was_absent(self):
+        directory = cache_bench.cache_dirs(self.config, {"game": "mkw"}, self.session / "backup")[0]
+        directory.back_up()
+        directory.prepare("cold")
+        write(directory.path / "vulkan.fork-v54.bin", b"half-written")
+        report = cache_bench.restore_all(self.config, self.session)
+        self.assertTrue(any("absent before the bench" in line for line in report))
+        self.assertFalse(directory.path.exists())
+        recovered = list((self.session / "recovered").rglob("vulkan.fork-v54.bin"))
+        self.assertEqual([p.read_bytes() for p in recovered], [b"half-written"])
+
     def test_guard_refuses_saves_and_outside_paths(self):
         roots = [cache_bench.shader_root(self.user)]
         cache_bench.guard(self.shader, roots)
@@ -172,6 +201,8 @@ class BenchTest(unittest.TestCase):
         self.assertEqual({run["mesh"] for run in plan}, {"mesh", "no_mesh"})
         with self.assertRaises(cache_bench.BenchError):
             cache_bench.make_plan(self.config, games=["zelda"])
+        with self.assertRaises(cache_bench.BenchError):
+            cache_bench.make_plan(self.config, caches=["second", "cold"])
 
     def test_run_env(self):
         run = {"game": "oot", "path": "B", "mesh": "no_mesh"}
@@ -247,20 +278,17 @@ class BenchTest(unittest.TestCase):
                 f"[   9.000000] HW.GPU <Info> x:1:y: Nx2Boot event=first_frame mono_s=7.000\n")
             return {"window": {"start_s": 9.0, "end_s": 20.0}}
 
-        originals = (cache_bench.boot_and_measure, cache_bench.lichii_running, cache_bench.port_open)
+        original_boot = cache_bench.boot_and_measure
         cache_bench.boot_and_measure = fake_boot
-        cache_bench.lichii_running = lambda name: False
-        cache_bench.port_open = lambda address: False
-        self.addCleanup(lambda: (setattr(cache_bench, "boot_and_measure", originals[0]),
-                                 setattr(cache_bench, "lichii_running", originals[1]),
-                                 setattr(cache_bench, "port_open", originals[2])))
-        plan = cache_bench.make_plan(self.config, games=["oot"], meshes=["mesh"], paths=["A"],
-                                     repeats=1)
+        self.addCleanup(lambda: setattr(cache_bench, "boot_and_measure", original_boot))
+        plan = cache_bench.make_plan(self.config, games=["oot"], caches=["cold", "warm", "second"],
+                                     meshes=["mesh"], paths=["A"], repeats=1)
         with redirect_stdout(io.StringIO()):
             summary = cache_bench.run_bench(self.config, plan, self.session)
-        self.assertEqual([state for state, _ in seen], ["cold", "warm"])
+        self.assertEqual([state for state, _ in seen], ["cold", "warm", "second"])
         self.assertIsNone(seen[0][1])
         self.assertEqual(seen[1][1], self.original)
+        self.assertEqual(seen[2][1], {"vulkan.fork-v54.bin": b"written by r0-oot-cold-mesh-A"})
         self.assertEqual(tree(self.shader), self.original)
         self.saves_untouched()
         for run in plan:
@@ -273,6 +301,18 @@ class BenchTest(unittest.TestCase):
                              b"written by " + run["id"].encode())
         self.assertIn("## oot cold mesh", summary)
         self.assertIn("| boot_to_first_frame_s | 6 | n/a |", summary)
+
+    def test_failed_runs_stay_out_of_the_tables(self):
+        plan = cache_bench.make_plan(self.config, games=["oot"], caches=["cold"], meshes=["mesh"],
+                                     repeats=1)
+        metrics = {"boot_to_first_frame_s": 6.0}
+        for run, extra in zip(plan, ({}, {"error": "boot timed out"})):
+            run_dir = self.session / "runs" / run["id"]
+            run_dir.mkdir(parents=True)
+            (run_dir / "run.json").write_text(json.dumps({"metrics": metrics, **extra}))
+        summary = cache_bench.summarize(self.session, plan)
+        self.assertIn("| boot_to_first_frame_s | 6 | n/a |", summary)
+        self.assertIn(f"- {plan[1]['id']}: boot timed out", summary)
 
     def test_cache_dir_check_reads_the_log(self):
         log = self.root / "log.txt"

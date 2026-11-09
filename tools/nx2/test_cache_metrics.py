@@ -132,6 +132,12 @@ class CacheMetricsTest(unittest.TestCase):
         self.assertEqual(stutter["by_group"]["other"]["frames"], 1)
         self.assertEqual(stutter["by_cause"]["gfx_miss"]["excess_ms"], round(120.0 - 1000 / 60, 1))
 
+    def test_percentile_in_the_overflow_bin_is_unknown(self):
+        histogram = {16: 97, 40: 1, cache_metrics.OVERFLOW_BIN_MS: 2}
+        self.assertEqual(cache_metrics.percentile_from_histogram(histogram, 0.50), 16.5)
+        self.assertEqual(cache_metrics.percentile_from_histogram(histogram, 0.98), 40.5)
+        self.assertIsNone(cache_metrics.percentile_from_histogram(histogram, 0.99))
+
     def test_hit_rate(self):
         result = cache_metrics.parse_log(self.write("trace.txt", TRACE_LOG))
         cache = result["cache"]
