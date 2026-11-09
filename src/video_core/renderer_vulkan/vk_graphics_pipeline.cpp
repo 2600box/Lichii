@@ -13,6 +13,7 @@
 #include <string>
 #include <iostream>
 #include <span>
+#include <vector>
 
 #include <boost/container/small_vector.hpp>
 #include <boost/container/static_vector.hpp>
@@ -28,8 +29,10 @@
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_frame_dump.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
+#include "video_core/renderer_vulkan/vk_pipeline_binaries.h"
 #include "video_core/renderer_vulkan/vk_render_pass_cache.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/vk_shader_cache_v2.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
@@ -313,6 +316,42 @@ bool TextureMemoVerify() {
     return verify;
 }
 
+// EDEN_NX2_DELTA_DESCRIPTORS_VERIFY=1: delta draws resolve their image descriptors as before and
+// compare them with the kept ones.
+const bool delta_descriptors_verify = [] {
+    const char* const value = std::getenv("EDEN_NX2_DELTA_DESCRIPTORS_VERIFY");
+    return value != nullptr && value[0] == '1';
+}();
+
+// Delta draws on the drawing thread, logged every 10 s with EDEN_NX2_GPU_PROFILE or the verify
+// env.
+struct DeltaDescriptorStats {
+    u64 replayed{};
+    u64 pushed{};
+    u64 verified{};
+    u64 mismatches{};
+    std::chrono::steady_clock::time_point next_report{};
+} delta_descriptor_stats;
+
+void ReportDeltaDescriptors() {
+    DeltaDescriptorStats& stats = delta_descriptor_stats;
+    if (((stats.replayed + stats.pushed) & 1023) != 0 ||
+        (!VideoCommon::Nx2Profile::Enabled() && !delta_descriptors_verify)) {
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now < stats.next_report) {
+        return;
+    }
+    if (stats.next_report != std::chrono::steady_clock::time_point{}) {
+        LOG_INFO(Render_Vulkan,
+                 "Delta descriptors in 10 s: {} replayed, {} pushed, {} verified, {} verify "
+                 "mismatches",
+                 stats.replayed, stats.pushed, stats.verified, stats.mismatches);
+    }
+    stats = {.next_report = now + std::chrono::seconds{10}};
+}
+
 // Texture memo counts, logged every 10 s with EDEN_NX2_GPU_PROFILE or the verify env.
 std::atomic<u64> g_memo_hits{};
 std::atomic<u64> g_memo_misses{};
@@ -347,19 +386,21 @@ void ReportTextureMemo() {
 
 /// EDEN_NX2_GPL_OPTIMIZE_THREADS=<n> (default 1): the optimized links of EDEN_NX2_GPL_OPTIMIZE run
 /// on their own pool of n low-priority threads, so they don't slow down the builds that draws
-/// wait for. 0 runs them on the shared build workers, as before.
-Common::ThreadWorker* GplOptimizeWorkers(Common::ThreadWorker* shared) {
+/// wait for. 0 returns null: they run as Background jobs of the shader job scheduler instead.
+/// The pool stays a Common::ThreadWorker of its own (not shader jobs) so its thread count and
+/// placement are kept apart from the scheduler's workers.
+Common::ThreadWorker* GplOptimizeWorkers() {
     static const size_t threads = [] {
         const char* const value = std::getenv("EDEN_NX2_GPL_OPTIMIZE_THREADS");
         const size_t count =
             value != nullptr && *value != 0 ? std::strtoul(value, nullptr, 10) : size_t{1};
         LOG_INFO(Render_Vulkan, "Nx2Perf gpl: optimized links on {}", count == 0
-                                    ? std::string{"the shared build workers"}
+                                    ? std::string{"the shader job scheduler (Background)"}
                                     : fmt::format("{} low-priority thread(s)", count));
         return count;
     }();
     if (threads == 0) {
-        return shared;
+        return nullptr;
     }
     static Common::ThreadWorker workers(threads, "VkGplOptimize", {},
                                         Common::ThreadPlacement::Background);
@@ -372,26 +413,27 @@ std::chrono::nanoseconds GraphicsPipeline::TakeHoldTime() noexcept {
 }
 
 // TODO(crueter): This is the worst-formatted code I have EVER seen
-/// Creates the descriptor layouts (one set per stage on the library route) and queues the build on
-/// `worker_thread`: libraries and a link, a fast first build, or one monolithic pipeline.
+/// Creates the descriptor layouts (one set per stage on the library route) and queues the build as
+/// a job of `build_queue`: libraries and a link, a fast first build, or one monolithic pipeline.
 GraphicsPipeline::GraphicsPipeline(
     Scheduler& scheduler_, BufferCache& buffer_cache_, TextureCache& texture_cache_,
-    vk::PipelineCache& pipeline_cache_, VideoCore::ShaderNotify* shader_notify,
+    vk::PipelineCache& pipeline_cache_, PipelineBinaries* binaries_,
+    VideoCore::ShaderNotify* shader_notify,
     const Device& device_, DescriptorPool& descriptor_pool,
     GuestDescriptorQueue& guest_descriptor_queue_, DescriptorBufferRing& descriptor_buffer_ring_,
-    Common::ThreadWorker* worker_thread,
+    const PipelineBuildQueue& build_queue,
     PipelineStatistics* pipeline_statistics, RenderPassCache& render_pass_cache,
     const GraphicsPipelineCacheKey& key_, std::array<vk::ShaderModule, NUM_STAGES> stages,
     const std::array<const Shader::Info*, NUM_STAGES>& infos, EmitStagesFunc emit_stages,
     std::optional<MeshEmulationSetup> mesh_emulation_, LibraryParams library_params)
     : key{key_}, device{device_}, texture_cache{texture_cache_}, buffer_cache{buffer_cache_},
-      pipeline_cache(pipeline_cache_), scheduler{scheduler_},
+      pipeline_cache(pipeline_cache_), binaries{binaries_}, scheduler{scheduler_},
       guest_descriptor_queue{guest_descriptor_queue_},
       descriptor_buffer_ring{descriptor_buffer_ring_}, spv_modules{std::move(stages)},
       library_cache{library_params.library_cache},
       libraries_only{library_params.library_cache && library_params.libraries_only},
-      spirv_hashes{library_params.spirv_hashes}, build_workers{worker_thread},
-      worker_only_build{worker_thread && static_cast<bool>(emit_stages)},
+      spirv_hashes{library_params.spirv_hashes}, build_jobs{build_queue.jobs},
+      worker_only_build{build_queue.jobs && static_cast<bool>(emit_stages)},
       mesh_emulation{std::move(mesh_emulation_)} {
     if (shader_notify) {
         shader_notify->MarkShaderBuilding();
@@ -599,6 +641,27 @@ GraphicsPipeline::GraphicsPipeline(
         }
     }
 
+    // Shader cache v2: the emission is the CPU stage of the build's job.
+    std::function<void()> emit;
+    if (build_queue.jobs && emit_stages) {
+        emit = [this, shader_notify, emit_stages = std::exchange(emit_stages, {})] {
+            try {
+                spv_modules = emit_stages(spirv_hashes);
+            } catch (const Shader::Exception& exception) {
+                LOG_ERROR(Render_Vulkan, "Graphics pipeline {:016x}: {}", key.Hash(),
+                          exception.what());
+                if (shader_notify) {
+                    shader_notify->MarkShaderComplete();
+                }
+                throw;
+            } catch (...) {
+                if (shader_notify) {
+                    shader_notify->MarkShaderComplete();
+                }
+                throw;
+            }
+        };
+    }
     auto func{[this, shader_notify, &render_pass_cache, pipeline_statistics,
                 emit_stages = std::move(emit_stages)] {
         const auto begin = std::chrono::steady_clock::now();
@@ -636,35 +699,49 @@ GraphicsPipeline::GraphicsPipeline(
                     FallBackToMonolithic(render_pass);
                 }
                 if (made && !libraries_only && GplOptimizeEnabled() &&
-                    device.CanFastLinkGraphicsLibraries() && build_workers) {
+                    device.CanFastLinkGraphicsLibraries() && build_jobs) {
                     // Optimized link on its own low-priority pool, swapped in at a later draw
                     // (ConfigureDraw) like the fast first build's optimized pipeline. Dropped if
-                    // the pipeline goes away before the link started.
-                    optimized_build.emplace(
-                        GplOptimizeWorkers(build_workers),
-                        [this, render_pass] {
-                            optimized_pipeline = LinkLibraries(render_pass, true);
-                            optimized_ready.store(true, std::memory_order_release);
-                        },
-                        true);
+                    // the pipeline goes away before the link started (drop_unstarted, or a
+                    // cancelled Background job when EDEN_NX2_GPL_OPTIMIZE_THREADS=0).
+                    auto link = [this, render_pass] {
+                        optimized_pipeline = LinkLibraries(render_pass, true);
+                        optimized_ready.store(true, std::memory_order_release);
+                    };
+                    if (Common::ThreadWorker* const pool = GplOptimizeWorkers()) {
+                        optimized_build.emplace(pool, std::move(link), true);
+                    } else {
+                        optimized_build.emplace(
+                            PipelineBuildQueue{
+                                .jobs = build_jobs,
+                                .priority = VideoCommon::ShaderJobPriority::Background,
+                            },
+                            std::move(link));
+                    }
                 }
                 // The libraries hold the shaders now (the fallback has used them too).
                 for (vk::ShaderModule& module : spv_modules) {
                     module.reset();
                 }
-            } else if (FastFirstBuildEnabled() && worker_only_build && build_workers &&
+            } else if (FastFirstBuildEnabled() && worker_only_build && build_jobs &&
                        !mesh_emulation) {
                 // Mesh emulation builds its compute pipelines inside MakePipeline, so
                 // it is built once.
                 // Draw with the unoptimized pipeline as soon as the driver returns it; the
-                // optimized one follows on a worker and takes its place at a later draw
-                // (ConfigureDraw). The modules stay until then.
+                // optimized one follows as a Background job and takes its place at a later draw
+                // (ConfigureDraw). The modules stay until then. A job still queued when the
+                // pipeline goes is dropped.
                 const auto fast_begin = std::chrono::steady_clock::now();
                 pipeline = MakePipeline(render_pass, true);
                 const double fast_ms = std::chrono::duration<double, std::milli>(
                                            std::chrono::steady_clock::now() - fast_begin)
                                            .count();
-                optimized_build.emplace(build_workers, [this, render_pass, fast_ms] {
+                optimized_build.emplace(
+                    PipelineBuildQueue{
+                        .jobs = build_jobs,
+                        .priority = VideoCommon::ShaderJobPriority::Background,
+                    },
+                    [this, render_pass, fast_ms] {
                     const auto optimized_begin = std::chrono::steady_clock::now();
                     optimized_pipeline = MakePipeline(render_pass, false);
                     for (vk::ShaderModule& module : spv_modules) {
@@ -727,7 +804,7 @@ GraphicsPipeline::GraphicsPipeline(
         present_stages[stage] = infos[stage] != nullptr;
     }
     configure_func = ConfigureFunc(present_stages, stage_infos);
-    build.emplace(worker_thread, std::move(func));
+    build.emplace(build_queue, std::move(func), std::move(emit));
 }
 
 void GraphicsPipeline::AddTransition(GraphicsPipeline* transition) {
@@ -761,6 +838,8 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     boost::container::small_vector<VideoCommon::TextureHandleRead, 32> handle_reads;
     boost::container::small_vector<VideoCommon::ImageViewInOut, 32> memo_views;
     boost::container::small_vector<VideoCommon::SamplerId, 32> memo_samplers;
+    std::vector<VideoCommon::ImageId> memo_prepared;
+    std::vector<VideoCommon::ImageId> full_prepared;
     bool memo_hit{};
     if (use_memo) {
         const auto collect_addresses{[&](size_t stage) LAMBDA_FORCEINLINE {
@@ -790,9 +869,16 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         }
         views.resize(num_image_elements);
         samplers.resize(num_textures);
+        if (verify_memo) {
+            // The full resolve prepares the images: the memo only lists those it would prepare.
+            texture_cache.LogPrepares(&memo_prepared, true);
+        }
         memo_hit = texture_cache.ResolveMemoizedTextures(
             texture_memo, std::span(handle_addresses.data(), handle_addresses.size()),
             std::span(views.data(), views.size()), std::span(samplers.data(), samplers.size()));
+        if (verify_memo) {
+            texture_cache.LogPrepares(nullptr, false);
+        }
         if (memo_hit && verify_memo) {
             memo_views.assign(views.begin(), views.end());
             memo_samplers.assign(samplers.begin(), samplers.end());
@@ -919,8 +1005,14 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     ASSERT(samplers.size() == num_textures);
     if (resolve_in_full) {
         Profile::Scope scope{Profile::Zone::FillImageViews};
+        if (memo_hit && verify_memo) {
+            texture_cache.LogPrepares(&full_prepared, false);
+        }
         texture_cache.FillImageViews(std::span(views.data(), views.size()), false,
                                      Spec::has_images);
+        if (memo_hit && verify_memo) {
+            texture_cache.LogPrepares(nullptr, false);
+        }
     }
     if (use_memo) {
         if (!memo_hit) {
@@ -937,17 +1029,22 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             Count(g_memo_hits);
         }
         if (memo_hit && verify_memo) {
+            // Bindings alone miss what the paths do to the images (#904 prepared the null one).
+            for (auto* const prepared : {&memo_prepared, &full_prepared}) {
+                std::ranges::sort(*prepared);
+                prepared->erase(std::unique(prepared->begin(), prepared->end()), prepared->end());
+            }
             const bool same =
                 std::ranges::equal(views, memo_views,
                                    [](const auto& lhs, const auto& rhs) {
                                        return lhs.index == rhs.index && lhs.id == rhs.id;
                                    }) &&
-                std::ranges::equal(samplers, memo_samplers);
+                std::ranges::equal(samplers, memo_samplers) && memo_prepared == full_prepared;
             if (!same) {
                 Count(g_memo_mismatches);
                 LOG_ERROR(Render_Vulkan,
-                          "Texture memo: pipeline {:016x} resolved other views or samplers than "
-                          "its memo",
+                          "Texture memo: pipeline {:016x} resolved other views, samplers or "
+                          "prepared images than its memo",
                           key.Hash());
             }
         }
@@ -978,7 +1075,9 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             }
         }
     }
-    if (std::exchange(capture_delta, false) && delta_blocker == DeltaBlocker::None) {
+    const bool captured_delta =
+        std::exchange(capture_delta, false) && delta_blocker == DeltaBlocker::None;
+    if (captured_delta) {
         const auto same_view = [](const VideoCommon::ImageViewInOut& lhs,
                                   const VideoCommon::ImageViewInOut& rhs) {
             return lhs.index == rhs.index && lhs.id == rhs.id;
@@ -992,6 +1091,10 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         delta_samplers.assign(samplers.begin(), samplers.end());
         configured_stages = Spec::enabled_stages;
         delta_views_valid = true;
+        kept_images_valid = false;
+    }
+    if (captured_delta) {
+        kept_image_entries.clear();
     }
 
     if constexpr (Spec::has_texture_buffers || Spec::has_image_buffers) {
@@ -1101,8 +1204,12 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                 // Libraries: the fragment stage's rescaling bits start at fixed indices.
                 rescaling.Seek(GPL_FRAGMENT_TEXTURE_SCALING_BASE, GPL_FRAGMENT_IMAGE_SCALING_BASE);
             }
+            const size_t first_entry = guest_descriptor_queue.UpdateCount();
             PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
                                  rescaling, samplers_it, views_it);
+            if (captured_delta) {
+                KeepImageDescriptors(stage, first_entry);
+            }
         }
         const auto& info{stage_infos[stage]};
         if (info.uses_render_area) {
@@ -1128,6 +1235,11 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     }
     if constexpr (Spec::enabled_stages[4]) {
         prepare_stage(4);
+    }
+    if (captured_delta) {
+        kept_rescaling = rescaling.Data();
+        kept_scale_epoch = texture_cache.ScaleEpoch();
+        kept_images_valid = true;
     }
     if (mesh_emulation) {
         if (!mesh_output_buffer) {
@@ -1166,6 +1278,10 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     return ConfigureDraw(rescaling, render_area);
 }
 
+bool GraphicsPipeline::DeltaImagesChange() const noexcept {
+    return texture_cache.SampledViewsChange(delta_views);
+}
+
 bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
     namespace Profile = VideoCommon::Nx2Profile;
     // ConfigureImpl without reading handles and resolving image views, samplers and texture
@@ -1202,6 +1318,22 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
     RenderAreaPushConstant render_area;
     const VideoCommon::SamplerId* samplers_it{delta_samplers.data()};
     const VideoCommon::ImageViewInOut* views_it{delta_views.data()};
+    // Push the entries kept for delta_views instead of resolving every view and sampler again;
+    // with EDEN_NX2_DELTA_DESCRIPTORS_VERIFY resolve them and compare.
+    const bool kept_usable = kept_images_valid && kept_scale_epoch == texture_cache.ScaleEpoch();
+    const bool replay_images = kept_usable && !delta_descriptors_verify;
+    struct Kept {
+        std::vector<DescriptorUpdateEntry> entries;
+        std::array<std::pair<u32, u32>, NUM_STAGES> ranges;
+        std::array<u32, Shader::Backend::SPIRV::NUM_TEXTURE_AND_IMAGE_SCALING_WORDS> rescaling;
+    };
+    std::optional<Kept> verify_kept;
+    if (!replay_images) {
+        if (kept_usable) {
+            verify_kept.emplace(std::move(kept_image_entries), kept_image_ranges, kept_rescaling);
+        }
+        kept_image_entries.clear();
+    }
     for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
         if (!configured_stages[stage]) {
             continue;
@@ -1210,15 +1342,21 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
             Profile::Scope scope{Profile::Zone::BindStageBuffers};
             buffer_cache.BindHostStageBuffers(stage);
         }
-        {
+        if (replay_images) {
+            Profile::Scope scope{Profile::Zone::PushDescriptors};
+            const auto [first, count] = kept_image_ranges[stage];
+            guest_descriptor_queue.AddEntries({kept_image_entries.data() + first, count});
+        } else {
             Profile::Scope scope{Profile::Zone::PushDescriptors};
             if (library_cache && stage == NUM_STAGES - 1) {
                 // Libraries: the fragment stage's rescaling bits start at fixed indices, as in
-                // ConfigureImpl.
+                // ConfigureImpl. A replayed draw takes the kept words, captured after this seek.
                 rescaling.Seek(GPL_FRAGMENT_TEXTURE_SCALING_BASE, GPL_FRAGMENT_IMAGE_SCALING_BASE);
             }
+            const size_t first_entry = guest_descriptor_queue.UpdateCount();
             PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
                                  rescaling, samplers_it, views_it);
+            KeepImageDescriptors(stage, first_entry);
         }
         if (stage_infos[stage].uses_render_area) {
             render_area.uses_render_area = true;
@@ -1228,6 +1366,34 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
                                  static_cast<float>(clip_set ? clip_height : u32{regs.rt[0].height})};
         }
     }
+    if (replay_images) {
+        rescaling.Assign(kept_rescaling);
+        ++delta_descriptor_stats.replayed;
+    } else {
+        kept_rescaling = rescaling.Data();
+        kept_scale_epoch = texture_cache.ScaleEpoch();
+        kept_images_valid = true;
+        ++delta_descriptor_stats.pushed;
+        if (verify_kept) {
+            ++delta_descriptor_stats.verified;
+            const auto same_image = [](const DescriptorUpdateEntry& lhs,
+                                       const DescriptorUpdateEntry& rhs) {
+                return lhs.image.sampler == rhs.image.sampler &&
+                       lhs.image.imageView == rhs.image.imageView &&
+                       lhs.image.imageLayout == rhs.image.imageLayout;
+            };
+            if ((verify_kept->ranges != kept_image_ranges ||
+                 verify_kept->rescaling != kept_rescaling ||
+                 !std::ranges::equal(verify_kept->entries, kept_image_entries, same_image)) &&
+                delta_descriptor_stats.mismatches++ < 16) {
+                LOG_ERROR(Render_Vulkan,
+                          "Delta descriptors verify: pipeline {:016x} resolved other image "
+                          "descriptors or rescaling words than the previous draw",
+                          key.Hash());
+            }
+        }
+    }
+    ReportDeltaDescriptors();
     if (buffer_cache.any_buffer_uploaded) {
         buffer_cache.runtime.PostCopyBarrier();
         buffer_cache.any_buffer_uploaded = false;
@@ -1247,6 +1413,15 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
     }
     Profile::Scope scope{Profile::Zone::ConfigureDraw};
     return ConfigureDraw(rescaling, render_area);
+}
+
+void GraphicsPipeline::KeepImageDescriptors(size_t stage, size_t first_entry) {
+    const DescriptorUpdateEntry* const entries = guest_descriptor_queue.UpdateData();
+    const size_t end_entry = guest_descriptor_queue.UpdateCount();
+    kept_image_ranges[stage] = {static_cast<u32>(kept_image_entries.size()),
+                                static_cast<u32>(end_entry - first_entry)};
+    kept_image_entries.insert(kept_image_entries.end(), entries + first_entry,
+                              entries + end_entry);
 }
 
 /// Writes the descriptors, swaps in the optimized pipeline once ready, holds the draw for an
@@ -1440,6 +1615,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
     if (!IsBuilt()) {
         // Wait for the pipeline to be built
         scheduler.Record([this](vk::CommandBuffer) {
+            const VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::PipelineWait};
             const auto begin = std::chrono::steady_clock::now();
             // With EDEN_NX2_HEAVY_SKIP the workers are busy with skipped heavy builds (seconds
             // each); a held draw builds its own pipeline here instead of waiting behind them.
@@ -2014,8 +2190,9 @@ vk::Pipeline GraphicsPipeline::MakePipeline(VkRenderPass render_pass, bool fast)
             .pNext = nullptr,
             .requiredSubgroupSize = GuestWarpSize,
         };
+        // Their binaries are stored under the graphics key, one key per program
         const auto make_compute = [&](VkShaderModule module, VkPipelineLayout layout,
-                                      const Shader::Info* info) {
+                                      const Shader::Info* info, u64 program) {
             const bool uses_warp_ops{info && (info->uses_subgroup_vote ||
                                               info->uses_subgroup_invocation_id ||
                                               info->uses_subgroup_shuffles ||
@@ -2023,36 +2200,39 @@ vk::Pipeline GraphicsPipeline::MakePipeline(VkRenderPass render_pass, bool fast)
                                               info->uses_quad_shuffles || info->uses_fswzadd)};
             const bool force_warp_size{uses_warp_ops && device.IsExtSubgroupSizeControlSupported() &&
                                        device.IsGuestWarpSizeSupported(VK_SHADER_STAGE_COMPUTE_BIT)};
-            return device.GetLogical().CreateComputePipeline(
-                VkComputePipelineCreateInfo{
-                    .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-                    .pNext = nullptr,
+            const VkComputePipelineCreateInfo compute_ci{
+                .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .stage{
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                    .pNext = force_warp_size ? &compute_subgroup_size_ci : nullptr,
                     .flags = 0,
-                    .stage{
-                        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                        .pNext = force_warp_size ? &compute_subgroup_size_ci : nullptr,
-                        .flags = 0,
-                        .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-                        .module = module,
-                        .pName = "main",
-                        .pSpecializationInfo = nullptr,
-                    },
-                    .layout = layout,
-                    .basePipelineHandle = nullptr,
-                    .basePipelineIndex = 0,
+                    .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                    .module = module,
+                    .pName = "main",
+                    .pSpecializationInfo = nullptr,
                 },
-                *pipeline_cache);
+                .layout = layout,
+                .basePipelineHandle = nullptr,
+                .basePipelineIndex = 0,
+            };
+            return binaries ? binaries->CreateComputePipeline(
+                                  compute_ci, *pipeline_cache,
+                                  GraphicsRecordKey(key) ^ (program * 0x9e3779b97f4a7c15ULL))
+                            : device.GetLogical().CreateComputePipeline(compute_ci,
+                                                                        *pipeline_cache);
         };
         mesh_vertex_module = BuildShader(device, mesh_emulation->vertex_spirv);
         mesh_compute_pipeline = make_compute(*spv_modules[mesh_emulation->mesh_stage],
                                              *pipeline_layout,
-                                             &stage_infos[mesh_emulation->mesh_stage]);
+                                             &stage_infos[mesh_emulation->mesh_stage], 1);
         if (mesh_emulation->has_task) {
             task_compute_pipeline =
-                make_compute(*spv_modules[0], *pipeline_layout, &stage_infos[0]);
+                make_compute(*spv_modules[0], *pipeline_layout, &stage_infos[0], 2);
             distribution_module = BuildShader(device, mesh_emulation->distribution_spirv);
             distribution_pipeline =
-                make_compute(*distribution_module, *distribution_layout, nullptr);
+                make_compute(*distribution_module, *distribution_layout, nullptr, 3);
         }
     }
     PipelineStates states;
@@ -2125,7 +2305,7 @@ vk::Pipeline GraphicsPipeline::MakePipeline(VkRenderPass render_pass, bool fast)
     const bool unoptimized = (flags & VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT) != 0;
     const auto trace_begin = std::chrono::steady_clock::now();
     TracePipelineBuild("BEGIN", "graphics", key.Hash(), key.unique_hashes, unoptimized);
-    vk::Pipeline created = device.GetLogical().CreateGraphicsPipeline({
+    const VkGraphicsPipelineCreateInfo pipeline_ci{
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .pNext = nullptr,
         .flags = flags,
@@ -2149,7 +2329,13 @@ vk::Pipeline GraphicsPipeline::MakePipeline(VkRenderPass render_pass, bool fast)
         .subpass = 0,
         .basePipelineHandle = nullptr,
         .basePipelineIndex = 0,
-    }, *pipeline_cache);
+    };
+    // A fast first build's unoptimized pipeline stays out of the pipeline binaries: the
+    // optimized build that follows is the one kept under the key.
+    vk::Pipeline created =
+        binaries && !fast
+            ? binaries->CreateGraphicsPipeline(pipeline_ci, *pipeline_cache, GraphicsRecordKey(key))
+            : device.GetLogical().CreateGraphicsPipeline(pipeline_ci, *pipeline_cache);
     TracePipelineBuild("END", "graphics", key.Hash(), key.unique_hashes, unoptimized,
                        std::chrono::duration<double, std::milli>(
                            std::chrono::steady_clock::now() - trace_begin)

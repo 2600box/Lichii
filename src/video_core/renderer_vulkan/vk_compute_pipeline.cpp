@@ -15,6 +15,7 @@
 #include <boost/container/small_vector.hpp>
 #include <fmt/format.h>
 
+#include "video_core/nx2_profile.h"
 #include "video_core/renderer_vulkan/pipeline_build_trace.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
 #include "video_core/renderer_vulkan/pipeline_optimization.h"
@@ -23,6 +24,7 @@
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_frame_dump.h"
+#include "video_core/renderer_vulkan/vk_pipeline_binaries.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
@@ -250,7 +252,12 @@ vk::Pipeline ComputePipeline::MakeComputePipeline(bool fast) {
     const bool unoptimized = (flags & VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT) != 0;
     const auto trace_begin = std::chrono::steady_clock::now();
     TracePipelineBuild("BEGIN", "compute", shader_hash, traced, unoptimized);
-    vk::Pipeline result = device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);
+    // A fast first build's unoptimized pipeline stays out of the pipeline binaries: the
+    // optimized build that follows is the one kept under the key.
+    vk::Pipeline result =
+        binaries && !fast
+            ? binaries->CreateComputePipeline(compute_ci, *pipeline_cache, binary_key)
+            : device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);
     TracePipelineBuild("END", "compute", shader_hash, traced, unoptimized,
                        std::chrono::duration<double, std::milli>(
                            std::chrono::steady_clock::now() - trace_begin)
@@ -277,21 +284,23 @@ void ReportDispatchWait(u64 shader_hash, std::chrono::steady_clock::duration ela
 } // Anonymous namespace
 
 /// Creates the descriptor layout (descriptor buffer, push descriptor or sets) and queues the build
-/// on `thread_worker`, or builds now without one. With fast first builds an unoptimized pipeline
-/// comes first and the optimized one follows on a worker.
+/// as a job of `build_queue`, or builds now without one. With fast first builds an unoptimized
+/// pipeline comes first and the optimized one follows as a Background job.
 ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk::PipelineCache& pipeline_cache_,
+                                 PipelineBinaries* binaries_, u64 binary_key_,
                                  DescriptorPool& descriptor_pool,
                                  GuestDescriptorQueue& guest_descriptor_queue_,
                                  DescriptorBufferRing& descriptor_buffer_ring_,
-                                 Common::ThreadWorker* thread_worker,
+                                 const PipelineBuildQueue& build_queue,
                                  PipelineStatistics* pipeline_statistics,
                                  VideoCore::ShaderNotify* shader_notify, const Shader::Info& info_,
-                                 vk::ShaderModule spv_module_, u64 shader_hash_)
+                                 vk::ShaderModule spv_module_, u64 shader_hash_,
+                                 std::function<vk::ShaderModule()> emit)
     : device{device_},
-      pipeline_cache(pipeline_cache_), guest_descriptor_queue{guest_descriptor_queue_},
+      pipeline_cache(pipeline_cache_), binaries{binaries_}, binary_key{binary_key_},
+      guest_descriptor_queue{guest_descriptor_queue_},
       descriptor_buffer_ring{descriptor_buffer_ring_}, info{info_},
-      shader_hash{shader_hash_}, spv_module(std::move(spv_module_)),
-      build_workers{thread_worker} {
+      shader_hash{shader_hash_}, spv_module(std::move(spv_module_)) {
     if (shader_notify) {
         shader_notify->MarkShaderBuilding();
     }
@@ -330,16 +339,22 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
 
     auto func{[this, shader_notify, pipeline_statistics] {
         try {
-            if (FastFirstBuildEnabled() && build_workers) {
+            if (FastFirstBuildEnabled() && jobs) {
                 // Dispatch with the unoptimized pipeline as soon as the driver returns it; the
-                // optimized one follows on a worker and takes its place at a later dispatch
-                // (Configure). The module stays until then.
+                // optimized one follows as a Background job and takes its place at a later
+                // dispatch (Configure). The module stays until then. A job still queued when the
+                // pipeline goes is dropped.
                 const auto fast_begin = std::chrono::steady_clock::now();
                 pipeline = MakeComputePipeline(true);
                 const double fast_ms = std::chrono::duration<double, std::milli>(
                                            std::chrono::steady_clock::now() - fast_begin)
                                            .count();
-                optimized_build.emplace(build_workers, [this, fast_ms] {
+                optimized_build.emplace(
+                    PipelineBuildQueue{
+                        .jobs = jobs,
+                        .priority = VideoCommon::ShaderJobPriority::Background,
+                    },
+                    [this, fast_ms] {
                     const auto optimized_begin = std::chrono::steady_clock::now();
                     optimized_pipeline = MakeComputePipeline(false);
                     spv_module.reset();
@@ -402,15 +417,55 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
         }
     }};
     build_task = std::move(func);
-    if (thread_worker) {
-        build_task_done = false;
-        thread_worker->QueueWork([this] {
-            RunBuild();
-            // The last access to this pipeline from the worker.
-            build_task_done.store(true, std::memory_order::release);
-        });
-    } else {
+    if (build_queue.jobs) {
+        jobs = build_queue.jobs;
+        VideoCommon::ShaderJob build_job{
+            .priority = VideoCommon::ShaderJobPriority::Soon,
+            .cpu_bytes = build_queue.cpu_bytes,
+            .driver_bytes = build_queue.driver_bytes,
+        };
+        if (emit) {
+            // The SPIR-V is emitted first, in the job's CPU stage (shader cache v2)
+            build_job.cpu = [this, shader_notify, emit = std::move(emit)](
+                                VideoCommon::ShaderJobContext&) -> VideoCommon::ShaderDriverStage {
+                // A pipeline that fails here is built without a VkPipeline: its dispatches are
+                // skipped, as for one the driver rejects
+                const auto fail = [&](const char* what) {
+                    LOG_ERROR(Render_Vulkan,
+                              "Compute pipeline compilation failed shader={:#016x}: {}",
+                              shader_hash, what);
+                    std::scoped_lock lock{build_mutex};
+                    is_built = true;
+                    build_condvar.notify_one();
+                    if (shader_notify) {
+                        shader_notify->MarkShaderComplete();
+                    }
+                };
+                try {
+                    spv_module = emit();
+                } catch (const std::exception& exception) {
+                    fail(exception.what());
+                    return {};
+                } catch (...) {
+                    fail("unknown exception");
+                    return {};
+                }
+                return [this] { RunBuild(); };
+            };
+        } else {
+            build_job.driver = [this] { RunBuild(); };
+        }
+        job = jobs->Submit(std::move(build_job));
+    } else if (!build_queue.owner_builds) {
         RunBuild();
+    }
+}
+
+ComputePipeline::~ComputePipeline() {
+    if (jobs) {
+        // Nothing needs a pipeline that goes: a build still queued is dropped.
+        jobs->Cancel(job);
+        job.Wait();
     }
 }
 
@@ -704,9 +759,18 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     if (!is_built.load(std::memory_order::relaxed)) {
         // Wait for the pipeline to be built
         scheduler.Record([this](vk::CommandBuffer) {
+            const VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::PipelineWait};
             const auto begin = std::chrono::steady_clock::now();
             const bool claimed = !build_claimed.load(std::memory_order::relaxed);
-            RunBuild();
+            if (jobs) {
+                // Raised to NeedNow, and built here unless a driver worker builds it already
+                jobs->RunOrWait(job);
+                if (job.Status() == VideoCommon::ShaderJobStatus::Cancelled) {
+                    return; // The scheduler shut down
+                }
+            } else {
+                RunBuild();
+            }
             std::unique_lock lock{build_mutex};
             build_condvar.wait(lock, [this] { return is_built.load(std::memory_order::relaxed); });
             ReportDispatchWait(shader_hash, std::chrono::steady_clock::now() - begin, claimed);
