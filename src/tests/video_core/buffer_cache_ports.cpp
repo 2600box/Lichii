@@ -358,7 +358,7 @@ struct BufferCacheTestAccess {
     static size_t ReadDownloads(Cache& cache) {
         return cache.read_downloads.size();
     }
-    /// TEST (EDEN_NX2_READ_CHECK): every read download compared with a synchronous flush.
+    /// TEST (read-back verify): every read download compared with a synchronous flush.
     static void CheckEveryRead(Cache& cache) {
         cache.read_check.every = 1;
     }
@@ -373,8 +373,20 @@ namespace {
 
 using Access = VideoCommon::BufferCacheTestAccess;
 
+/// EDEN_NX2_ASYNC_READBACK's mode for a test, restored after it.
+struct ReadbackModeScope {
+    explicit ReadbackModeScope(VideoCore::AsyncReadback::Mode mode)
+        : previous{VideoCore::AsyncReadback::g_mode.exchange(mode)} {}
+    ~ReadbackModeScope() {
+        VideoCore::AsyncReadback::g_mode = previous;
+    }
+    VideoCore::AsyncReadback::Mode previous;
+};
+
 template <class R, class C>
 struct BasicFixture {
+    /// The read download tests run the async path's buffer cache side.
+    ReadbackModeScope readback_mode{VideoCore::AsyncReadback::Mode::On};
     ScopedSystemTestContext context;
     Core::System system;
     Core::DeviceMemory physical;
@@ -1993,4 +2005,136 @@ TEST_CASE("Read download check leaves out early downloaded bytes an upload repla
     REQUIRE(Access::ReadChecks(*f.cache).compared != 0);
     REQUIRE(Access::ReadChecks(*f.cache).mismatched == 0);
     REQUIRE(Access::ReadChecks(*f.cache).uncovered == 0);
+}
+
+TEST_CASE("EDEN_NX2_ASYNC_READBACK values select the read-back mode", "[buffer_ports]") {
+    using VideoCore::AsyncReadback::Mode;
+    using VideoCore::AsyncReadback::ParseMode;
+    REQUIRE(ParseMode(nullptr) == Mode::Off);
+    REQUIRE(ParseMode("") == Mode::Off);
+    REQUIRE(ParseMode("0") == Mode::Off);
+    REQUIRE(ParseMode("1") == Mode::On);
+    REQUIRE(ParseMode("verify") == Mode::Verify);
+}
+
+TEST_CASE("Without async read-back, pages read after each GPU write get no early downloads",
+          "[buffer_ports]") {
+    Fixture f;
+    const ReadbackModeScope off{VideoCore::AsyncReadback::Mode::Off};
+    const Nx2TitleScope nx2_title;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    for (u8 frame = 1; frame <= 3; ++frame) {
+        WriteByDispatch(f, id, 0x20000, 0x100, frame);
+        REQUIRE(f.runtime.queued_host_reads == 0);
+        ReadWord(f, 0x20010);
+        REQUIRE(f.bytes[0x10010] == frame);
+    }
+    REQUIRE(Access::ReadDownloads(*f.cache) == 0);
+    REQUIRE(Access::ReadChecks(*f.cache).checked == 0);
+}
+
+TEST_CASE("Async read-back verify compares every read download", "[buffer_ports]") {
+    Fixture f;
+    const ReadbackModeScope verify{VideoCore::AsyncReadback::Mode::Verify};
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    std::ranges::fill(Access::Get(*f.cache, id).bytes, 0x12);
+    for (u32 read = 1; read <= 3; ++read) {
+        Access::MarkWritten(*f.cache, id, 0x20000, 0x100);
+        f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+        f.cache->FinishReadDownloads(0x20000, 0x1000);
+        REQUIRE(Access::ReadChecks(*f.cache).checked == read);
+    }
+    REQUIRE(Access::ReadChecks(*f.cache).compared == 0x300);
+    REQUIRE(Access::ReadChecks(*f.cache).mismatched == 0);
+    REQUIRE(Access::ReadChecks(*f.cache).uncovered == 0);
+}
+
+namespace {
+/// Two read downloads, and a GPU write nothing records into the first one's bytes: the second
+/// download's check finds 0x10 bytes outdated once both land.
+VideoCommon::BufferId OutdatedReadDownloads(Fixture& f) {
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    auto& buffer = Access::Get(*f.cache, id);
+    std::ranges::fill(buffer.bytes, 0x12);
+    Access::MarkWritten(*f.cache, id, 0x20000, 0x100);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    f.runtime.pending.push_back(
+        [&buffer] { std::fill_n(buffer.bytes.begin() + 0x40, 0x10, u8{0x56}); });
+    Access::MarkWritten(*f.cache, id, 0x20800, 0x10);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    return id;
+}
+
+/// The guest thread whose read waits for its downloads (GPU::OnCPURead).
+struct ReadingThreadScope {
+    ReadingThreadScope() {
+        VideoCore::AsyncReadback::t_reading = true;
+    }
+    ~ReadingThreadScope() {
+        VideoCore::AsyncReadback::t_reading = false;
+    }
+};
+
+u64 MismatchedBy(Fixture& f, VideoCore::AsyncReadback::Landing landing) {
+    return Access::ReadChecks(*f.cache).mismatched_by_landing[static_cast<size_t>(landing)];
+}
+} // namespace
+
+TEST_CASE("Async read-back verify names who wrote a differing download to guest memory",
+          "[buffer_ports]") {
+    using VideoCore::AsyncReadback::Landing;
+    Fixture f;
+    const ReadbackModeScope verify{VideoCore::AsyncReadback::Mode::Verify};
+    OutdatedReadDownloads(f);
+    SECTION("the reading thread") {
+        const ReadingThreadScope reading;
+        f.cache->FinishReadDownloads(0x20000, 0x1000);
+        REQUIRE(MismatchedBy(f, Landing::Reader) == 0x10);
+    }
+    SECTION("a write to guest memory from the GPU's side") {
+        f.cache->FinishReadDownloads(0x20800, 4);
+        REQUIRE(MismatchedBy(f, Landing::GpuSideWrite) == 0x10);
+    }
+    SECTION("the next read download, once the host GPU ran them") {
+        f.runtime.Complete(f.runtime.submitted_tick);
+        f.cache->DownloadMemoryForRead(0x30000, 0x1000);
+        REQUIRE(MismatchedBy(f, Landing::Completed) == 0x10);
+    }
+    REQUIRE(Access::ReadDownloads(*f.cache) == 0);
+    REQUIRE(Access::ReadChecks(*f.cache).checked == 2);
+    REQUIRE(Access::ReadChecks(*f.cache).mismatched == 0x10);
+}
+
+TEST_CASE("Async read-back counts the reading thread's and the GPU side's waits apart",
+          "[buffer_ports]") {
+    auto& counters = VideoCore::AsyncReadback::g_counters;
+    Fixture f;
+    const auto id = Access::Add(*f.cache, 0x20000, 0x10000);
+    const u64 reader_waits = counters.reader_waits.load();
+    const u64 gpu_side_waits = counters.gpu_side_waits.load();
+    // The reading thread waits for a download the host GPU hasn't run.
+    Access::MarkWritten(*f.cache, id, 0x20000, 0x100);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    {
+        const ReadingThreadScope reading;
+        f.cache->FinishReadDownloads(0x20000, 0x1000);
+    }
+    REQUIRE(counters.reader_waits.load() - reader_waits == 1);
+    REQUIRE(counters.gpu_side_waits.load() == gpu_side_waits);
+    // A semaphore release over one falls back to a host GPU wait on the GPU's side.
+    Access::MarkWritten(*f.cache, id, 0x20000, 0x100);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    f.cache->FinishReadDownloads(0x20040, 4);
+    REQUIRE(counters.gpu_side_waits.load() - gpu_side_waits == 1);
+    // Run by the host GPU before the read: nothing waits.
+    Access::MarkWritten(*f.cache, id, 0x20000, 0x100);
+    f.cache->DownloadMemoryForRead(0x20000, 0x1000);
+    f.runtime.Complete(f.runtime.submitted_tick);
+    {
+        const ReadingThreadScope reading;
+        f.cache->FinishReadDownloads(0x20000, 0x1000);
+    }
+    REQUIRE(counters.reader_waits.load() - reader_waits == 1);
+    REQUIRE(counters.gpu_side_waits.load() - gpu_side_waits == 1);
+    REQUIRE(f.runtime.host_read_waits == 2);
 }

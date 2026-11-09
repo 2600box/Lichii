@@ -224,7 +224,7 @@ template <class P>
 void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu_data) {
     Nx2NoteListHostWrite(device_addr, size);
     NoteUniformWrite(device_addr, size);
-    // TEST (EDEN_NX2_READ_CHECK): a newer value where an early download landed, as ClearDownload
+    // TEST (read-back verify): a newer value where an early download landed, as ClearDownload
     // forgets one over GPU-modified bytes: without early downloads the write had taken the bytes
     // out of the GPU-modified ones, and the read's synchronous flush leaves them. Landed bytes
     // are no longer GPU-modified, so the write reaches no ClearDownload: written back to the
@@ -345,7 +345,7 @@ std::optional<VideoCore::RasterizerDownloadArea> BufferCache<P>::GetFlushArea(DA
     area->preemtive = !IsRegionGpuModified(device_addr_start_aligned,
                                            device_addr_end_aligned - device_addr_start_aligned);
     NoteReadBack(device_addr_start_aligned, device_addr_end_aligned, !area->preemtive);
-    // TEST (EDEN_NX2_READ_CHECK): a read an early download serves takes a flush, which compares
+    // TEST (read-back verify): a read an early download serves takes a flush, which compares
     // what it finds with the GPU's bytes now.
     const bool check_early =
         ReadChecks() && EarlyDownloadServes(device_addr_start_aligned,
@@ -580,7 +580,7 @@ void BufferCache<P>::RecordReadDownload(std::span<const std::pair<DAddr, u64>> r
             download.clean_ranges.Add(begin, end - begin);
             read_download_ranges.Add(begin, end - begin);
         };
-        // TEST (EDEN_NX2_READ_CHECK): what a synchronous flush (DownloadRangesMemory) copies for
+        // TEST (read-back verify): what a synchronous flush (DownloadRangesMemory) copies for
         // the read itself.
         std::unique_ptr<ReadCheck> check;
         boost::container::small_vector<Copy, 16> check_copies;
@@ -588,6 +588,12 @@ void BufferCache<P>::RecordReadDownload(std::span<const std::pair<DAddr, u64>> r
         const u64 check_every = read_check.every != 0 ? read_check.every : ReadCheckEvery();
         if (check_every != 0 && read_check.next++ % check_every == 0) [[unlikely]] {
             check = std::make_unique<ReadCheck>();
+            check->read_begin = ~DAddr{0};
+            for (const auto& [own_addr, own_size] : own) {
+                check->read_begin = (std::min)(check->read_begin, own_addr);
+                check->read_end = (std::max)(check->read_end, own_addr + own_size);
+            }
+            check->early = early;
             for (const auto& [own_addr, own_size] : own) {
                 ForEachBufferInRange(own_addr, own_size, [&](BufferId buffer_id, Buffer& buffer) {
                     const DAddr buffer_addr = buffer.CpuAddr();
@@ -684,7 +690,7 @@ void BufferCache<P>::RecordReadDownload(std::span<const std::pair<DAddr, u64>> r
                 });
             }
         }
-        // TEST (EDEN_NX2_READ_CHECK): what early downloads brought to the read's pages before it
+        // TEST (read-back verify): what early downloads brought to the read's pages before it
         // came. No longer GPU-modified, they are compared as they landed.
         struct LandedCopy {
             u64 offset; ///< In the check's staging, past its own offset
@@ -785,7 +791,7 @@ void BufferCache<P>::FinishReadDownloads(DAddr device_addr, u64 size) {
         // The newest one over the range: those before it are written first.
         std::optional<u64> tick;
         for (const ReadDownload& download : read_downloads) {
-            // TEST (EDEN_NX2_READ_CHECK): a check alone is waited for too, as its read's download.
+            // TEST (read-back verify): a check alone is waited for too, as its read's download.
             if (download.write_ranges.Intersects(device_addr, size) ||
                 (download.check && download.check->own.Intersects(device_addr, size))) {
                 tick = download.tick;
@@ -796,16 +802,20 @@ void BufferCache<P>::FinishReadDownloads(DAddr device_addr, u64 size) {
         }
         if (!runtime.IsFree(*tick)) {
             lock.unlock();
+            const u64 wait_start = VideoCore::AsyncReadback::Now();
             runtime.WaitForHostRead(*tick);
+            VideoCore::AsyncReadback::CountHostWait(VideoCore::AsyncReadback::Now() - wait_start);
             lock.lock();
         }
-        WriteReadDownloads(*tick);
+        WriteReadDownloads(*tick, VideoCore::AsyncReadback::t_reading
+                                      ? VideoCore::AsyncReadback::Landing::Reader
+                                      : VideoCore::AsyncReadback::Landing::GpuSideWrite);
     }
 }
 
 template <class P>
 void BufferCache<P>::OutdateReadDownloads(DAddr device_addr, u64 size) {
-    // TEST (EDEN_NX2_READ_CHECK): the GPU's copy gets newer bytes where an early download landed,
+    // TEST (read-back verify): the GPU's copy gets newer bytes where an early download landed,
     // which no read compares. A query result copy (SyncValues) is no GPU write the cache records:
     // a synchronous flush doesn't download it, and guest memory gets the result once the query
     // cache writes it there. MarkWrittenBuffer's bytes are GPU-modified from now on, which
@@ -1060,7 +1070,7 @@ void BufferCache<P>::ForgetEarlyLanded(DAddr device_addr, u64 size) {
 }
 
 template <class P>
-void BufferCache<P>::WriteReadDownloads(u64 tick) {
+void BufferCache<P>::WriteReadDownloads(u64 tick, VideoCore::AsyncReadback::Landing landed_by) {
     if constexpr (!IS_OPENGL) {
         while (!read_downloads.empty() && read_downloads.front().tick <= tick) {
             ReadDownload& download = read_downloads.front();
@@ -1104,7 +1114,7 @@ void BufferCache<P>::WriteReadDownloads(u64 tick) {
                 }
             }
             if (download.check) [[unlikely]] {
-                CheckReadDownload(*download.check, cpu_written);
+                CheckReadDownload(*download.check, cpu_written, landed_by);
                 async_buffers_death_ring.push_back(download.check->staging);
             }
             download.clean_ranges.ForEach([&](DAddr start, DAddr end) {
@@ -1160,7 +1170,8 @@ bool BufferCache<P>::ReadDownloadsCover(DAddr device_addr, u64 size) const {
 
 template <class P>
 void BufferCache<P>::CheckReadDownload(const ReadCheck& check,
-                                       const Common::RangeSet<DAddr>& cpu_written) {
+                                       const Common::RangeSet<DAddr>& cpu_written,
+                                       VideoCore::AsyncReadback::Landing landing) {
     // Guest memory now holds this download and the earlier ones: compare it with the synchronous
     // copy, except where a newer value replaced it since (CPU writes, ClearDownload). Writes
     // collected since the download was written count as newer too. Where an earlier download
@@ -1181,7 +1192,8 @@ void BufferCache<P>::CheckReadDownload(const ReadCheck& check,
         Outdated,  ///< An earlier download's bytes differ: the GPU wrote them since
         NotLanded, ///< No earlier download wrote it
     };
-    const auto report = [this](Result result, DAddr address, u64 size, u8 found, u8 wanted) {
+    const auto report = [this, &check, landing](Result result, DAddr address, u64 size, u8 found,
+                                                u8 wanted) {
         if (result == Result::Rewritten) {
             read_check.rewritten += size;
             if (read_check.logged_rewrites++ < 16) {
@@ -1194,6 +1206,7 @@ void BufferCache<P>::CheckReadDownload(const ReadCheck& check,
             return;
         }
         read_check.mismatched += size;
+        read_check.mismatched_by_landing[static_cast<size_t>(landing)] += size;
         if (read_check.logged++ >= 16) {
             return;
         }
@@ -1204,8 +1217,12 @@ void BufferCache<P>::CheckReadDownload(const ReadCheck& check,
                 : (result == Result::NotLanded ? ": no earlier read's download wrote it" : "");
         LOG_ERROR(HW_GPU,
                   "Read download check: guest memory {:#x}+{:#x} differs from a synchronous "
-                  "flush ({:#04x} for {:#04x} at its start){}",
-                  address, size, found, wanted, why);
+                  "flush ({:#04x} for {:#04x} at its start){}; {} download of [{:#x}, {:#x}), "
+                  "written to guest memory by {}",
+                  address, size, found, wanted, why,
+                  check.early ? "early" : (check.own.Empty() ? "read" : "check-only"),
+                  check.read_begin, check.read_end,
+                  VideoCore::AsyncReadback::landing_names[static_cast<size_t>(landing)]);
     };
     std::vector<u8> guest;
     std::vector<Source> sources;
@@ -1277,12 +1294,14 @@ void BufferCache<P>::CheckReadDownload(const ReadCheck& check,
     if (now >= read_check.last_log + 10) {
         read_check.last_log = now;
         LOG_INFO(HW_GPU,
-                 "Read download check (EDEN_NX2_READ_CHECK): {} downloads compared with a "
-                 "synchronous flush, {} KiB; {} bytes differ, {} GPU-modified bytes no download "
-                 "brought (both must stay 0); {} bytes got newer values after an earlier read's "
-                 "download brought them (not compared)",
+                 "Read download check (EDEN_NX2_ASYNC_READBACK=verify): {} downloads compared "
+                 "with a synchronous flush, {} KiB; {} bytes differ (landed by the reading "
+                 "thread {}, by a GPU-side write {}, after the host GPU ran them {}), {} "
+                 "GPU-modified bytes no download brought (both must stay 0); {} bytes got newer "
+                 "values after an earlier read's download brought them (not compared)",
                  read_check.checked, read_check.compared / 1024, read_check.mismatched,
-                 read_check.uncovered, read_check.rewritten);
+                 read_check.mismatched_by_landing[0], read_check.mismatched_by_landing[1],
+                 read_check.mismatched_by_landing[2], read_check.uncovered, read_check.rewritten);
     }
 }
 
@@ -1313,7 +1332,7 @@ void BufferCache<P>::NoteLandedBytes(ReadCheck& check, const Common::RangeSet<DA
 template <class P>
 void BufferCache<P>::ClearDownload(DAddr device_addr, u64 size) {
     ClearFenceDownloads(device_addr, size);
-    // TEST (EDEN_NX2_READ_CHECK): a newer value there, as without early downloads.
+    // TEST (read-back verify): a newer value there, as without early downloads.
     if (!early_landed.empty()) [[unlikely]] {
         ForgetEarlyLanded(device_addr, size);
     }
@@ -2051,7 +2070,7 @@ Common::RangeSet<DAddr> BufferCache<P>::PendingCpuWriteRanges() {
 template <class P>
 void BufferCache<P>::WriteDownloadedMemory(const Common::RangeSet<DAddr>& cpu_written,
                                            DAddr device_addr, const u8* data, u64 size) {
-    // TEST (EDEN_NX2_READ_CHECK): newer GPU bytes than an early download brought before.
+    // TEST (read-back verify): newer GPU bytes than an early download brought before.
     if (!early_landed.empty()) [[unlikely]] {
         ForgetEarlyLanded(device_addr, size);
     }
