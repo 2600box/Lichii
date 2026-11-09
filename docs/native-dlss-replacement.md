@@ -40,9 +40,10 @@ The Legend of Zelda: Ocarina of Time (`0400486024DEC000`) has no DLSS of its own
 end-of-frame upscale pass can be replaced with FSR 3.1 on Linux or Windows, on any supported
 Vulkan GPU, or NVIDIA DLSS on Windows. The **Use AMD FSR 3.1 upscaling in Ocarina of Time**
 setting (`ocarina_fsr`) is off by default. NVIDIA DLSS takes precedence when its setting is
-enabled and the runtime is available; otherwise an enabled temporal selection uses FSR.
-`EDEN_NX2_DLSS_REPLACEMENT=fsr` explicitly enables FSR; `native` disables both replacements.
-`dlss` opts into temporal replacement, preferring DLSS only when its setting is enabled.
+enabled and the runtime is available; FSR runs only when its own setting is on, so without it
+the game keeps its own pass whenever DLSS is off, unavailable or fails to start.
+`EDEN_NX2_DLSS_REPLACEMENT=fsr` explicitly enables FSR; `native` disables both replacements;
+`dlss` asks for DLSS as its setting does.
 
 - Max Resolution add-on off: the 3/4-scale pass (`e40f5efb5480e692`; `ef542df87cacfe9e` on the
   Linux RADV build, same contract) is replaced and FSR/DLSS
@@ -69,9 +70,10 @@ enabled and the runtime is available; otherwise an enabled temporal selection us
   upscaler cannot recover detail and corrupts reprojection. Safe host jitter would require
   changing the raster projection plus unjittered motion/depth handling (cf. #253), out of scope.
   Consequently this is temporal stabilization/upscaling, not full jittered supersampling.
-- #644 (`82494c4820`, `74a2d20c90`, `4352c06bbf`) supplies the backend-neutral effects capture.
-  FSR uses its R16F current/history bias as both reactive and transparency/composition masks;
-  missing capture uses zero masks, not stale history. The DLSS preset changes were not imported.
+- #644 (`82494c4820`, `74a2d20c90`, `4352c06bbf`) supplies the effects capture, used by FSR only
+  (DLSS gets no bias mask and runs as before). FSR uses its R16F current/history bias as both
+  reactive and transparency/composition masks; missing capture uses zero masks, not stale
+  history. The DLSS preset changes were not imported.
 - RCAS uses `fsr_sharpening_slider` with the existing inverted 0–200 mapping (stops × 100;
   stored 200 disables sharpening). HUD handling
   and the Max Resolution 1440p-to-4K presentation composition are shared with #606.

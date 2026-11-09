@@ -12,13 +12,15 @@ TEST_CASE("OoT temporal backend selection is opt-in and vendor neutral", "[video
     CHECK(SelectOcarinaUpscaler(false, false, true, "") == Native);
     CHECK(SelectOcarinaUpscaler(true, false, false, "") == Fsr);
     CHECK(SelectOcarinaUpscaler(true, false, true, "") == Fsr);
-    CHECK(SelectOcarinaUpscaler(false, true, false, "") == Fsr);
+    CHECK(SelectOcarinaUpscaler(false, true, false, "") == Native);
     CHECK(SelectOcarinaUpscaler(false, true, true, "") == Dlss);
+    CHECK(SelectOcarinaUpscaler(true, true, false, "") == Fsr);
+    CHECK(SelectOcarinaUpscaler(true, true, true, "") == Dlss);
     CHECK(SelectOcarinaUpscaler(true, true, true, "native") == Native);
     CHECK(SelectOcarinaUpscaler(false, true, true, "fsr") == Fsr);
     CHECK(SelectOcarinaUpscaler(false, false, false, "fsr") == Fsr);
-    CHECK(SelectOcarinaUpscaler(false, false, false, "dlss") == Fsr);
-    CHECK(SelectOcarinaUpscaler(false, false, true, "dlss") == Fsr);
+    CHECK(SelectOcarinaUpscaler(false, false, false, "dlss") == Native);
+    CHECK(SelectOcarinaUpscaler(false, false, true, "dlss") == Dlss);
     CHECK(SelectOcarinaUpscaler(false, true, true, "dlss") == Dlss);
     CHECK(SelectOcarinaUpscaler(false, false, false, "garbage") == Native);
 }

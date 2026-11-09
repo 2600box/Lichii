@@ -650,7 +650,7 @@ struct OcarinaFrameSlot {
 };
 
 /// The scene before its glows and particles, the pixels they changed in the last two frames and
-/// the DLSS bias mask made from those.
+/// the FSR bias mask made from those.
 struct OcarinaEffects {
     OcarinaEffects(const Device& device, MemoryAllocator& allocator, VkExtent2D extent_)
         : extent{extent_},
@@ -690,24 +690,15 @@ struct OcarinaUpscaler::Impl {
           output_pass{device, scheduler, pool, OCARINA_DLSS_OUTPUT_COMP_SPV} {
 #ifdef EGLANTINE_STREAMLINE
         if (backend == VideoCommon::OcarinaUpscaleBackend::Dlss) {
-            try {
-                dlss = std::make_unique<StreamlineDlssUpscaler>(device, scheduler, allocator);
-            } catch (const vk::Exception& error) {
-                LOG_WARNING(Render_Vulkan, "Ocarina DLSS initialization failed ({}); trying FSR 3.1", error.what());
-            }
+            dlss = std::make_unique<StreamlineDlssUpscaler>(device, scheduler, allocator);
+            return;
         }
 #endif
-        if (backend == VideoCommon::OcarinaUpscaleBackend::Fsr
-#ifdef EGLANTINE_STREAMLINE
-            || !dlss
-#endif
-        ) {
-            if (!Fsr3Upscaler::IsSupported(device)) {
-                throw vk::Exception(VK_ERROR_FEATURE_NOT_PRESENT);
-            }
-            fsr = std::make_unique<Fsr3Upscaler>(device, scheduler, allocator, staging, pool, queue,
-                                               Fsr3Upscaler::Profile::OcarinaLdr);
+        if (!Fsr3Upscaler::IsSupported(device)) {
+            throw vk::Exception(VK_ERROR_FEATURE_NOT_PRESENT);
         }
+        fsr = std::make_unique<Fsr3Upscaler>(device, scheduler, allocator, staging, pool, queue,
+                                           Fsr3Upscaler::Profile::OcarinaLdr);
     }
 
     const Device& device;
@@ -939,7 +930,6 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
     state.color_pass.Record(state.scheduler, state.queue.UpdateData(), *resources.color, extent);
 
     VkImageView bias_view{};
-    [[maybe_unused]] VkImage bias_image{};
     if (state.effects && state.effects->marked_frame == frame &&
         state.effects->extent.width == extent.width &&
         state.effects->extent.height == extent.height) {
@@ -954,7 +944,6 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
         state.effects_bias_pass->Record(state.scheduler, state.queue.UpdateData(), *effects.bias,
                                         extent, has_previous ? 1 : 0);
         bias_view = *effects.bias_view;
-        bias_image = *effects.bias;
     }
 
     const bool reset = !state.last_frame || frame != *state.last_frame + 1 ||
@@ -974,8 +963,6 @@ bool OcarinaUpscaler::Record(VkImageView color, VkImageView depth, VkImageView t
             .reset = reset,
             .depth_inverted = false,
             .hdr = false,
-            .bias_current_color = bias_view ? std::optional{StreamlineDlssUpscaler::Image{
-                bias_view, bias_image, BIAS_FORMAT, COLOR_RANGE, VK_IMAGE_ASPECT_COLOR_BIT}} : std::nullopt,
         })) {
         state.scheduler.InvalidateState();
         return false;

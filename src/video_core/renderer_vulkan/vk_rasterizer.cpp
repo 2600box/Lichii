@@ -1120,9 +1120,10 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         }
     }
     // The game draws Navi's glow, fireflies and dust right after the fog. They write no depth and
-    // move on their own, so DLSS must not take them from its history.
+    // move on their own, so FSR must not take them from its history. DLSS doesn't use the mask.
     constexpr u64 fog_fragment = 0x3ddfb1d7a854c849ULL;
     if (hashes[5] == fog_fragment && oot_live_dlss && OcarinaTemporalEnabled() &&
+        oot_backend == VideoCommon::OcarinaUpscaleBackend::Fsr &&
         oot_camera_sample_frame == render_trace_frame && !frame_dump.Capturing()) {
         const auto scene_id = texture_cache.GetRenderTargets().color_buffer_ids[0];
         if (scene_id) {
@@ -2079,7 +2080,10 @@ void RasterizerVulkan::DispatchCompute() {
         }
     };
     const auto indirect_address = kepler_compute->GetIndirectComputeAddress();
+    // The full-size 1080p pass is replaced only by FSR (native AA); DLAA through it is untested.
     const bool can_replace = OcarinaTemporalEnabled() && pipeline->CanReplaceOcarinaUpscale() &&
+                             (pipeline->ShaderHash() != ComputePipeline::OcarinaFullSizeShader ||
+                              oot_backend == VideoCommon::OcarinaUpscaleBackend::Fsr) &&
                              !indirect_address && !frame_dump.Capturing();
     // Until a dispatch overwrites the scene, each direct one binds only after the effects are
     // marked. The indirect path records its bind at once.
@@ -3060,11 +3064,7 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, bool r
     auto& target = texture_cache.GetImageView(written[0]);
     using VideoCore::Surface::PixelFormat;
     const auto extent = oot_motion.extent;
-    // The full-size 1080p pass is replaced only by FSR (native AA); DLAA through it is untested.
     const bool native_size = pipeline.ShaderHash() == ComputePipeline::OcarinaFullSizeShader;
-    if (native_size && oot_backend != VideoCommon::OcarinaUpscaleBackend::Fsr) {
-        return fail("full-size pass is FSR only");
-    }
     const bool valid_extents = upscale_4k
         ? extent.width == 2560 && extent.height == 1440 &&
             target.size.width == 2560 && target.size.height == 1440

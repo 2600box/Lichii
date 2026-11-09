@@ -18,11 +18,10 @@ constexpr OcarinaUpscaleBackend SelectOcarinaUpscaler(bool fsr_enabled, bool dls
     if (override == "fsr") {
         return OcarinaUpscaleBackend::Fsr;
     }
-    if (!fsr_enabled && !dlss_enabled && override != "dlss") {
-        return OcarinaUpscaleBackend::Native;
+    if ((dlss_enabled || override == "dlss") && dlss_available) {
+        return OcarinaUpscaleBackend::Dlss;
     }
-    return dlss_enabled && dlss_available ? OcarinaUpscaleBackend::Dlss
-                                          : OcarinaUpscaleBackend::Fsr;
+    return fsr_enabled ? OcarinaUpscaleBackend::Fsr : OcarinaUpscaleBackend::Native;
 }
 
 } // namespace VideoCommon
