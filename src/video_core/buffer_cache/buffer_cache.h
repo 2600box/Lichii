@@ -252,7 +252,7 @@ void BufferCache<P>::WriteMemory(DAddr device_addr, u64 size, bool keep_page_gpu
         }
     }
     if (IsRegionGpuModified(device_addr, size)) {
-        ClearDownload(device_addr, size);
+        ClearReplacedDownload(device_addr, size);
         gpu_modified_ranges.Subtract(device_addr, size);
     }
     // The tracker marks whole pages CPU-modified, which drops their GPU-modified state: GPU-written
@@ -470,7 +470,7 @@ void BufferCache<P>::DownloadRangesMemory(std::span<const std::pair<DAddr, u64>>
                                 staged.push_back({buffer_id, copy});
                                 total_size_bytes += Common::AlignUp(range_end - start, 64);
                             });
-                        ClearDownload(device_addr_out, range_size);
+                        ClearReplacedDownload(device_addr_out, range_size);
                         gpu_modified_ranges.Subtract(device_addr_out, range_size);
                     });
             });
@@ -1331,6 +1331,12 @@ void BufferCache<P>::NoteLandedBytes(ReadCheck& check, const Common::RangeSet<DA
 
 template <class P>
 void BufferCache<P>::ClearDownload(DAddr device_addr, u64 size) {
+    FinishReadDownloads(device_addr, size);
+    ClearReplacedDownload(device_addr, size);
+}
+
+template <class P>
+void BufferCache<P>::ClearReplacedDownload(DAddr device_addr, u64 size) {
     ClearFenceDownloads(device_addr, size);
     // EDEN_NX2_READ_CHECK: a newer value there, as without early downloads.
     if (!early_landed.empty()) {
@@ -1443,9 +1449,6 @@ bool BufferCache<P>::DMAClear(GPUVAddr dst_address, u64 amount, u32 value) {
     }
 
     const size_t size = amount * sizeof(u32);
-    // The caller writes the cleared words to guest memory after this: earlier reads' downloads
-    // land first, so a reader of these bytes never finds neither there.
-    FinishReadDownloads(*cpu_dst_address, size);
     ClearDownload(*cpu_dst_address, size);
     gpu_modified_ranges.Subtract(*cpu_dst_address, size);
 
@@ -2051,7 +2054,7 @@ template <class P>
 void BufferCache<P>::ClaimCpuWrites(std::span<const std::pair<DAddr, u64>> ranges) {
     for (const auto& [device_addr, size] : ranges) {
         if (IsRegionGpuModified(device_addr, size)) {
-            ClearDownload(device_addr, size);
+            ClearReplacedDownload(device_addr, size);
             gpu_modified_ranges.Subtract(device_addr, size);
         }
     }
@@ -3861,7 +3864,7 @@ void BufferCache<P>::DownloadBuffersMemory(std::span<const BufferId> buffer_ids)
                                                     }});
                     total_size_bytes += Common::AlignUp(end - start, 64);
                 });
-                ClearDownload(device_addr_out, range_size);
+                ClearReplacedDownload(device_addr_out, range_size);
                 gpu_modified_ranges.Subtract(device_addr_out, range_size);
             });
     }
@@ -3919,7 +3922,7 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
             };
 
             gpu_modified_ranges.ForEachInRange(device_addr_out, range_size, add_download);
-            ClearDownload(device_addr_out, range_size);
+            ClearReplacedDownload(device_addr_out, range_size);
             gpu_modified_ranges.Subtract(device_addr_out, range_size);
         });
     if (total_size_bytes == 0) {

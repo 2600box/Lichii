@@ -263,7 +263,9 @@ public:
     void CachedWriteMemory(DAddr device_addr, u64 size);
 
     /// Cancels pending downloads over the range (fences' and reads'), so none writes them over
-    /// newer bytes.
+    /// newer bytes. Those bytes reach guest memory later if at all (a GPU copy, a clear, an
+    /// inline or a discarded write), so read downloads already taken land first: their reads get
+    /// what a synchronous flush would have written.
     void ClearDownload(DAddr base_addr, u64 size);
 
     /// CPU writes collected but not yet applied (SetPendingCpuWrites).
@@ -659,6 +661,11 @@ private:
 
     /// ClearDownload, for the downloads taken at fences only.
     void ClearFenceDownloads(DAddr device_addr, u64 size);
+
+    /// ClearDownload where guest memory gets the newer bytes before a read can find the range: a
+    /// guest CPU write, or a synchronous download landing under `mutex`. Read downloads leave the
+    /// range rather than land.
+    void ClearReplacedDownload(DAddr device_addr, u64 size);
 
     /// Whether every GPU-modified byte in the range is in a read download's clean_ranges.
     [[nodiscard]] bool ReadDownloadsCover(DAddr device_addr, u64 size) const;
