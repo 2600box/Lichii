@@ -58,7 +58,7 @@ TEST_CASE("GPU-written page marking preserves boundaries and wrapping arithmetic
         {AddressLimit + PageSize, PageSize}, {Max, 0}, {Max, 1}, {Max, 2},
         {PageSize, Max}, {0, Max}, {1, Max}, {2, Max},
     };
-    for (const auto [address, size] : ranges) {
+    for (const auto& [address, size] : ranges) {
         CAPTURE(address, size);
         WrittenPages pages;
         pages.MarkReference(address, size);
