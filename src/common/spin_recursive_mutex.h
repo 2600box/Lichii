@@ -89,7 +89,7 @@ private:
     }
 
     void LockContended() {
-        if (g_count_spin_contention) [[unlikely]] {
+        if (g_count_spin_contention) {
             const auto start = std::chrono::steady_clock::now();
             const bool slept = Acquire();
             const auto ns = static_cast<std::uint64_t>(

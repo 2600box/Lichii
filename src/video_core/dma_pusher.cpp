@@ -87,6 +87,55 @@ void DmaPusher::DispatchCalls() {
     system.GPU().OnCommandListEnd();
 }
 
+namespace {
+
+enum class LiveReadReason : u32 {
+    Resumed,
+    SuspendedCopy,
+    SuspensionsChanged,
+    GpuWritten,
+    SafeDirty,
+    Count,
+};
+
+/// EDEN_NX2_LIVE_READ_CHECK: compares the words an entry was parsed from with its submit-time copy.
+void CheckLiveRead(LiveReadReason reason, const CommandListHeader& header,
+                   std::span<const CommandHeader> parsed, const CommandHeader* copy) {
+    constexpr size_t count = static_cast<size_t>(LiveReadReason::Count);
+    static std::array<std::atomic<u64>, count> checked{};
+    static std::array<std::atomic<u64>, count> differing{};
+    static std::atomic<u64> total_checked{};
+    static constexpr std::array<const char*, count> names{
+        "resumed entry", "copied during a suspension", "suspension count changed",
+        "GPU-written page", "safe read of dirty memory"};
+    const size_t r = static_cast<size_t>(reason);
+    u32 first = ~0U, words = 0;
+    for (u32 i = 0; i < parsed.size(); ++i) {
+        if (copy[i].argument != parsed[i].argument) {
+            first = std::min(first, i);
+            ++words;
+        }
+    }
+    ++checked[r];
+    const u64 n = total_checked.fetch_add(1) + 1;
+    if (words != 0 && differing[r].fetch_add(1) < 4) {
+        LOG_WARNING(HW_GPU,
+                    "Entry {:#x}+{:#x} parsed from memory ({}) differs from its submit-time copy "
+                    "in {} words, first at word {}",
+                    u64{header.addr}, u64{header.size}, names[r], words, first);
+    }
+    if ((n % 10000) == 0) {
+        for (size_t i = 0; i < count; ++i) {
+            LOG_INFO(HW_GPU,
+                     "Entries parsed from memory ({}): {} checked, {} differ from the "
+                     "submit-time copy",
+                     names[i], checked[i].load(), differing[i].load());
+        }
+    }
+}
+
+} // Anonymous namespace
+
 bool DmaPusher::Step() {
     if (!ib_enable || dma_pushbuffer.empty()) {
         return false;
@@ -240,58 +289,25 @@ bool DmaPusher::Step() {
             gpu_written,
             use_safe && memory_manager.IsMemoryDirty(dma_state.dma_get,
                                                      header.size * sizeof(u32)));
-        if (!submitted && dma_pushbuffer_subindex < command_list.submitted_offsets.size()) {
-            // An entry parsed from memory instead of its submit-time copy is the way a command
-            // ring the game already refilled gets read as this frame's commands (garbage methods,
-            // unbound subchannels, render targets of absurd size). Count how often the words
-            // differ, by the reason the copy was skipped. Off unless EDEN_NX2_LIVE_READ_CHECK is set.
-            enum Reason : u32 { Resumed, SuspendedCopy, SuspensionsChanged, GpuWritten, SafeDirty, Count };
-            static std::array<std::atomic<u64>, Count> checked{};
-            static std::array<std::atomic<u64>, Count> differing{};
-            static std::atomic<u64> total_checked{};
-            static constexpr std::array<const char*, Count> names{
-                "resumed entry", "copied during a suspension", "suspension count changed",
-                "GPU-written page", "safe read of dirty memory"};
-            static const bool check = std::getenv("EDEN_NX2_LIVE_READ_CHECK") != nullptr;
-            if (check) [[unlikely]] {
-                const Reason reason = command_resume_offset != 0                      ? Resumed
-                                      : (command_list.snapshot_suspensions & 1) != 0  ? SuspendedCopy
-                                      : command_list.snapshot_suspensions !=
-                                              suspensions.load(std::memory_order_acquire)
-                                          ? SuspensionsChanged
-                                      : gpu_written ? GpuWritten
-                                                    : SafeDirty;
-                std::vector<u32> live(header.size);
-                memory_manager.ReadBlockUnsafe(dma_state.dma_get, live.data(),
-                                               live.size() * sizeof(u32));
-                const CommandHeader* const copy = command_list.submitted_words.data() +
-                                                  command_list.submitted_offsets[dma_pushbuffer_subindex];
-                u32 first = ~0U, words = 0;
-                for (u32 i = 0; i < header.size; ++i) {
-                    if (copy[i].argument != live[i]) {
-                        first = std::min(first, i);
-                        ++words;
-                    }
-                }
-                ++checked[reason];
-                const u64 n = total_checked.fetch_add(1) + 1;
-                if (words != 0) {
-                    const u64 seen = differing[reason].fetch_add(1);
-                    if (seen < 4) {
-                        LOG_WARNING(HW_GPU,
-                                    "Entry {:#x}+{:#x} parsed from memory ({}) differs from its "
-                                    "submit-time copy in {} words, first at word {}",
-                                    u64{header.addr}, u64{header.size}, names[reason], words, first);
-                    }
-                }
-                if ((n % 10000) == 0) {
-                    for (u32 r = 0; r < Count; ++r) {
-                        LOG_INFO(HW_GPU, "Entries parsed from memory ({}): {} checked, {} differ from the submit-time copy",
-                                 names[r], checked[r].load(), differing[r].load());
-                    }
-                }
-            }
-        }
+        // An entry parsed from memory instead of its submit-time copy is the way a command
+        // ring the game already refilled gets read as this frame's commands (garbage methods,
+        // unbound subchannels, render targets of absurd size). EDEN_NX2_LIVE_READ_CHECK counts
+        // how often the words parsed differ from the copy, by the reason the copy was skipped.
+        static const bool live_read_check = std::getenv("EDEN_NX2_LIVE_READ_CHECK") != nullptr;
+        const CommandHeader* const submitted_copy =
+            live_read_check && !submitted &&
+                    dma_pushbuffer_subindex < command_list.submitted_offsets.size()
+                ? command_list.submitted_words.data() +
+                      command_list.submitted_offsets[dma_pushbuffer_subindex]
+                : nullptr;
+        const LiveReadReason live_read_reason =
+            submitted_copy == nullptr                       ? LiveReadReason::Count
+            : command_resume_offset != 0                    ? LiveReadReason::Resumed
+            : (command_list.snapshot_suspensions & 1) != 0  ? LiveReadReason::SuspendedCopy
+            : command_list.snapshot_suspensions != suspensions.load(std::memory_order_acquire)
+                ? LiveReadReason::SuspensionsChanged
+            : gpu_written ? LiveReadReason::GpuWritten
+                          : LiveReadReason::SafeDirty;
         if (submitted) {
             const std::span<const CommandHeader> commands{
                 command_list.submitted_words.data() +
@@ -304,6 +320,9 @@ bool DmaPusher::Step() {
             Tegra::Memory::GpuGuestMemory<Tegra::CommandHeader, Tegra::Memory::GuestMemoryFlags::SafeRead>headers(memory_manager, dma_state.dma_get, header.size, &command_headers);
             const std::span<const CommandHeader> commands{headers.data(), headers.size()};
             RecordParsedEntry(header, commands);
+            if (submitted_copy != nullptr) {
+                CheckLiveRead(live_read_reason, header, commands, submitted_copy);
+            }
             Nx2CmdPageDiag::CountEntry(Nx2CmdPageDiag::Path::Safe);
             command_resume_offset +=
                 ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
@@ -317,6 +336,9 @@ bool DmaPusher::Step() {
             }
             const std::span<const CommandHeader> commands{command_headers.data(), header.size};
             RecordParsedEntry(header, commands);
+            if (submitted_copy != nullptr) {
+                CheckLiveRead(live_read_reason, header, commands, submitted_copy);
+            }
             Nx2CmdPageDiag::CountEntry(Nx2CmdPageDiag::Path::Copy);
             command_resume_offset +=
                 ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
@@ -325,6 +347,9 @@ bool DmaPusher::Step() {
             Tegra::Memory::GpuGuestMemory<Tegra::CommandHeader, Tegra::Memory::GuestMemoryFlags::UnsafeRead>headers(memory_manager, dma_state.dma_get, header.size, &command_headers);
             const std::span<const CommandHeader> commands{headers.data(), headers.size()};
             RecordParsedEntry(header, commands);
+            if (submitted_copy != nullptr) {
+                CheckLiveRead(live_read_reason, header, commands, submitted_copy);
+            }
             Nx2CmdPageDiag::CountEntry(Nx2CmdPageDiag::Path::Slow);
             command_resume_offset +=
                 ProcessCommands(commands.subspan(command_resume_offset), command_resume_offset);
