@@ -184,21 +184,15 @@ std::unique_ptr<PipelineBinaries> PipelineBinaries::Open(const Device& device,
         !dld.vkGetPipelineBinaryDataKHR || !dld.vkReleaseCapturedPipelineDataKHR) {
         return nullptr;
     }
-    V2BootTrace("open_key");
-    VkPipelineBinaryKeyKHR global_key{.sType = VK_STRUCTURE_TYPE_PIPELINE_BINARY_KEY_KHR};
-    std::optional<std::vector<u8>> global_key_bytes;
-    if (dld.vkGetPipelineKeyKHR(*device.GetLogical(), nullptr, &global_key) != VK_SUCCESS ||
-        !(global_key_bytes = KeyBytes(global_key))) {
-        LOG_WARNING(Render_Vulkan, "Driver blobs: the driver gives no global pipeline key");
-        return nullptr;
-    }
     V2BootTrace("open_identity");
+    // No global key (vkGetPipelineKeyKHR without a create info): NVIDIA 610.88 overwrites the low
+    // half of RDI there, a register the caller keeps. The driver version and cache UUID name the
+    // driver, and each blob is checked against its pipeline's key.
     ShaderCacheV2::DeviceIdentity identity{
         .vendor_id = device.GetVendorID(),
         .device_id = device.GetDeviceID(),
         .driver_id = static_cast<u32>(device.GetDriverID()),
         .driver_version = device.GetDriverVersion(),
-        .global_key = std::move(*global_key_bytes),
     };
     std::ranges::copy(device.GetPipelineCacheUUID(), identity.pipeline_cache_uuid.begin());
     V2BootTrace("open_store");

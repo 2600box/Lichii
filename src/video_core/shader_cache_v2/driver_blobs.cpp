@@ -45,18 +45,14 @@ std::vector<u8> EncodeIdentity(const DeviceIdentity& identity) {
     out.Put(identity.driver_id);
     out.Put(identity.driver_version);
     out.Put(identity.pipeline_cache_uuid);
-    PutBytes(out, identity.global_key);
     return out.Take();
 }
 
 std::optional<DeviceIdentity> DecodeIdentity(std::span<const u8> payload) {
     PayloadReader in{payload};
     DeviceIdentity identity;
-    u32 key_size{};
     if (!in.Get(identity.vendor_id) || !in.Get(identity.device_id) || !in.Get(identity.driver_id) ||
-        !in.Get(identity.driver_version) || !in.Get(identity.pipeline_cache_uuid) ||
-        !in.Get(key_size) || key_size > MaxKeySize ||
-        !in.GetVector(identity.global_key, key_size) || !in.AtEnd()) {
+        !in.Get(identity.driver_version) || !in.Get(identity.pipeline_cache_uuid) || !in.AtEnd()) {
         return std::nullopt;
     }
     return identity;

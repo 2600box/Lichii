@@ -30,8 +30,6 @@ struct DeviceIdentity {
     u32 driver_id{};
     u32 driver_version{};
     std::array<u8, 16> pipeline_cache_uuid{};
-    /// The driver's global pipeline key (vkGetPipelineKeyKHR without a create info)
-    std::vector<u8> global_key;
 
     bool operator==(const DeviceIdentity&) const = default;
 };
