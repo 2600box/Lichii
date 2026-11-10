@@ -91,6 +91,7 @@ private:
     vk::Sampler point_sampler;
     vk::Sampler linear_sampler;
     std::atomic<bool> failed{};
+    std::atomic<bool> vram_warned{};
 };
 
 } // namespace Vulkan
