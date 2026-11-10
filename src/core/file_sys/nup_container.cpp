@@ -7,7 +7,6 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
-#include <cstdlib>
 #include <cstring>
 #include <list>
 #include <map>
@@ -533,8 +532,6 @@ bool NupContainer::IsNupFile(const VirtualFile& file) {
 NupContainer::NupContainer(VirtualFile file_, std::size_t memory_cache_cap,
                            std::filesystem::path spill_dir_)
     : file(std::move(file_)), cache(std::make_shared<NupDecompressCache>()) {
-    const char* fallback = std::getenv("EDEN_NUP_DAMAGED_FALLBACK");
-    damaged_fallback = fallback == nullptr || std::string_view{fallback} != "0";
     cache->cap = memory_cache_cap;
     cache->spill_dir = spill_dir_.empty()
                            ? Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) / "nup"
@@ -895,33 +892,40 @@ VirtualFile NupContainer::OpenFileAs(std::size_t file_index, const std::string& 
                                         name, cache, file_index);
 }
 
-bool NupContainer::LacksZstdMagic(std::size_t file_index) const {
+std::optional<bool> NupContainer::HasZstdMagic(std::size_t file_index) const {
     const FileNode& node = files[file_index];
     if (node.size < ZstdMagic.size()) {
-        return true;
+        return false;
     }
     std::array<u8, 4> head{};
     if (node.codec == CodecRaw) {
         if (file->Read(head.data(), head.size(), static_cast<std::size_t>(node.extent_offset)) !=
             head.size()) {
-            return true;
+            return std::nullopt;
         }
-        return head != ZstdMagic;
+        return head == ZstdMagic;
     }
-    // Decompress only the start of the extent: the first block yields the first bytes.
+    // The first block decodes the first bytes, and a block takes at most 128 KiB plus headers.
+    const std::size_t compressed_size =
+        static_cast<std::size_t>(std::min<u64>(node.extent_size, 132 * 1024));
     const auto compressed =
-        file->ReadBytes(static_cast<std::size_t>(std::min<u64>(node.extent_size, 128 * 1024)),
-                        static_cast<std::size_t>(node.extent_offset));
-    ZSTD_DStream* stream = ZSTD_createDStream();
+        file->ReadBytes(compressed_size, static_cast<std::size_t>(node.extent_offset));
+    std::unique_ptr<ZSTD_DCtx, decltype(&ZSTD_freeDCtx)> dctx{ZSTD_createDCtx(), &ZSTD_freeDCtx};
+    if (compressed.size() != compressed_size || !dctx) {
+        return std::nullopt;
+    }
+    ZSTD_DCtx_setParameter(dctx.get(), ZSTD_d_windowLogMax, ZSTD_WINDOWLOG_MAX);
     ZSTD_inBuffer input{compressed.data(), compressed.size(), 0};
     ZSTD_outBuffer output{head.data(), head.size(), 0};
     while (output.pos < output.size && input.pos < input.size) {
-        if (ZSTD_isError(ZSTD_decompressStream(stream, &output, &input))) {
-            break;
+        if (ZSTD_isError(ZSTD_decompressStream(dctx.get(), &output, &input))) {
+            return std::nullopt;
         }
     }
-    ZSTD_freeDStream(stream);
-    return output.pos < output.size || head != ZstdMagic;
+    if (output.pos < output.size) {
+        return std::nullopt;
+    }
+    return head == ZstdMagic;
 }
 
 std::optional<std::size_t> NupContainer::FindStandIn(std::size_t damaged,
@@ -929,7 +933,11 @@ std::optional<std::size_t> NupContainer::FindStandIn(std::size_t damaged,
     // Same directory and same last name token ("Nrm.bntx.zs"), longest common name prefix,
     // then the closest size: a texture of the same kind and, often, the same resolution.
     const std::string& name = files[damaged].name;
-    const std::string_view suffix = std::string_view{name}.substr(name.rfind('_') + 1);
+    const std::size_t separator = name.rfind('_');
+    if (separator == std::string::npos) {
+        return std::nullopt;
+    }
+    const std::string_view suffix = std::string_view{name}.substr(separator + 1);
     std::optional<std::size_t> best;
     std::size_t best_prefix = 0;
     u64 best_gap = 0;
@@ -947,7 +955,7 @@ std::optional<std::size_t> NupContainer::FindStandIn(std::size_t damaged,
         if (best && (prefix < best_prefix || (prefix == best_prefix && gap >= best_gap))) {
             continue;
         }
-        if (LacksZstdMagic(candidate)) {
+        if (HasZstdMagic(candidate) != true) {
             continue;
         }
         best = candidate;
@@ -970,8 +978,8 @@ void NupContainer::BuildDirTree(u32 dir_index, VectorVfsDirectory& out) {
             // A game .zs is already compressed, so the NUP only recompresses one that shrinks,
             // which a zeroed range does: only those members need their header checked.
             const FileNode& member = files[index];
-            if (damaged_fallback && member.codec == CodecZstd && member.name.ends_with(".zs") &&
-                LacksZstdMagic(index)) {
+            if (member.codec == CodecZstd && member.name.ends_with(".zs") &&
+                HasZstdMagic(index) == false) {
                 damaged.push_back(index);
             } else {
                 out.AddFile(OpenFile(index));
@@ -987,11 +995,16 @@ void NupContainer::BuildDirTree(u32 dir_index, VectorVfsDirectory& out) {
     for (const std::size_t index : damaged) {
         const std::optional<std::size_t> stand_in = FindStandIn(index, dir_files);
         if (!stand_in) {
-            LOG_WARNING(Loader, "NUP: {} has no zstd header and no stand-in", files[index].name);
+            LOG_WARNING(Loader,
+                        "NUP: {} has no zstd header, so this dump is damaged and the game cannot "
+                        "load the file. Dump the game again.",
+                        files[index].name);
             out.AddFile(OpenFile(index));
             continue;
         }
-        LOG_WARNING(Loader, "NUP: {} has no zstd header (damaged dump), serving {} in its place",
+        LOG_WARNING(Loader,
+                    "NUP: {} has no zstd header, so this dump is damaged. Serving {} in its place, "
+                    "a different texture; dump the game again to get the original.",
                     files[index].name, files[*stand_in].name);
         out.AddFile(OpenFileAs(*stand_in, files[index].name));
     }

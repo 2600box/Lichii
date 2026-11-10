@@ -135,8 +135,8 @@ private:
     bool ValidateDirTree() const;
     void BuildDirTree(u32 dir_index, VectorVfsDirectory& out);
     VirtualFile OpenFileAs(std::size_t file_index, const std::string& name);
-    /// True when a member named .zs does not start with the zstd frame magic.
-    bool LacksZstdMagic(std::size_t file_index) const;
+    /// Whether a member starts with the zstd frame magic; nothing when it cannot be read.
+    std::optional<bool> HasZstdMagic(std::size_t file_index) const;
     /// A sound sibling to serve in place of a damaged .zs member, if any.
     std::optional<std::size_t> FindStandIn(std::size_t damaged,
                                            std::span<const std::size_t> siblings) const;
@@ -160,11 +160,6 @@ private:
     std::vector<VirtualDir> romfs_dir_cache;
 
     std::shared_ptr<NupDecompressCache> cache;
-
-    /// Some dumps carry .zs members whose start is zeroed (the game cannot load them, so the
-    /// model using them is never built); serve a sibling instead. EDEN_NUP_DAMAGED_FALLBACK=0
-    /// serves the members as stored.
-    bool damaged_fallback{};
 };
 
 } // namespace FileSys
