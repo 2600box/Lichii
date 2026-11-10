@@ -103,11 +103,13 @@ bool TakeWarmBeforeStart();
 void RequestSkipWarm();
 bool TakeSkipWarm();
 
-/// The GPU driver, device and pipeline cache version pipelines were precached for.
+/// The GPU driver, device, pipeline cache version and graphics shader calls mode (1 when shared
+/// functions are built as calls) pipelines were precached for.
 struct DriverStamp {
     u32 driver{};
     u32 device_id{};
     u32 cache_version{};
+    u32 graphics_no_inline{};
 
     bool operator==(const DriverStamp&) const = default;
 };
@@ -117,7 +119,7 @@ struct DriverStamp {
 std::filesystem::path PrecachedPipelinesPath(u64 title_id);
 
 /// The pipeline key hashes in `file`, empty when there is none or it was written for another
-/// driver, device or cache version.
+/// driver, device, cache version or graphics shader calls mode.
 std::unordered_set<u64> ReadPrecachedPipelines(const std::filesystem::path& file,
                                                const DriverStamp& stamp);
 

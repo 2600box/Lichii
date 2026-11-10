@@ -152,6 +152,8 @@ TEST_CASE("ShaderPrecache: precached pipelines are kept per driver", "[video_cor
     REQUIRE(ShaderWarm::ReadPrecachedPipelines(file, {0x1235, 0x2206, 53}).empty());
     REQUIRE(ShaderWarm::ReadPrecachedPipelines(file, {0x1234, 0x2207, 53}).empty());
     REQUIRE(ShaderWarm::ReadPrecachedPipelines(file, {0x1234, 0x2206, 54}).empty());
+    // A change of the graphics shader calls mode precaches them again.
+    REQUIRE(ShaderWarm::ReadPrecachedPipelines(file, {0x1234, 0x2206, 53, 1}).empty());
 
     // A truncated file keeps the hashes it holds in full.
     std::filesystem::resize_file(file, std::filesystem::file_size(file) - 4);
