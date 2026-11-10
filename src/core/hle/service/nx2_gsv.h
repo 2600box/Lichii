@@ -508,7 +508,13 @@ private:
         LOG_DEBUG(Service, "nx2:gpu sub 101 start={:#x} last={:#x} [6]={:#x} [7]={:#x}", start,
                     last, b[6], b[7]);
         if (last > start) {
-            Nvidia::Devices::Nx2GpuMemoryRegistry::Get().Register(start, last - start + 1);
+            auto& registry = Nvidia::Devices::Nx2GpuMemoryRegistry::Get();
+            registry.Register(start, last - start + 1);
+            // The memory may be heap a destroyed handle had (see 102): what the caches still hold
+            // for it belongs to that memory, so the guest's bytes count from here.
+            for (const auto& [device, size] : registry.DeviceRangesOf(start, last - start + 1)) {
+                system.GPU().InvalidateRegion(device, size);
+            }
             // Two-page regions hold queue semaphores: GPU releases go to the second page, waits
             // read the first (see video_core/nx2.h).
             if (last - start + 1 == 0x2000) {
@@ -620,6 +626,28 @@ private:
                     DropGpuOnlyTiles(tile_address, tile_size, false);
                 }
                 auto& registry = Nvidia::Devices::Nx2GpuMemoryRegistry::Get();
+                // The heap reuse keeps the memory's device range, so drop the caches' copies once
+                // the GPU thread is past the work queued on it. GPU-written buffer data there is
+                // never downloaded on Switch 2 titles; a later flush would write it over the
+                // heap's new contents.
+                system.GPU().RunInOrder([this, handle, address, size,
+                                         devices = registry.DeviceRangesOf(address, size)] {
+                    auto* const rasterizer = system.GPU().Renderer().ReadRasterizer();
+                    bool gpu_written = false;
+                    for (const auto& [device, device_size] : devices) {
+                        gpu_written |= rasterizer->MustFlushRegion(
+                            device, device_size, VideoCommon::CacheType::BufferCache);
+                        system.GPU().InvalidateRegion(device, device_size);
+                    }
+                    // The first 32, then every 1000th.
+                    if (gpu_written && (++m_destroy_invalidations <= 32 ||
+                                        m_destroy_invalidations % 1000 == 0)) {
+                        LOG_INFO(Service,
+                                 "nx2:gpu 102 destroy of memory {} [{:#x}, +{:#x}] dropped "
+                                 "GPU-written buffer data before the heap reuses it ({} so far)",
+                                 handle, address, size, m_destroy_invalidations);
+                    }
+                });
                 const auto leftovers = registry.UnmapMemory(address, size);
                 for (const auto& [gpu_address, range_size] : leftovers) {
                     // Only what still reached this memory: a later map of the range is kept.
@@ -1158,6 +1186,7 @@ private:
     u64 m_tile_unmaps{};
     u64 m_tile_kept{}; ///< Maps into GPU-only regions that keep their own memory, left out
     u64 m_destroy_leftovers{}; ///< GPU ranges 102 unmapped besides the memory's own address
+    u64 m_destroy_invalidations{}; ///< 102s that dropped GPU-written buffer data (GPU thread)
     u64 m_tile_bytes{}; ///< Sparse region pages a tile maps right now
 
     void ApplySparseMapRequest(const SparseMapRequest& request) {

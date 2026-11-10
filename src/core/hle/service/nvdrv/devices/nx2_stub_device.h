@@ -296,6 +296,27 @@ public:
         return range.second + (cpu_address - start);
     }
 
+    /// The device ranges [cpu_address, +size) maps to, as (device address, size); parts no
+    /// address space mapped are left out.
+    std::vector<std::pair<u64, u64>> DeviceRangesOf(u64 cpu_address, u64 size) {
+        std::scoped_lock lk{device_mutex};
+        std::vector<std::pair<u64, u64>> result;
+        const u64 end = cpu_address + size;
+        auto it = device_ranges.upper_bound(cpu_address);
+        if (it != device_ranges.begin()) {
+            --it;
+        }
+        for (; it != device_ranges.end() && it->first < end; ++it) {
+            const auto& [start, range] = *it;
+            const u64 first = (std::max)(start, cpu_address);
+            const u64 last = (std::min)(start + range.first, end);
+            if (first < last) {
+                result.emplace_back(range.second + (first - start), last - first);
+            }
+        }
+        return result;
+    }
+
     std::optional<u64> GpuAddressOf(u32 handle, u64 offset) {
         std::scoped_lock lk{mutex};
         for (auto it = mappings.rbegin(); it != mappings.rend(); ++it) {

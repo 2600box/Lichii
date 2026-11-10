@@ -105,3 +105,15 @@ TEST_CASE("NX2 registry keeps no history unless the index check is on", "[video_
     registry.Unmap(0x8000, 0x1000, 213);
     REQUIRE(registry.Describe(0x8000, 0x1000) == "not mapped");
 }
+
+TEST_CASE("NX2 device ranges of memory stay inside what was mapped", "[video_core][nx2_mapping]") {
+    using Ranges = std::vector<std::pair<u64, u64>>;
+    Service::Nvidia::Devices::Nx2GpuMemoryRegistry registry{false};
+    registry.RecordDeviceRange(0x4000, 0x2000, 0x10000);
+    registry.RecordDeviceRange(0x7000, 0x1000, 0x40000);
+    REQUIRE((registry.DeviceRangesOf(0x4000, 0x2000) == Ranges{{0x10000, 0x2000}}));
+    REQUIRE((registry.DeviceRangesOf(0x5000, 0x3000) ==
+             Ranges{{0x11000, 0x1000}, {0x40000, 0x1000}}));
+    REQUIRE(registry.DeviceRangesOf(0x3000, 0x1000).empty());
+    REQUIRE(registry.DeviceRangesOf(0x6000, 0x1000).empty());
+}

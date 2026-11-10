@@ -275,7 +275,7 @@ bool IsPrimitiveRestartSupported(const Device& device, VkPrimitiveTopology topol
 // whose indices reach near 65535. Logs where the index and vertex buffers came from. Reads the
 // indices from guest memory, so indices the GPU wrote and hasn't flushed are not seen.
 void CheckIndexBuffer(Tegra::Engines::Maxwell3D& maxwell3d, Tegra::MemoryManager& memory,
-                      const GraphicsPipeline& pipeline) {
+                      BufferCache& buffer_cache, const GraphicsPipeline& pipeline) {
     using Clock = std::chrono::steady_clock;
     const auto& regs = maxwell3d.regs;
     const auto& draw_state = maxwell3d.draw_manager.draw_state;
@@ -309,9 +309,13 @@ void CheckIndexBuffer(Tegra::Engines::Maxwell3D& maxwell3d, Tegra::MemoryManager
     const u32 all_ones = index_size == 4 ? ~0u : (1u << (index_size * 8)) - 1;
     const bool restart = regs.primitive_restart.enabled != 0;
     u32 max_index = 0;
+    std::vector<u32> first_indices;
     for (u32 i = 0; i < count; ++i) {
         u32 index = 0;
         std::memcpy(&index, bytes.data() + i * index_size, index_size);
+        if (i < 8) {
+            first_indices.push_back(index);
+        }
         if (restart && (index == regs.primitive_restart.index || index == all_ones)) {
             continue;
         }
@@ -363,12 +367,23 @@ void CheckIndexBuffer(Tegra::Engines::Maxwell3D& maxwell3d, Tegra::MemoryManager
     }
     auto& registry = Service::Nvidia::Devices::Nx2GpuMemoryRegistry::Get();
     const u64 index_bytes = u64{index_buffer.count} * index_size;
+    // The indices above come from guest memory, which GPU writes reach only when flushed: a
+    // GPU-modified range draws from the buffer cache's copy instead.
+    const auto gpu_modified = [&](GPUVAddr gpu_address, u64 size) -> std::string_view {
+        const std::optional<DAddr> device_address = memory.GpuToCpuAddress(gpu_address, size);
+        if (!device_address) {
+            return "unmapped";
+        }
+        std::scoped_lock lock{buffer_cache.mutex};
+        return buffer_cache.IsRegionGpuModified(*device_address, size) ? "yes" : "no";
+    };
     if (!short_stream) {
         LOG_WARNING(HW_GPU,
                     "Index check: short index buffer reaches near 65535 (no vertex buffer bounds "
-                    "it): index buffer [{:#x}, +{:#x}] {} indices, max index {} + base vertex {}. "
-                    "Index buffer: {}",
+                    "it): index buffer [{:#x}, +{:#x}] {} indices, max index {} + base vertex {}, "
+                    "first indices {}, GPU-modified {}. Index buffer: {}",
                     address, index_bytes, index_buffer.count, max_index, base_vertex,
+                    fmt::join(first_indices, " "), gpu_modified(address, index_bytes),
                     registry.Describe(address, index_bytes));
         return;
     }
@@ -377,9 +392,12 @@ void CheckIndexBuffer(Tegra::Engines::Maxwell3D& maxwell3d, Tegra::MemoryManager
     LOG_WARNING(HW_GPU,
                 "Index check: indices reach past the vertex buffer: index buffer [{:#x}, +{:#x}] {} "
                 "indices, max index {} + base vertex {}, vertex buffer {} [{:#x}, +{:#x}] stride {} "
-                "holds {} vertices. Index buffer: {}. Vertex buffer: {}",
+                "holds {} vertices, first indices {}. GPU-modified: index buffer {}, vertex buffer "
+                "{}. Index buffer: {}. Vertex buffer: {}",
                 address, index_bytes, index_buffer.count, max_index, base_vertex, *short_stream,
                 stream.Address(), vertex_bytes, u32{stream.stride}, short_vertices,
+                fmt::join(first_indices, " "), gpu_modified(address, index_bytes),
+                gpu_modified(stream.Address(), vertex_bytes),
                 registry.Describe(address, index_bytes),
                 registry.Describe(stream.Address(), vertex_bytes));
 }
@@ -971,7 +989,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     mesh_draw = pipeline->IsMeshPipeline();
     if (is_indexed && !is_indirect && !mesh_draw &&
         Service::Nvidia::Devices::Nx2IndexCheckEnabled()) {
-        CheckIndexBuffer(*maxwell3d, *gpu_memory, *pipeline);
+        CheckIndexBuffer(*maxwell3d, *gpu_memory, buffer_cache, *pipeline);
     }
     // EDEN_NX2_NO_MESH=1: skip task/mesh draws as before they were supported (A/B comparisons).
     // EDEN_NX2_NO_MESH_FILE=<path>: skip them while that file exists (checked every 1024 draws),
