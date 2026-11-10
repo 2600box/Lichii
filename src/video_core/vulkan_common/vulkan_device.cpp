@@ -1801,26 +1801,27 @@ void Device::RemoveUnsuitableExtensions() {
         const bool usable = CanUseGraphicsPipelineLibraries(
             graphics_pipeline_library_features.graphicsPipelineLibrary,
             properties.graphics_pipeline_library.graphicsPipelineLibraryFastLinking,
-            properties.properties.limits.maxBoundDescriptorSets);
+            properties.properties.limits.maxBoundDescriptorSets,
+            properties.graphics_pipeline_library
+                .graphicsPipelineLibraryIndependentInterpolationDecoration);
         if (!usable) {
             LOG_WARNING(Render_Vulkan,
-                        "Nx2Perf gpl: feature {}, fast linking {}, descriptor sets {}/{}; "
+                        "Nx2Perf gpl: feature {}, fast linking {}, descriptor sets {}/{}, "
+                        "independent interpolation decoration {}; "
                         "falling back to monolithic pipelines",
                         graphics_pipeline_library_features.graphicsPipelineLibrary,
                         properties.graphics_pipeline_library.graphicsPipelineLibraryFastLinking,
                         properties.properties.limits.maxBoundDescriptorSets,
-                        GraphicsPipelineLibraryDescriptorSetCount);
+                        GraphicsPipelineLibraryDescriptorSetCount,
+                        properties.graphics_pipeline_library
+                            .graphicsPipelineLibraryIndependentInterpolationDecoration);
             loaded_extensions.erase(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
             loaded_extensions.erase(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
             graphics_pipeline_library_features.graphicsPipelineLibrary = VK_FALSE;
         }
         graphics_pipeline_library_enabled = usable;
         if (usable) {
-            LOG_INFO(Render_Vulkan,
-                     "Nx2Perf gpl: graphics pipeline libraries on (fast linking, independent "
-                     "interpolation decoration {})",
-                     properties.graphics_pipeline_library
-                         .graphicsPipelineLibraryIndependentInterpolationDecoration);
+            LOG_INFO(Render_Vulkan, "Nx2Perf gpl: graphics pipeline libraries on (fast linking)");
         }
     }
 

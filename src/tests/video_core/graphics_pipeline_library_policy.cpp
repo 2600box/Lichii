@@ -8,9 +8,15 @@
 TEST_CASE("Graphics libraries require five descriptor sets and fast linking",
           "[video_core][gpl]") {
     using Vulkan::CanUseGraphicsPipelineLibraries;
-    CHECK_FALSE(CanUseGraphicsPipelineLibraries(true, true, 4));
-    CHECK(CanUseGraphicsPipelineLibraries(true, true, 5));
-    CHECK(CanUseGraphicsPipelineLibraries(true, true, 32));
-    CHECK_FALSE(CanUseGraphicsPipelineLibraries(false, true, 32));
-    CHECK_FALSE(CanUseGraphicsPipelineLibraries(true, false, 32));
+    CHECK_FALSE(CanUseGraphicsPipelineLibraries(true, true, 4, true));
+    CHECK(CanUseGraphicsPipelineLibraries(true, true, 5, true));
+    CHECK(CanUseGraphicsPipelineLibraries(true, true, 32, true));
+    CHECK_FALSE(CanUseGraphicsPipelineLibraries(false, true, 32, true));
+    CHECK_FALSE(CanUseGraphicsPipelineLibraries(true, false, 32, true));
+}
+
+TEST_CASE("Graphics libraries require independent interpolation decoration",
+          "[video_core][gpl]") {
+    using Vulkan::CanUseGraphicsPipelineLibraries;
+    CHECK_FALSE(CanUseGraphicsPipelineLibraries(true, true, 32, false));
 }
