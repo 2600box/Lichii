@@ -5,6 +5,7 @@
 #include <set>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <catch2/catch_test_macros.hpp>
 #include "common/recommended_settings.h"
 
@@ -75,8 +76,19 @@ TEST_CASE("Previous settings come back after the recommended ones", "[recommende
     const std::string backup = settings->recommended_settings_backup.GetValue();
     CHECK_FALSE(backup.empty());
 
-    // Applying again changes nothing, so the first backup stays.
     CHECK(Settings::ApplyRecommendedSettings(*settings).empty());
+    CHECK(settings->recommended_settings_backup.GetValue() == backup);
+
+    // Applying again after a change by hand keeps the first backup, so restoring still goes back
+    // to the values from before the first time.
+    bool first = true;
+    Settings::ForEachRecommendedSetting(*settings, [&](auto& setting, const auto& value) {
+        if (std::exchange(first, false)) {
+            using Type = std::remove_cvref_t<decltype(value)>;
+            setting.SetValue(value == Type{} ? static_cast<Type>(1) : Type{});
+        }
+    });
+    CHECK(Settings::ApplyRecommendedSettings(*settings).size() == 1);
     CHECK(settings->recommended_settings_backup.GetValue() == backup);
 
     CHECK(Settings::RestorePreviousSettings(*settings).size() == count);

@@ -1027,7 +1027,7 @@ struct Values {
     Setting<bool> censor_username{linkage, true, "censor_username", Category::Miscellaneous};
     Setting<bool> first_launch{linkage, true, "first_launch", Category::Miscellaneous};
     // The recommended settings offer (common/recommended_settings.h): whether the user has
-    // answered it, and the values its settings held before they were last applied.
+    // answered it, and the values its settings held before they were applied.
     Setting<bool> recommended_settings_prompt_shown{
         linkage, false, "recommended_settings_prompt_shown", Category::Miscellaneous};
     Setting<std::string> recommended_settings_backup{

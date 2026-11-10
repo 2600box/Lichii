@@ -17,7 +17,7 @@ Before touching the settings, see the game boots with stock options. We try our 
 The first time Lichii starts, it asks whether to use the developer's recommended settings. They only change performance options on the Graphics (Advanced and Extras), System and CPU pages. Language, region, resolution, graphics backend and per-game settings stay as they are.
 
 - `Help/Apply Recommended Settings...`: Asks the same question again.
-- `Help/Restore My Previous Settings`: Puts back the values you had before the recommended ones. It appears once the recommended settings have changed something.
+- `Help/Restore My Previous Settings`: Puts back the values you had before you first applied the recommended ones. It appears once the recommended settings have changed something.
 
 Neither is available while a game runs.
 

@@ -89,9 +89,9 @@ bool RecommendedSettingsDialog::Ask(QWidget* parent) {
     box.setWindowTitle(tr("Recommended settings"));
     box.setText(tr("Do you want to use the recommended settings from the Lichii developer?"));
     box.setInformativeText(
-        tr("They improve performance for most games. Lichii keeps your current settings, so you "
-           "can go back at any time with Help > Restore My Previous Settings. Per-game settings "
-           "do not change."));
+        tr("They improve performance for most games. Lichii keeps your own settings, so you can "
+           "go back at any time with Help > Restore My Previous Settings. Per-game settings do "
+           "not change."));
     auto* const use = box.addButton(tr("Use recommended settings"), QMessageBox::AcceptRole);
     box.addButton(tr("Not now"), QMessageBox::RejectRole);
     box.setDefaultButton(use);

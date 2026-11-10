@@ -25,7 +25,7 @@ std::vector<RecommendedSettingChange> ApplyRecommendedSettings(Values& values) {
         setting.SetGlobal(using_global);
         changes.push_back({&setting, std::move(previous), setting.ToStringGlobal()});
     });
-    if (!changes.empty()) {
+    if (!changes.empty() && values.recommended_settings_backup.GetValue().empty()) {
         values.recommended_settings_backup = backup;
     }
     return changes;
