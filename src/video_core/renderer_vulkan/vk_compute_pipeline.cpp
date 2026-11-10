@@ -477,6 +477,7 @@ void ComputePipeline::RunBuild() {
     if (build_claimed.exchange(true)) {
         return;
     }
+    build_thread.store(std::this_thread::get_id(), std::memory_order::relaxed);
     build_task();
     build_task = nullptr;
 }
@@ -765,7 +766,6 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
         scheduler.Record([this](vk::CommandBuffer) {
             const VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::PipelineWait};
             const auto begin = std::chrono::steady_clock::now();
-            const bool claimed = !build_claimed.load(std::memory_order::relaxed);
             if (jobs) {
                 // Raised to NeedNow, and built here unless a driver worker builds it already
                 jobs->RunOrWait(job);
@@ -777,7 +777,10 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
             }
             std::unique_lock lock{build_mutex};
             build_condvar.wait(lock, [this] { return is_built.load(std::memory_order::relaxed); });
-            ReportDispatchWait(shader_hash, std::chrono::steady_clock::now() - begin, claimed);
+            // The thread that ran the build, read after the wait instead of guessed before it
+            const bool built_here =
+                build_thread.load(std::memory_order::relaxed) == std::this_thread::get_id();
+            ReportDispatchWait(shader_hash, std::chrono::steady_clock::now() - begin, built_here);
         });
     }
 

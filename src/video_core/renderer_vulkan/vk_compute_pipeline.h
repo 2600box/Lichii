@@ -12,6 +12,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <thread>
 
 #include <boost/container/small_vector.hpp>
 
@@ -153,6 +154,8 @@ private:
 
     std::function<void()> build_task;
     std::atomic_bool build_claimed{false};
+    /// The thread that ran build_task, for the first dispatch wait log
+    std::atomic<std::thread::id> build_thread{};
     std::condition_variable build_condvar;
     std::mutex build_mutex;
     std::atomic_bool is_built{false};
