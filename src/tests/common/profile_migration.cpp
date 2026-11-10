@@ -100,7 +100,7 @@ TEST_CASE("Copy verifies and stages every root before preparing or publishing",
         CHECK(GetState(f.state) == State::Pending);
         CHECK_FALSE(fs::exists(f.destination));
         CHECK_FALSE(fs::exists(new_cache));
-        CHECK(staged[0].source == f.source);
+        CHECK(fs::equivalent(staged[0].source, f.source));
         CHECK(Read(staged[1].destination / "shader/blob") == std::string(140000, 'x'));
         Write(staged[0].destination / "config/settings.ini", "remapped paths");
         fs::remove_all(staged[1].destination / "shader");
