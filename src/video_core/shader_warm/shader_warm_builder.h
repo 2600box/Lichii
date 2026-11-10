@@ -48,7 +48,8 @@ u64 ReadWarmCount(const std::filesystem::path& warm_file);
 /// What a marker records: the precache file's size and last-write time, its entry count, the GPU
 /// driver version and device ID, the pipeline cache version and whether shared shader functions
 /// were built as calls (compute bit 0, graphics bit 1: the SPIR-V the driver compiled differs).
-/// Graphics markers set bit 2 when the device has no dynamic vertex input (entries left out).
+/// Graphics markers set bits 2 and up for the dynamic states the device lacks (entries left
+/// out), bit 2 being dynamic vertex input.
 /// Markers written without the last field no longer match, so that precache runs once more.
 struct WarmStamp {
     u64 size{};

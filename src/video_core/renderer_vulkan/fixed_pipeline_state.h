@@ -299,6 +299,44 @@ static_assert(std::has_unique_object_representations_v<FixedPipelineState>);
 static_assert(std::is_trivially_copyable_v<FixedPipelineState>);
 static_assert(std::is_trivially_constructible_v<FixedPipelineState>);
 
+/// Dynamic states a pipeline key can be made for, one bit each. A key gets exactly the ones the
+/// device has (FixedPipelineState::Refresh), so a key naming one the device lacks never matches.
+namespace KeyDynamicState {
+constexpr u32 VertexInput = 1U << 0;
+constexpr u32 Extended = 1U << 1;
+constexpr u32 Extended2 = 1U << 2;
+constexpr u32 Extended2LogicOp = 1U << 3;
+constexpr u32 Extended3Blend = 1U << 4;
+constexpr u32 Extended3Enables = 1U << 5;
+constexpr u32 ColorWriteEnable = 1U << 6;
+} // namespace KeyDynamicState
+
+/// The KeyDynamicState bits `state` was made with.
+[[nodiscard]] inline u32 KeyDynamicStates(const FixedPipelineState& state) noexcept {
+    return (state.dynamic_vertex_input != 0 ? KeyDynamicState::VertexInput : 0U) |
+           (state.extended_dynamic_state != 0 ? KeyDynamicState::Extended : 0U) |
+           (state.extended_dynamic_state_2 != 0 ? KeyDynamicState::Extended2 : 0U) |
+           (state.extended_dynamic_state_2_logic_op != 0 ? KeyDynamicState::Extended2LogicOp
+                                                         : 0U) |
+           (state.extended_dynamic_state_3_blend != 0 ? KeyDynamicState::Extended3Blend : 0U) |
+           (state.extended_dynamic_state_3_enables != 0 ? KeyDynamicState::Extended3Enables
+                                                        : 0U) |
+           (state.color_write_enable_dynamic != 0 ? KeyDynamicState::ColorWriteEnable : 0U);
+}
+
+/// The KeyDynamicState bits the device lacks.
+[[nodiscard]] inline u32 MissingKeyDynamicStates(const DynamicFeatures& features) noexcept {
+    return (features.has_dynamic_vertex_input ? 0U : KeyDynamicState::VertexInput) |
+           (features.has_extended_dynamic_state ? 0U : KeyDynamicState::Extended) |
+           (features.has_extended_dynamic_state_2 ? 0U : KeyDynamicState::Extended2) |
+           (features.has_extended_dynamic_state_2_logic_op ? 0U
+                                                           : KeyDynamicState::Extended2LogicOp) |
+           (features.has_extended_dynamic_state_3_blend ? 0U : KeyDynamicState::Extended3Blend) |
+           (features.has_extended_dynamic_state_3_enables ? 0U
+                                                          : KeyDynamicState::Extended3Enables) |
+           (features.has_color_write_enable ? 0U : KeyDynamicState::ColorWriteEnable);
+}
+
 } // namespace Vulkan
 
 namespace std {
