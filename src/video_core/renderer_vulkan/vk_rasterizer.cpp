@@ -1959,7 +1959,9 @@ void RasterizerVulkan::Clear(u32 layer_count) {
         };
         const u32 clear_rt = regs.clear_surface.RT;
         u64 color_address = 0;
-        if (use_color && color_full_channels && clear_rt < Maxwell::NumRenderTargets) {
+        // Only attachments the framebuffer has get cleared below; others must not count.
+        if (use_color && color_full_channels && clear_rt < Maxwell::NumRenderTargets &&
+            framebuffer->HasAspectColorBit(clear_rt)) {
             const auto& rt = regs.rt[clear_rt];
             const u32 layers = rt.tile_mode.dim_control.Value() ==
                                        Maxwell::TileMode::DimensionControl::DefineArraySize
@@ -1976,8 +1978,10 @@ void RasterizerVulkan::Clear(u32 layer_count) {
         const bool depth_complete = !framebuffer->HasAspectDepthBit() || use_depth;
         const bool stencil_complete =
             !framebuffer->HasAspectStencilBit() || (use_stencil && regs.stencil_front_mask == 0xFF);
-        if ((use_depth || use_stencil) && depth_complete && stencil_complete &&
-            regs.zeta_enable != 0) {
+        const bool has_depth_stencil =
+            framebuffer->HasAspectDepthBit() || framebuffer->HasAspectStencilBit();
+        if ((use_depth || use_stencil) && has_depth_stencil && depth_complete &&
+            stencil_complete && regs.zeta_enable != 0) {
             const auto& zeta = regs.zeta_size;
             const u32 layers =
                 zeta.dim_control.Value() == Maxwell::ZetaSize::DimensionControl::DefineArraySize

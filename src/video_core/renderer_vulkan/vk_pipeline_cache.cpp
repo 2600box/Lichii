@@ -1817,6 +1817,10 @@ u64 WarmVariant(bool graphics) {
     };
     return Common::CityHash64(reinterpret_cast<const char*>(inputs.data()), sizeof(inputs));
 }
+
+/// Graphics marker bit 2: the device has no dynamic vertex input, so the warm-up left out the
+/// entries made for it. Turning the feature on later no longer matches, and they get built.
+constexpr u32 WarmWithoutDynamicVertexInput = 4;
 } // Anonymous namespace
 
 size_t PipelineCache::PrecacheGraphicsWarm(u64 title_id, size_t num_threads, size_t done_before,
@@ -1833,9 +1837,12 @@ size_t PipelineCache::PrecacheGraphicsWarm(u64 title_id, size_t num_threads, siz
     if (!std::filesystem::exists(warm_file, ec)) {
         return 0;
     }
+    const u32 mode_bits =
+        NoInlineBits() |
+        (dynamic_features.has_dynamic_vertex_input ? 0U : WarmWithoutDynamicVertexInput);
     const auto stamp = [&](u64 entries) {
         return ShaderWarm::CurrentWarmStamp(warm_file, entries, device.GetDriverVersion(),
-                                            device.GetDeviceID(), CACHE_VERSION, NoInlineBits(),
+                                            device.GetDeviceID(), CACHE_VERSION, mode_bits,
                                             LinkModeBits(device), WarmVariant(true));
     };
     const auto current = stamp(0);
@@ -1856,6 +1863,8 @@ size_t PipelineCache::PrecacheGraphicsWarm(u64 title_id, size_t num_threads, siz
         std::atomic<size_t> driver_failures{};
         /// Left out on purpose: vertex programs that read their position input.
         std::atomic<size_t> skipped_builds{};
+        /// Left out: entries made for dynamic vertex input on a device without it.
+        std::atomic<size_t> unsupported_builds{};
         size_t read{}; ///< Entries taken from the file (under the mutex)
         std::streamoff position{};
     };
@@ -1927,6 +1936,12 @@ size_t PipelineCache::PrecacheGraphicsWarm(u64 title_id, size_t num_threads, siz
                             break;
                         }
                     }
+                    // Its libraries would name a dynamic state this device does not have.
+                    if (key.state.dynamic_vertex_input != 0 &&
+                        !dynamic_features.has_dynamic_vertex_input) {
+                        reader.unsupported_builds.fetch_add(1);
+                        continue;
+                    }
                     env.SetGuessMissing(&guess);
                     WarmResult result = WarmResult::Unbuildable;
                     try {
@@ -1964,7 +1979,8 @@ size_t PipelineCache::PrecacheGraphicsWarm(u64 title_id, size_t num_threads, siz
                 break;
             }
             if (callback) {
-                const size_t done = reader.built + reader.failed_builds + reader.skipped_builds;
+                const size_t done = reader.built + reader.failed_builds + reader.skipped_builds +
+                                    reader.unsupported_builds;
                 // The builder's recorded count, or else an estimate from the bytes read.
                 size_t total = known_total;
                 if (total == 0) {
@@ -1993,10 +2009,11 @@ size_t PipelineCache::PrecacheGraphicsWarm(u64 title_id, size_t num_threads, siz
     }
     LOG_INFO(Render_Vulkan,
              "Shader precache: graphics programs {}, {} built, {} failed ({} by the driver), "
-             "{} skipped (vertex reads its position input), {:.1f} s",
+             "{} skipped (vertex reads its position input), {} skipped (made for dynamic vertex "
+             "input), {:.1f} s",
              stop_loading.stop_requested() ? "stopped" : (skipped ? "skipped" : "finished"),
              reader.built.load(), reader.failed_builds.load(), reader.driver_failures.load(),
-             reader.skipped_builds.load(),
+             reader.skipped_builds.load(), reader.unsupported_builds.load(),
              std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count());
     return reader.built;
 }
@@ -2093,7 +2110,9 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
         }
         const auto graphics_current = ShaderWarm::CurrentWarmStamp(
             graphics_file, 0, device.GetDriverVersion(), device.GetDeviceID(), CACHE_VERSION,
-            NoInlineBits(), LinkModeBits(device), WarmVariant(true));
+            NoInlineBits() |
+                (dynamic_features.has_dynamic_vertex_input ? 0U : WarmWithoutDynamicVertexInput),
+            LinkModeBits(device), WarmVariant(true));
         const auto graphics_marker = ShaderWarm::ReadWarmMarker(graphics_file);
         return !(graphics_current && graphics_marker &&
                  graphics_marker->Matches(*graphics_current));
