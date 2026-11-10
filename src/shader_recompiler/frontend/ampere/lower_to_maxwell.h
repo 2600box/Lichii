@@ -1604,10 +1604,12 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             const u32 binding = insn.Bits(54, 5), offset = insn.Bits(40, 14);
             const u32 data = insn.Bits(32, 8), coordinate = insn.Bits(24, 8);
             const u32 dimension = insn.Bits(61, 3);
+            const u32 coordinates = dimension == 5 ? 3U : 2U;
+            const u32 reserved = uses_uniform_bank ? high_uniform_base : 246U;
             // 3D (5, as in Orchid) reads x, y, z from three consecutive registers.
             if ((insn.words[2] & ~0x03800000U) != 0x0010e000 ||
                 (dimension != 1 && dimension != 3 && dimension != 5) || binding >= 18 ||
-                offset > 0x1fff || insn.Bits(59, 2) || coordinate > (dimension == 5 ? 252U : 253U))
+                offset > 0x1fff || insn.Bits(59, 2) || coordinate + coordinates > reserved)
                 return fail(index, "native surface reduction mode");
             if (result.required_texture_buffer != ~0U && result.required_texture_buffer != binding)
                 return fail(index, "native surface descriptor buffer conflict");
