@@ -337,6 +337,29 @@ constexpr u32 ColorWriteEnable = 1U << 6;
            (features.has_color_write_enable ? 0U : KeyDynamicState::ColorWriteEnable);
 }
 
+/// KeyDynamicState bits whose static form is color blend state only: the logic op (EDS2) and the
+/// color write masks (color write enable). Neither reaches the shader libraries nor the SPIR-V,
+/// and the key holds a valid static value for each (logic op 0 = CLEAR, the guest write masks),
+/// so a key made with one, built without it, gives the libraries a device lacking it builds at
+/// runtime. The other states leave their static fields unfilled in the key (cull mode, depth
+/// test, rasterizer discard, vertex attributes, blend equations, depth clamp), which the
+/// libraries would then bake in: those entries stay left out.
+constexpr u32 AdaptableKeyDynamicStates =
+    KeyDynamicState::Extended2LogicOp | KeyDynamicState::ColorWriteEnable;
+
+/// Clears from `state` the adaptable dynamic states (AdaptableKeyDynamicStates) in `missing`, the
+/// states the device lacks. Returns the bits it cleared.
+inline u32 AdaptKeyDynamicStates(FixedPipelineState& state, u32 missing) noexcept {
+    const u32 cleared = KeyDynamicStates(state) & missing & AdaptableKeyDynamicStates;
+    if ((cleared & KeyDynamicState::Extended2LogicOp) != 0) {
+        state.extended_dynamic_state_2_logic_op.Assign(0);
+    }
+    if ((cleared & KeyDynamicState::ColorWriteEnable) != 0) {
+        state.color_write_enable_dynamic.Assign(0);
+    }
+    return cleared;
+}
+
 } // namespace Vulkan
 
 namespace std {
