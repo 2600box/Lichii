@@ -105,6 +105,9 @@ TEST_CASE("ShaderPrecache: the marker matches only the same file and driver", "[
     REQUIRE(stamp->size == 8);
     REQUIRE(ShaderWarm::WriteWarmMarker(warm, *stamp));
     REQUIRE(ShaderWarm::WarmMarkerPath(warm) == dir.path / "warm-compute.done");
+    // The retry record has a marker of its own, next to the real one.
+    REQUIRE(ShaderWarm::WarmMarkerPath(ShaderWarm::WarmRetryPath(warm)) ==
+            dir.path / "warm-compute-retry.done");
 
     const auto marker = ShaderWarm::ReadWarmMarker(warm);
     REQUIRE(marker.has_value());

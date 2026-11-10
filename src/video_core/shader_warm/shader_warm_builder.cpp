@@ -332,6 +332,12 @@ fs::path WarmMarkerPath(const fs::path& warm_file) {
     return marker;
 }
 
+fs::path WarmRetryPath(const fs::path& warm_file) {
+    fs::path retry = warm_file;
+    retry.replace_filename(warm_file.stem().string() + "-retry" + warm_file.extension().string());
+    return retry;
+}
+
 fs::path WarmCountPath(const fs::path& warm_file) {
     fs::path count = warm_file;
     count.replace_extension(".count");
@@ -469,7 +475,8 @@ bool DeleteWarmFiles(u64 title_id, std::string* error) {
     for (const auto& warm : {ComputeWarmPath(title_id), GraphicsWarmPath(title_id)}) {
         fs::path tmp = warm;
         tmp += ".tmp";
-        for (const auto& path : {warm, WarmMarkerPath(warm), WarmCountPath(warm), tmp}) {
+        for (const auto& path : {warm, WarmMarkerPath(warm), WarmCountPath(warm), tmp,
+                                 WarmMarkerPath(WarmRetryPath(warm))}) {
             remove(path);
         }
     }

@@ -36,6 +36,12 @@ std::filesystem::path GraphicsWarmPath(u64 title_id);
 /// emulator after the precache ran to the end. A matching marker skips the precache at boot.
 std::filesystem::path WarmMarkerPath(const std::filesystem::path& warm_file);
 
+/// A stand-in name for `warm_file` (warm-graphics-retry.bin) whose marker, read and written with
+/// ReadWarmMarker and WriteWarmMarker, records a precache that ran to the end but had builds the
+/// driver refused. The next precache with the same stamp writes the real marker even when the
+/// driver refuses them again, so those entries are retried once, not at every start.
+std::filesystem::path WarmRetryPath(const std::filesystem::path& warm_file);
+
 /// Entry count of a precache file, written by the builder next to it (extension .count): the
 /// entry count and the file's size. The file format has no count, so the loading screen shows
 /// exact progress only with this.
