@@ -169,4 +169,17 @@ void GraphicsPipelineLibraryCache::Report() {
              total_libraries.load(std::memory_order_relaxed));
 }
 
+size_t GraphicsPipelineLibraryCache::PruneUnused() {
+    std::scoped_lock lock{mutex};
+    const size_t pruned = std::erase_if(entries, [](const auto& item) {
+        Entry& entry = *item.second;
+        std::scoped_lock entry_lock{entry.mutex};
+        // Only the map holds it. A thread that took the entry before this still holds the entry
+        // itself, and with it the library it returns.
+        return entry.done && entry.library && entry.library.use_count() == 1;
+    });
+    total_libraries.fetch_sub(pruned, std::memory_order_relaxed);
+    return pruned;
+}
+
 } // namespace Vulkan

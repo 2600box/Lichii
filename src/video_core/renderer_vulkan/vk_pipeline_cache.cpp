@@ -2432,6 +2432,11 @@ void PipelineCache::TickFrame() {
         std::erase_if(cleared_frames, [this](const auto& entry) {
             return entry.second + EvictCheckFrames < frame_count;
         });
+        if (device.IsExtGraphicsPipelineLibrarySupported()) {
+            // The libraries of pipelines destroyed since the last check (an evicted pipeline
+            // goes once the GPU is done with it, above).
+            graphics_libraries.PruneUnused();
+        }
     }
 }
 
