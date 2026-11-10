@@ -98,6 +98,26 @@ TEST_CASE("Previous settings come back after the recommended ones", "[recommende
     CHECK(GlobalValues(*settings) == before);
 }
 
+TEST_CASE("A backup from a shorter table takes the settings it does not hold",
+          "[recommended_settings]") {
+    auto settings = std::make_unique<Settings::Values>();
+    const std::size_t count = SetOtherPreferences(*settings);
+    const auto before = GlobalValues(*settings);
+    // As a build whose table held only the first setting leaves it after applying.
+    Settings::ForEachRecommendedSetting(*settings, [&](auto& setting, const auto& value) {
+        if (settings->recommended_settings_backup.GetValue().empty()) {
+            settings->recommended_settings_backup =
+                setting.GetLabel() + ":" + setting.ToStringGlobal();
+            setting.SetValue(value);
+        }
+    });
+    REQUIRE(count > 1);
+
+    CHECK(Settings::ApplyRecommendedSettings(*settings).size() == count - 1);
+    CHECK(Settings::RestorePreviousSettings(*settings).size() == count);
+    CHECK(GlobalValues(*settings) == before);
+}
+
 TEST_CASE("Recommended settings leave per-game values alone", "[recommended_settings]") {
     auto settings = std::make_unique<Settings::Values>();
     const std::size_t count = SetOtherPreferences(*settings);

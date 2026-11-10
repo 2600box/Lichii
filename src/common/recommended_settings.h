@@ -89,9 +89,9 @@ struct RecommendedSettingChange {
 
 /// Writes the recommended values to the global settings and returns the ones that changed.
 /// Per-game values, and whether a setting uses its per-game value, stay as they are. When
-/// something changed and there is no backup yet, recommended_settings_backup takes the previous
-/// value of every recommended setting. An existing backup stays until it is restored, so applying
-/// twice does not lose the values from before the first time.
+/// something changed, recommended_settings_backup takes the previous value of every recommended
+/// setting it does not hold yet. A value it holds stays until it is restored, so applying twice
+/// does not lose the values from before the first time.
 std::vector<RecommendedSettingChange> ApplyRecommendedSettings(Values& values);
 
 /// Puts back the global values recommended_settings_backup holds, clears it and returns the
