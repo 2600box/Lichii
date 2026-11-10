@@ -11,7 +11,6 @@
 #include <QSysInfo>
 #include <boost/algorithm/string/split.hpp>
 #include "common/fs/path_util.h"
-#include "common/game_presets.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "frontend_common/settings_generator.h"
@@ -547,9 +546,6 @@ MainWindow::MainWindow(bool has_broken_vulkan)
                 LibraryAppletParameters(0x010000000000100Dull, Service::AM::AppletId::QLaunch));
         }
     }
-
-    // Once the window is up and no game was started with it; else when that game stops.
-    QTimer::singleShot(0, this, &MainWindow::OfferRecommendedSettings);
 }
 
 MainWindow::~MainWindow() {
@@ -2109,26 +2105,6 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
         QtCommon::system->ApplySettings();
     }
 
-    if (title_id == Settings::MarioKartWorldProgramId && !asked_recommended_mkw_settings) {
-        asked_recommended_mkw_settings = true;
-        use_recommended_mkw_settings =
-            QMessageBox::question(
-                this, tr("Recommended Mario Kart World settings"),
-                tr("Use the recommended settings for Mario Kart World?\n\n"
-                   "Vulkan, 1x resolution, GPU Fast, asynchronous shaders, BC3, conservative VRAM, "
-                   "reactive flushing off, FIFO Relaxed VSync, handheld mode, ScaleForce, and "
-                   "FXAA.\n\n"
-                   "They apply to Mario Kart World until Lichii is closed. Your saved settings "
-                   "are not changed."),
-                QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes;
-        LOG_INFO(Config, "MKW recommended settings accepted: {}", use_recommended_mkw_settings);
-    }
-    if (Settings::ApplyMarioKartWorldPreset(Settings::values, title_id,
-                                          use_recommended_mkw_settings)) {
-        QtCommon::system->ApplySettings();
-        Settings::UpdateGPUAccuracy();
-        LOG_INFO(Config, "Applied recommended MKW settings after per-game configuration");
-    }
     PrepareShaderPrecache(title_id, std::filesystem::path{filename.toStdU16String()});
     Settings::LogSettings();
 
@@ -2566,7 +2542,6 @@ void MainWindow::OnEmulationStopped() {
     } else if (!boot_in_progress) {
         game_list->SetScanEnabled(true);
         game_list->PopulateAsync(UISettings::values.game_dirs);
-        QTimer::singleShot(0, this, &MainWindow::OfferRecommendedSettings);
     }
 }
 
@@ -4275,26 +4250,12 @@ void MainWindow::OnEdenDependencies() {
     depsDialog.exec();
 }
 
-void MainWindow::OfferRecommendedSettings() {
-    if (emulation_running || boot_in_progress || close_pending ||
-        Settings::values.recommended_settings_prompt_shown.GetValue()) {
-        return;
-    }
-    OnApplyRecommendedSettings();
-}
-
 void MainWindow::OnApplyRecommendedSettings() {
     if (emulation_running) {
         return;
     }
-    const bool accepted = RecommendedSettingsDialog::Ask(this);
-    if (emulation_running) {
-        // A game started behind the question; ask again when none runs.
-        return;
-    }
-    Settings::values.recommended_settings_prompt_shown = true;
-    if (!accepted) {
-        OnSaveConfig();
+    // A game can start behind the question; leave its settings alone then.
+    if (!RecommendedSettingsDialog::Ask(this) || emulation_running) {
         return;
     }
     const auto changes = Settings::ApplyRecommendedSettings(Settings::values);

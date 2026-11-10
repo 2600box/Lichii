@@ -347,31 +347,31 @@ TEST_CASE("A denied config status lookup is not seeded", "[config]") {
 }
 #endif
 
-TEST_CASE("The recommended settings offer and its backup persist in the config", "[config]") {
+TEST_CASE("The recommended settings backup persists in the config", "[config]") {
     ConfigDirectory directory;
     SECTION("New install") {}
     SECTION("Config from an older build") {
         directory.Write("qt-config.ini",
                         "[Renderer]\nasync_presentation=false\nasync_presentation\\default=false\n");
     }
+    SECTION("Config from a build that offered the recommended settings at startup") {
+        directory.Write("qt-config.ini", "[Miscellaneous]\nrecommended_settings_prompt_shown=true\n"
+                                         "recommended_settings_prompt_shown\\default=false\n");
+    }
     std::string backup;
     std::size_t changed = 0;
     {
         FileConfig config{std::string{"qt-config"}};
-        CHECK_FALSE(Settings::values.recommended_settings_prompt_shown.GetValue());
         CHECK(Settings::values.recommended_settings_backup.GetValue().empty());
         Settings::values.speed_limit.SetValue(150);
-        Settings::values.recommended_settings_prompt_shown = true;
         changed = Settings::ApplyRecommendedSettings(Settings::values).size();
         CHECK(changed > 0);
         backup = Settings::values.recommended_settings_backup.GetValue();
         config.SaveValues();
     }
-    Settings::values.recommended_settings_prompt_shown = false;
     Settings::values.recommended_settings_backup = std::string{};
     {
         FileConfig config{std::string{"qt-config"}};
-        CHECK(Settings::values.recommended_settings_prompt_shown.GetValue());
         CHECK(Settings::values.recommended_settings_backup.GetValue() == backup);
         CHECK(Settings::ApplyRecommendedSettings(Settings::values).empty());
         CHECK(Settings::RestorePreviousSettings(Settings::values).size() == changed);
@@ -380,7 +380,6 @@ TEST_CASE("The recommended settings offer and its backup persist in the config",
     }
     Settings::values.speed_limit.SetValue(100);
     FileConfig config{std::string{"qt-config"}};
-    CHECK(Settings::values.recommended_settings_prompt_shown.GetValue());
     CHECK(Settings::values.recommended_settings_backup.GetValue().empty());
     CHECK(Settings::values.speed_limit.GetValue() == 150);
 }
