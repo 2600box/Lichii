@@ -114,21 +114,43 @@ def tail_size(stage):
     return 16 if stage == 5 else 80 + (32 if stage == 3 else 0) + (92 if stage in (7, 8) else 0)
 
 
+# The emulator's VulkanPipelineCacheVersion and the older versions with its record layout
+# (CompatibleVulkanPipelineCacheVersions in src/video_core/pipeline_cache_files.h).
+RUNTIME_CACHE_VERSIONS = (54, 53, 52)
+
+
 def runtime_records(path):
-    """Graphics stage occurrences of a v53 cache file: (stage, hash, raw env, key)."""
+    """Graphics stage occurrences of a v53 cache file: (stage, hash, raw env, key).
+
+    Stops at the first incomplete record, like the emulator's reader: a session that crashed
+    can leave a partial one at the end."""
     data = Path(path).read_bytes()
+    if len(data) < 12 or data[:8] != b'yuzucach':
+        sys.exit(f'{path}: not a Vulkan pipeline cache (shader cache v2 logs are not read here)')
+    version, = struct.unpack_from('<I', data, 8)
+    if version not in RUNTIME_CACHE_VERSIONS:
+        print(f'{path}: cache version {version}, the emulator reads {RUNTIME_CACHE_VERSIONS}; '
+              f'reading it as the same record layout', file=sys.stderr)
     cur = 12
-    while cur < len(data):
+    while cur + 4 <= len(data):
         count, = struct.unpack_from('<I', data, cur)
         cur += 4
+        if count == 0:
+            return
         envs = []
         for _ in range(count):
+            if cur + ENV.size > len(data):
+                return
             begin = cur
             f = ENV.unpack_from(data, cur)
             p = cur + ENV.size + f[0] + f[1] * 8 + f[2] * 8 + f[3] * 12 + f[4] * 9 + f[5] * 12
             cur = p + tail_size(f[12])
+            if cur > len(data):
+                return
             envs.append((f[12], data[begin:cur]))
         size = 24 if envs[0][0] == 5 else KEY_SIZE
+        if cur + size > len(data):
+            return
         key = data[cur:cur + size]
         cur += size
         if envs[0][0] == 5:
