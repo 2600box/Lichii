@@ -10,6 +10,7 @@
 #include <atomic>
 
 #include "common/common_types.h"
+#include "common/settings_enums.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace Vulkan {
@@ -66,6 +67,9 @@ public:
     [[nodiscard]] VkSampler PointSampler() const noexcept {
         return *point_sampler;
     }
+    [[nodiscard]] VkSampler LinearSampler() const noexcept {
+        return *linear_sampler;
+    }
 
 private:
     void CreateOutput(VkExtent2D upscale_size);
@@ -75,13 +79,17 @@ private:
     MemoryAllocator& memory_allocator;
     void* set_options{}; ///< slDLSSSetOptions
     void* get_state{};   ///< slDLSSGetState
+    void* get_optimal_settings{};
     VkExtent2D render_extent{};
     VkExtent2D upscale_extent{};
     bool hdr_input = true;
+    Settings::NvidiaDlssQuality quality_mode{};
+    Settings::NvidiaDlssPreset model_preset{};
     u32 frame_index{};
     vk::Image output_image;
     vk::ImageView output_view;
     vk::Sampler point_sampler;
+    vk::Sampler linear_sampler;
     std::atomic<bool> failed{};
 };
 
