@@ -36,6 +36,12 @@ std::filesystem::path GraphicsWarmPath(u64 title_id);
 /// emulator after the precache ran to the end. A matching marker skips the precache at boot.
 std::filesystem::path WarmMarkerPath(const std::filesystem::path& warm_file);
 
+/// A stand-in name for `warm_file` (warm-graphics-retry.bin) whose marker, read and written with
+/// ReadWarmMarker and WriteWarmMarker, records a precache that ran to the end but had builds the
+/// driver refused. The next precache with the same stamp writes the real marker even when the
+/// driver refuses them again, so those entries are retried once, not at every start.
+std::filesystem::path WarmRetryPath(const std::filesystem::path& warm_file);
+
 /// Entry count of a precache file, written by the builder next to it (extension .count): the
 /// entry count and the file's size. The file format has no count, so the loading screen shows
 /// exact progress only with this.
@@ -116,11 +122,13 @@ bool TakeWarmBeforeStart();
 void RequestSkipWarm();
 bool TakeSkipWarm();
 
-/// The GPU driver, device and pipeline cache version pipelines were precached for.
+/// The GPU driver, device, pipeline cache version and graphics shader calls mode (1 when shared
+/// functions are built as calls) pipelines were precached for.
 struct DriverStamp {
     u32 driver{};
     u32 device_id{};
     u32 cache_version{};
+    u32 graphics_no_inline{};
 
     bool operator==(const DriverStamp&) const = default;
 };
@@ -130,7 +138,7 @@ struct DriverStamp {
 std::filesystem::path PrecachedPipelinesPath(u64 title_id);
 
 /// The pipeline key hashes in `file`, empty when there is none or it was written for another
-/// driver, device or cache version.
+/// driver, device, cache version or graphics shader calls mode.
 std::unordered_set<u64> ReadPrecachedPipelines(const std::filesystem::path& file,
                                                const DriverStamp& stamp);
 

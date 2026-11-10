@@ -1202,7 +1202,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     if (precache) {
         precached_pipelines = ShaderWarm::ReadPrecachedPipelines(
             ShaderWarm::PrecachedPipelinesPath(title_id),
-            {device.GetDriverVersion(), device.GetDeviceID(), CACHE_VERSION});
+            {device.GetDriverVersion(), device.GetDeviceID(), CACHE_VERSION,
+             GraphicsNoInline() ? 1U : 0U});
     }
     if (use_vulkan_pipeline_cache) {
         vulkan_pipeline_cache_filename =
@@ -1819,13 +1820,24 @@ u64 WarmVariant(bool graphics) {
 }
 
 /// Graphics marker bits 2 and up: the dynamic states the device lacks (KeyDynamicState bits),
-/// whose entries the warm-up left out. Gaining one later no longer matches, and they get built.
+/// whose entries the warm-up left out or built without them. Gaining one later no longer
+/// matches, and they get built for it.
 constexpr u32 WarmMissingDynamicStateShift = 2;
 // Bit 2 stays dynamic vertex input, so markers written before the other states still match.
 static_assert((KeyDynamicState::VertexInput << WarmMissingDynamicStateShift) == 4);
 
+/// Graphics marker bit 9, set when the device lacks an adaptable dynamic state
+/// (AdaptableKeyDynamicStates): its entries are now built without it, where earlier markers
+/// left them out (AMD on Windows: none of the built-in draw state entries was built). Those
+/// devices warm up once more; the markers of the others still match.
+constexpr u32 WarmAdaptedDynamicStateBit = 1U << 9;
+static_assert((KeyDynamicState::ColorWriteEnable << WarmMissingDynamicStateShift) <
+              WarmAdaptedDynamicStateBit);
+
 u32 GraphicsWarmModeBits(const DynamicFeatures& features) {
-    return NoInlineBits() | (MissingKeyDynamicStates(features) << WarmMissingDynamicStateShift);
+    const u32 missing = MissingKeyDynamicStates(features);
+    return NoInlineBits() | (missing << WarmMissingDynamicStateShift) |
+           ((missing & AdaptableKeyDynamicStates) != 0 ? WarmAdaptedDynamicStateBit : 0U);
 }
 } // Anonymous namespace
 
@@ -1870,6 +1882,9 @@ size_t PipelineCache::PrecacheGraphicsWarm(u64 title_id, size_t num_threads, siz
         std::atomic<size_t> skipped_builds{};
         /// Left out: entries made for a dynamic state this device lacks.
         std::atomic<size_t> unsupported_builds{};
+        /// Entries made for a dynamic state this device lacks, tried without it (also counted as
+        /// built or failed).
+        std::atomic<size_t> adapted_builds{};
         size_t read{}; ///< Entries taken from the file (under the mutex)
         std::streamoff position{};
     };
@@ -1944,10 +1959,18 @@ size_t PipelineCache::PrecacheGraphicsWarm(u64 title_id, size_t num_threads, siz
                             break;
                         }
                     }
+                    // Built without the dynamic states this device lacks when only color blend
+                    // state depends on them, as the runtime builds them here (the built-in draw
+                    // state defaults name color write enable and the EDS2 logic op).
+                    const bool adapted =
+                        AdaptKeyDynamicStates(key.state, missing_dynamic_states) != 0;
                     // Its libraries would name a dynamic state this device does not have.
                     if ((KeyDynamicStates(key.state) & missing_dynamic_states) != 0) {
                         reader.unsupported_builds.fetch_add(1);
                         continue;
+                    }
+                    if (adapted) {
+                        reader.adapted_builds.fetch_add(1);
                     }
                     env.SetGuessMissing(&guess);
                     WarmResult result = WarmResult::Unbuildable;
@@ -2006,21 +2029,32 @@ size_t PipelineCache::PrecacheGraphicsWarm(u64 title_id, size_t num_threads, siz
             std::this_thread::sleep_for(std::chrono::milliseconds{100});
         }
     }
-    const bool complete =
-        !reader.failed && reader.end == reader.position && reader.driver_failures == 0;
+    const bool complete = !reader.failed && reader.end == reader.position;
     if (complete && !skipped && !stop_loading.stop_requested()) {
-        // A precache with driver failures writes no marker, so the next start tries again.
         if (const auto stamp_done = stamp(reader.read)) {
-            ShaderWarm::WriteWarmMarker(warm_file, *stamp_done);
+            // Builds the driver refused are retried at the next start, once: a second run with
+            // the same stamp that ends with refusals too writes the marker anyway, so entries the
+            // driver always refuses do not rerun the whole warm-up at every start.
+            const auto retry_file = ShaderWarm::WarmRetryPath(warm_file);
+            const auto retried = ShaderWarm::ReadWarmMarker(retry_file);
+            const bool retried_before = retried && retried->Matches(*stamp_done);
+            if (reader.driver_failures == 0 || retried_before) {
+                ShaderWarm::WriteWarmMarker(warm_file, *stamp_done);
+                std::filesystem::remove(ShaderWarm::WarmMarkerPath(retry_file), ec);
+            } else {
+                ShaderWarm::WriteWarmMarker(retry_file, *stamp_done);
+            }
         }
     }
     LOG_INFO(Render_Vulkan,
              "Shader precache: graphics programs {}, {} built, {} failed ({} by the driver), "
              "{} skipped (vertex reads its position input), {} skipped (made for dynamic state "
-             "this device lacks), {:.1f} s",
+             "this device lacks), {} adapted (made for color write enable or the EDS2 logic op, "
+             "which this device lacks: tried without it), {:.1f} s",
              stop_loading.stop_requested() ? "stopped" : (skipped ? "skipped" : "finished"),
              reader.built.load(), reader.failed_builds.load(), reader.driver_failures.load(),
              reader.skipped_builds.load(), reader.unsupported_builds.load(),
+             reader.adapted_builds.load(),
              std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count());
     return reader.built;
 }
@@ -2206,7 +2240,9 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
     if (precached.size() != precached_before) {
         ShaderWarm::WritePrecachedPipelines(
             ShaderWarm::PrecachedPipelinesPath(title_id),
-            {device.GetDriverVersion(), device.GetDeviceID(), CACHE_VERSION}, precached);
+            {device.GetDriverVersion(), device.GetDeviceID(), CACHE_VERSION,
+             GraphicsNoInline() ? 1U : 0U},
+            precached);
     }
     if (!stop_loading.stop_requested() && total_built != 0) {
         // Without this, the builds reach the file only at the next boot, game change or clean
@@ -2484,6 +2520,11 @@ void PipelineCache::TickFrame() {
         std::erase_if(cleared_frames, [this](const auto& entry) {
             return entry.second + EvictCheckFrames < frame_count;
         });
+        if (device.IsExtGraphicsPipelineLibrarySupported()) {
+            // The libraries of pipelines destroyed since the last check (an evicted pipeline
+            // goes once the GPU is done with it, above).
+            graphics_libraries.PruneUnused();
+        }
     }
 }
 

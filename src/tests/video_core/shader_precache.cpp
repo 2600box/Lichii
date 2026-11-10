@@ -105,6 +105,9 @@ TEST_CASE("ShaderPrecache: the marker matches only the same file and driver", "[
     REQUIRE(stamp->size == 8);
     REQUIRE(ShaderWarm::WriteWarmMarker(warm, *stamp));
     REQUIRE(ShaderWarm::WarmMarkerPath(warm) == dir.path / "warm-compute.done");
+    // The retry record has a marker of its own, next to the real one.
+    REQUIRE(ShaderWarm::WarmMarkerPath(ShaderWarm::WarmRetryPath(warm)) ==
+            dir.path / "warm-compute-retry.done");
 
     const auto marker = ShaderWarm::ReadWarmMarker(warm);
     REQUIRE(marker.has_value());
@@ -156,6 +159,27 @@ TEST_CASE("ShaderPrecache: a marker written before the variant is not read", "[v
     REQUIRE_FALSE(ShaderWarm::ReadWarmMarker(warm).has_value());
 }
 
+TEST_CASE("ShaderPrecache: the marker records the shader calls mode", "[video_core]") {
+    TempDir dir;
+    const auto warm = dir.path / "warm-compute.bin";
+    WriteBytes(warm, "precache");
+
+    const auto stamp = ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53, 1);
+    REQUIRE(stamp.has_value());
+    REQUIRE(ShaderWarm::WriteWarmMarker(warm, *stamp));
+    const auto marker = ShaderWarm::ReadWarmMarker(warm);
+    REQUIRE(marker.has_value());
+    REQUIRE(marker->no_inline == 1);
+    REQUIRE(marker->Matches(*ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53, 1)));
+    REQUIRE_FALSE(marker->Matches(*ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53, 0)));
+    REQUIRE_FALSE(marker->Matches(*ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53, 2)));
+
+    // A marker from before the mode was recorded (six fields) no longer reads, so the precache
+    // runs once more.
+    WriteBytes(ShaderWarm::WarmMarkerPath(warm), "8 1 12 4660 8710 53\n");
+    REQUIRE_FALSE(ShaderWarm::ReadWarmMarker(warm).has_value());
+}
+
 TEST_CASE("ShaderPrecache: precached pipelines are kept per driver", "[video_core]") {
     TempDir dir;
     const auto file = dir.path / "precache-graphics.bin";
@@ -168,6 +192,8 @@ TEST_CASE("ShaderPrecache: precached pipelines are kept per driver", "[video_cor
     REQUIRE(ShaderWarm::ReadPrecachedPipelines(file, {0x1235, 0x2206, 53}).empty());
     REQUIRE(ShaderWarm::ReadPrecachedPipelines(file, {0x1234, 0x2207, 53}).empty());
     REQUIRE(ShaderWarm::ReadPrecachedPipelines(file, {0x1234, 0x2206, 54}).empty());
+    // A change of the graphics shader calls mode precaches them again.
+    REQUIRE(ShaderWarm::ReadPrecachedPipelines(file, {0x1234, 0x2206, 53, 1}).empty());
 
     // A truncated file keeps the hashes it holds in full.
     std::filesystem::resize_file(file, std::filesystem::file_size(file) - 4);
@@ -327,6 +353,57 @@ TEST_CASE("ShaderPrecache: graphics entries made for a dynamic state the device 
 
     // Dynamic vertex input keeps the lowest bit: graphics marker bit 2 from earlier markers.
     REQUIRE(KeyDynamicState::VertexInput == 1);
+}
+
+TEST_CASE("ShaderPrecache: graphics entries are built without color write enable or the EDS2 "
+          "logic op when the device lacks them",
+          "[video_core]") {
+    namespace KeyDynamicState = Vulkan::KeyDynamicState;
+    // The built-in draw state defaults: EDS1, EDS2, the EDS2 logic op, dynamic vertex input and
+    // color write enable.
+    Vulkan::FixedPipelineState state;
+    std::memset(&state, 0, sizeof(state));
+    state.extended_dynamic_state.Assign(1);
+    state.extended_dynamic_state_2.Assign(1);
+    state.extended_dynamic_state_2_logic_op.Assign(1);
+    state.dynamic_vertex_input.Assign(1);
+    state.color_write_enable_dynamic.Assign(1);
+    const u32 made_with = Vulkan::KeyDynamicStates(state);
+
+    // A device with all of them: nothing changes.
+    REQUIRE(Vulkan::AdaptKeyDynamicStates(state, 0) == 0);
+    REQUIRE(Vulkan::KeyDynamicStates(state) == made_with);
+
+    // A device without color write enable and the EDS2 logic op (AMD on Windows): both cleared,
+    // the entry no longer names a state the device lacks.
+    Vulkan::DynamicFeatures features{};
+    features.has_dynamic_vertex_input = true;
+    features.has_extended_dynamic_state = true;
+    features.has_extended_dynamic_state_2 = true;
+    features.has_extended_dynamic_state_3_blend = true;
+    features.has_extended_dynamic_state_3_enables = true;
+    const u32 missing = Vulkan::MissingKeyDynamicStates(features);
+    REQUIRE(missing == (KeyDynamicState::Extended2LogicOp | KeyDynamicState::ColorWriteEnable));
+    REQUIRE(Vulkan::AdaptKeyDynamicStates(state, missing) == missing);
+    REQUIRE(state.extended_dynamic_state_2_logic_op.Value() == 0U);
+    REQUIRE(state.color_write_enable_dynamic.Value() == 0U);
+    REQUIRE((Vulkan::KeyDynamicStates(state) & missing) == 0);
+    REQUIRE(Vulkan::KeyDynamicStates(state) == (made_with & ~missing));
+
+    // The states whose static fields the key leaves unfilled stay: those entries are left out.
+    Vulkan::FixedPipelineState other;
+    std::memset(&other, 0, sizeof(other));
+    other.extended_dynamic_state.Assign(1);
+    other.extended_dynamic_state_2.Assign(1);
+    other.extended_dynamic_state_3_blend.Assign(1);
+    other.extended_dynamic_state_3_enables.Assign(1);
+    other.dynamic_vertex_input.Assign(1);
+    constexpr u32 kept = KeyDynamicState::VertexInput | KeyDynamicState::Extended |
+                         KeyDynamicState::Extended2 | KeyDynamicState::Extended3Blend |
+                         KeyDynamicState::Extended3Enables;
+    REQUIRE(Vulkan::AdaptKeyDynamicStates(other, kept) == 0);
+    REQUIRE(Vulkan::KeyDynamicStates(other) == kept);
+    REQUIRE((kept & Vulkan::AdaptableKeyDynamicStates) == 0);
 }
 
 TEST_CASE("ShaderPrecache: draw state guesses come from the v2 log, else the older cache",
