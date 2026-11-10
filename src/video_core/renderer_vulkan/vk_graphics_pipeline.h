@@ -163,6 +163,10 @@ public:
         return stage_infos[0].is_task || stage_infos[0].is_mesh;
     }
 
+    [[nodiscard]] bool LoadsGenericAttribute(size_t index) const noexcept {
+        return stage_infos[0].loads.Generic(index);
+    }
+
     /// Mesh pipeline drawn through the compute emulation (MeshEmulationSetup).
     [[nodiscard]] bool IsEmulatedMesh() const noexcept {
         return mesh_emulation.has_value();
