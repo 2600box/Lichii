@@ -355,6 +355,57 @@ TEST_CASE("ShaderPrecache: graphics entries made for a dynamic state the device 
     REQUIRE(KeyDynamicState::VertexInput == 1);
 }
 
+TEST_CASE("ShaderPrecache: graphics entries are built without color write enable or the EDS2 "
+          "logic op when the device lacks them",
+          "[video_core]") {
+    namespace KeyDynamicState = Vulkan::KeyDynamicState;
+    // The built-in draw state defaults: EDS1, EDS2, the EDS2 logic op, dynamic vertex input and
+    // color write enable.
+    Vulkan::FixedPipelineState state;
+    std::memset(&state, 0, sizeof(state));
+    state.extended_dynamic_state.Assign(1);
+    state.extended_dynamic_state_2.Assign(1);
+    state.extended_dynamic_state_2_logic_op.Assign(1);
+    state.dynamic_vertex_input.Assign(1);
+    state.color_write_enable_dynamic.Assign(1);
+    const u32 made_with = Vulkan::KeyDynamicStates(state);
+
+    // A device with all of them: nothing changes.
+    REQUIRE(Vulkan::AdaptKeyDynamicStates(state, 0) == 0);
+    REQUIRE(Vulkan::KeyDynamicStates(state) == made_with);
+
+    // A device without color write enable and the EDS2 logic op (AMD on Windows): both cleared,
+    // the entry no longer names a state the device lacks.
+    Vulkan::DynamicFeatures features{};
+    features.has_dynamic_vertex_input = true;
+    features.has_extended_dynamic_state = true;
+    features.has_extended_dynamic_state_2 = true;
+    features.has_extended_dynamic_state_3_blend = true;
+    features.has_extended_dynamic_state_3_enables = true;
+    const u32 missing = Vulkan::MissingKeyDynamicStates(features);
+    REQUIRE(missing == (KeyDynamicState::Extended2LogicOp | KeyDynamicState::ColorWriteEnable));
+    REQUIRE(Vulkan::AdaptKeyDynamicStates(state, missing) == missing);
+    REQUIRE(state.extended_dynamic_state_2_logic_op.Value() == 0U);
+    REQUIRE(state.color_write_enable_dynamic.Value() == 0U);
+    REQUIRE((Vulkan::KeyDynamicStates(state) & missing) == 0);
+    REQUIRE(Vulkan::KeyDynamicStates(state) == (made_with & ~missing));
+
+    // The states whose static fields the key leaves unfilled stay: those entries are left out.
+    Vulkan::FixedPipelineState other;
+    std::memset(&other, 0, sizeof(other));
+    other.extended_dynamic_state.Assign(1);
+    other.extended_dynamic_state_2.Assign(1);
+    other.extended_dynamic_state_3_blend.Assign(1);
+    other.extended_dynamic_state_3_enables.Assign(1);
+    other.dynamic_vertex_input.Assign(1);
+    constexpr u32 kept = KeyDynamicState::VertexInput | KeyDynamicState::Extended |
+                         KeyDynamicState::Extended2 | KeyDynamicState::Extended3Blend |
+                         KeyDynamicState::Extended3Enables;
+    REQUIRE(Vulkan::AdaptKeyDynamicStates(other, kept) == 0);
+    REQUIRE(Vulkan::KeyDynamicStates(other) == kept);
+    REQUIRE((kept & Vulkan::AdaptableKeyDynamicStates) == 0);
+}
+
 TEST_CASE("ShaderPrecache: draw state guesses come from the v2 log, else the older cache",
           "[video_core]") {
     namespace V2 = VideoCommon::ShaderCacheV2;
