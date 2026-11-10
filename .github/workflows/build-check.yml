@@ -203,6 +203,147 @@ jobs:
             .ccache
           key: gcc13-qt683-${{ runner.os }}-${{ github.sha }}
 
+  # Test branches only: the same AppImage for Linux ARM64 (aarch64), built on an ARM runner with
+  # the release targets only. Qt and the configure flags follow release-binaries.yml's linux-aarch64.
+  linux-arm64-appimage:
+    name: Linux ARM64 AppImage
+    needs: changes
+    if: needs.changes.outputs.build == 'true' && startsWith(github.ref, 'refs/heads/test/')
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 1G
+      CCACHE_COMPILERCHECK: content
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf gcc-13 g++-13 git glslang-tools libglu1-mesa-dev \
+            libpulse-dev libtool libudev-dev libxkbcommon-x11-0 \
+            mesa-common-dev nasm ninja-build qt6-base-private-dev \
+            qt6-charts-dev qt6-tools-dev libavfilter-dev libavcodec-dev \
+            libswscale-dev pkg-config zlib1g-dev libva-dev libvdpau-dev \
+            spirv-tools spirv-headers libusb-1.0-0-dev \
+            libboost-dev libboost-fiber-dev libboost-context-dev \
+            libopus-dev libasound2-dev ccache pipx \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1
+          pipx install cmake==4.4.4
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@b344308e4483fc892e0d27b3cd1b173ebdd95f06
+        with:
+          version: "6.8.3"
+          host: linux_arm64
+          target: desktop
+          arch: linux_gcc_arm64
+          modules: qtcharts
+          cache: true
+
+      - name: Restore dependencies and compiler objects
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: |
+            .cache/cpm
+            .ccache
+          key: gcc13-qt683-arm64-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            gcc13-qt683-arm64-${{ runner.os }}-
+
+      - name: Configure release targets
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc-13 \
+            -DCMAKE_CXX_COMPILER=g++-13 \
+            -DBUILD_TESTING=OFF \
+            -DYUZU_TESTS=OFF \
+            -DENABLE_QT=ON \
+            -DENABLE_QT_TRANSLATION=ON \
+            -DYUZU_CMD=ON \
+            -DYUZU_ROOM=OFF \
+            -DYUZU_ROOM_STANDALONE=OFF \
+            -DYUZU_USE_BUNDLED_QT=OFF \
+            "-DCMAKE_PREFIX_PATH=$QT_ROOT_DIR" \
+            -DYUZU_USE_BUNDLED_SDL3=ON \
+            -DVulkanHeaders_FORCE_BUNDLED=ON \
+            -DVulkanUtilityLibraries_FORCE_BUNDLED=ON \
+            -DENABLE_UPDATE_CHECKER=ON \
+            -DUSE_DISCORD_PRESENCE=OFF \
+            -DUSE_CCACHE=ON
+
+      - name: Build release targets
+        run: |
+          ccache --zero-stats
+          cmake --build build --parallel "$(nproc)"
+          ccache --show-stats
+
+      - name: Package Linux ARM64 AppImage
+        run: |
+          set -euo pipefail
+          test -x build/bin/lichii
+          test -x build/bin/eden-cli
+          test -f build/bin/libnxformat.so
+          strip build/bin/lichii build/bin/eden-cli
+          tools="$RUNNER_TEMP/linuxdeploy"
+          mkdir -p "$tools"
+          arch=$(uname -m)
+          test "$arch" = aarch64
+          curl -fsSL -o "$tools/linuxdeploy-$arch.AppImage" \
+          https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-$arch.AppImage
+          curl -fsSL -o "$tools/linuxdeploy-plugin-qt-$arch.AppImage" \
+          https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-$arch.AppImage
+          chmod +x "$tools"/*.AppImage
+          # The desktop file names its icon io.github.zortos293.lichii.
+          icon="$RUNNER_TEMP/io.github.zortos293.lichii.png"
+          cp dist/lichii.png "$icon"
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          export QMAKE="$QT_ROOT_DIR/bin/qmake"
+          export EXTRA_QT_MODULES=waylandcompositor
+          export EXTRA_PLATFORM_PLUGINS='libqwayland-egl.so;libqwayland-generic.so'
+          export LDAI_VERSION="test-${GITHUB_SHA::10}"
+          export LDAI_OUTPUT="lichii-${GITHUB_SHA}-linux-aarch64.AppImage"
+          export OUTPUT="$LDAI_OUTPUT"
+          export ARCH="$arch"
+          mkdir -p AppDir/usr/bin
+          cp build/bin/nx2_switches.txt AppDir/usr/bin/
+          "$tools/linuxdeploy-$arch.AppImage" --appdir AppDir \
+            --executable build/bin/lichii \
+            --executable build/bin/eden-cli \
+            --desktop-file dist/io.github.zortos293.lichii.desktop \
+            --icon-file "$icon" \
+            --plugin qt \
+            --output appimage
+          test -s "$LDAI_OUTPUT"
+          ls -la "$LDAI_OUTPUT"
+          ls AppDir/usr/lib
+          mkdir -p appimage
+          mv "$LDAI_OUTPUT" appimage/
+
+      - name: Upload the Linux ARM64 AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: lichii-linux-arm64-appimage-${{ github.sha }}
+          path: appimage/
+          retention-days: 7
+
+      - name: Save dependencies and compiler objects
+        if: always()
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: |
+            .cache/cpm
+            .ccache
+          key: gcc13-qt683-arm64-${{ runner.os }}-${{ github.sha }}
+
   windows-clang-cl:
     name: Windows clang-cl production build and tests
     needs: changes
