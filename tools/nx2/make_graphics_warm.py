@@ -304,7 +304,12 @@ def main():
             failures[(program['stage'], err or 'no record')] += 1
             continue
         blob = (corpus / program['code']).read_bytes()
-        instructions, offsets, texture_buffer = read_override(record)
+        try:
+            instructions, offsets, texture_buffer = read_override(record)
+        except (ValueError, struct.error) as ex:
+            # A truncated record (a sweep killed while writing it) fails this program only.
+            failures[(program['stage'], f'bad record: {type(ex).__name__}')] += 1
+            continue
         code = runtime_code(blob[:80], instructions, offsets)
         archives = {o['source'].split('romfs')[-1] for o in program['origins']}
         built.append(dict(program=program, stage=stage, code=code, tb=texture_buffer,
@@ -373,7 +378,8 @@ def main():
 
     def generated(i):
         b = matched[names[i]]
-        return i, sweep(args.sweep, scratch, f'g{i}', b['env'], b['key'], True)
+        # Normalized like the reference keys, so the template's render target does not count.
+        return i, sweep(args.sweep, scratch, f'g{i}', b['env'], normalize(b['key']), True)
 
     with ThreadPoolExecutor(args.jobs) as pool:
         refs = collections.defaultdict(set)
