@@ -11,6 +11,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "common/fs/profile_migration.h"
+#include "common/fs/symlink.h"
 
 #ifndef _WIN32
 #include <sys/wait.h>
@@ -318,8 +319,7 @@ TEST_CASE("A failed second link removes only this attempt's staged links", "[pro
         if (attempted.size() == 2) {
             return false;
         }
-        fs::create_directory_symlink(source, link);
-        return true;
+        return Common::FS::CreateSymlink(source, link);
     };
     REQUIRE_THROWS(RunImport(plan));
     REQUIRE(attempted.size() == 2);
@@ -340,7 +340,7 @@ TEST_CASE("Link never invokes source-mutating preparation", "[profile_migration]
     Write(f.destination / "existing", "keep destination");
     RunImport(f.MakePlan(Strategy::Link),
               [&](const auto&) { FAIL("Link must not clear caches or rewrite linked INIs"); });
-    CHECK(fs::is_symlink(fs::symlink_status(f.destination)));
+    CHECK(Common::FS::IsSymlink(f.destination));
     CHECK(Read(f.source / "shader/blob") == "keep shader");
     CHECK(Read(f.destination / "shader/blob") == "keep shader");
     REQUIRE(Backups(f.destination).size() == 1);
@@ -380,7 +380,7 @@ TEST_CASE("Migration rejects overlapping paths and symlink trees", "[profile_mig
         plan.roots[0].destination = f.base;
     }
     SECTION("source alias as destination") {
-        fs::create_directory_symlink(f.source, f.destination);
+        REQUIRE(Common::FS::CreateSymlink(f.source, f.destination));
     }
     SECTION("state inside source") {
         plan.state_dir = f.source / "state";
@@ -390,11 +390,15 @@ TEST_CASE("Migration rejects overlapping paths and symlink trees", "[profile_mig
     }
     SECTION("source link to external file") {
         Write(f.base / "outside", "do not touch");
-        fs::create_symlink(f.base / "outside", f.source / "link");
+        std::error_code error;
+        fs::create_symlink(f.base / "outside", f.source / "link", error);
+        if (error) {
+            SKIP("This host cannot create file symlinks");
+        }
     }
     SECTION("source link to external directory") {
         fs::create_directories(f.base / "outside");
-        fs::create_directory_symlink(f.base / "outside", f.source / "link");
+        REQUIRE(Common::FS::CreateSymlink(f.base / "outside", f.source / "link"));
     }
     REQUIRE_THROWS(RunImport(plan));
     CHECK(Read(f.source / "save") == "legacy");
