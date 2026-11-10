@@ -73,6 +73,7 @@
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/shader_cache.h"
+#include "video_core/texture_cache/formatter.h"
 #include "video_core/texture_cache/texture_cache_base.h"
 #include "video_core/textures/texture.h"
 #include "video_core/vulkan_common/vulkan_device.h"
@@ -3240,19 +3241,24 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, bool r
         color.size.width != extent.width || color.size.height != extent.height ||
         color.ImageHandle() == target.ImageHandle() || depth.ImageHandle() == target.ImageHandle()) {
         const bool backed = color.BackingImage() && target.BackingImage();
-        const char* check = !valid_extents ? "target size"
-            : !backed ? "no backing image"
-            : color.IsRescaled() || target.IsRescaled() ? "rescaled"
-            : color.Samples() != VK_SAMPLE_COUNT_1_BIT || target.Samples() != VK_SAMPLE_COUNT_1_BIT ? "samples"
-            : color.range != VideoCommon::SubresourceRange{} || target.range != VideoCommon::SubresourceRange{} ? "subresource range"
-            : color.format != PixelFormat::E5B9G9R9_FLOAT ? "color format"
-            : target.format != PixelFormat::B10G11R11_FLOAT ? "target format"
-            : color.size.width != extent.width || color.size.height != extent.height ? "color size"
-            : "same image";
-        return fail("unexpected upscale images",
-                    fmt::format("{} failed; color {} {}x{} rescaled {} samples {} backed {}, target {} "
+        // Each check is its own reason, so a change of failing check is logged at once.
+        const char* reason = !valid_extents ? "unexpected upscale images: target size"
+            : !backed ? "unexpected upscale images: no backing image"
+            : color.IsRescaled() || target.IsRescaled() ? "unexpected upscale images: rescaled"
+            : color.Samples() != VK_SAMPLE_COUNT_1_BIT || target.Samples() != VK_SAMPLE_COUNT_1_BIT
+            ? "unexpected upscale images: samples"
+            : color.range != VideoCommon::SubresourceRange{} ||
+                    target.range != VideoCommon::SubresourceRange{}
+            ? "unexpected upscale images: subresource range"
+            : color.format != PixelFormat::E5B9G9R9_FLOAT ? "unexpected upscale images: color format"
+            : target.format != PixelFormat::B10G11R11_FLOAT ? "unexpected upscale images: target format"
+            : color.size.width != extent.width || color.size.height != extent.height
+            ? "unexpected upscale images: color size"
+            : "unexpected upscale images: same image";
+        return fail(reason,
+                    fmt::format("color {} {}x{} rescaled {} samples {} backed {}, target {} "
                                 "{}x{} rescaled {} samples {} backed {}, scene {}x{}, {}",
-                                check, color.format, color.size.width, color.size.height,
+                                color.format, color.size.width, color.size.height,
                                 color.IsRescaled(), static_cast<u32>(color.Samples()),
                                 color.BackingImage() != nullptr, target.format, target.size.width,
                                 target.size.height, target.IsRescaled(),
