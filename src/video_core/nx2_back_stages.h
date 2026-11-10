@@ -138,7 +138,7 @@ private:
 };
 
 /// The ring the thread that draws hands its packets to, while stage B runs on its own thread.
-inline BackRing* g_ring{};
+inline std::atomic<BackRing*> g_ring{};
 /// Called by joins once B is idle: records the commands A captured since its last packet.
 inline void (*g_after_join)(void*){};
 inline void* g_after_join_argument{};
@@ -150,7 +150,7 @@ inline void* g_back_exit_argument{};
 /// join at `site`), then records what A captured since. Anything there that uses B's state calls
 /// it first.
 inline void JoinB(Join site) {
-    if (t_draw_thread && g_ring != nullptr) {
+    if (OwnsRing()) {
         JoinNow(site);
     }
 }

@@ -1000,12 +1000,12 @@ void Scheduler::AllocateNewContext() {
 void Scheduler::InvalidateState() {
     namespace DrawStages = VideoCommon::DrawStages;
     if (DrawStages::g_threaded) {
-        if (t_capture != nullptr) {
+        if (Capturing() != nullptr) {
             state_tracker.InvalidateCommandBufferState();
             (void)DeferToList(SpliceOp::InvalidateState);
             return;
         }
-        if (!DrawStages::t_draw_thread && DrawStages::t_stage == DrawStages::Stage::B) {
+        if (DrawStages::t_stage_b_thread) {
             InvalidateRecordingState();
             back_resets.fetch_add(1, std::memory_order_release);
             return;
@@ -1023,7 +1023,7 @@ void Scheduler::InvalidateRecordingState() {
 }
 
 bool Scheduler::DeferToList(SpliceOp op) {
-    if (!VideoCommon::DrawStages::g_threaded || t_capture == nullptr) {
+    if (Capturing() == nullptr) {
         return false;
     }
     if (op == SpliceOp::EndRenderPass || op == SpliceOp::FlushDeferredClear ||

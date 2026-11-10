@@ -5,6 +5,7 @@
 
 #include <array>
 #include <atomic>
+#include <optional>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -92,8 +93,26 @@ inline std::atomic<bool> g_threaded_verify{};
 /// Owner checks (EDEN_NX2_SPLIT_CHECK), as of Configure.
 inline bool g_checking{};
 inline thread_local Stage t_stage{};
-/// The thread that draws: the packet ring is its own.
+/// A thread that draws (the overlap ring of the stage counters is its own).
 inline thread_local bool t_draw_thread{};
+/// Stage 4: nonzero while a packet ring runs. The thread that started it, the one that draws,
+/// holds the same value. Any other thread owns no ring, and neither does that thread once the
+/// ring stopped, whichever thread stopped it.
+inline std::atomic<u64> g_ring_epoch{};
+inline thread_local u64 t_ring_epoch{};
+/// Stage B's own thread.
+inline thread_local bool t_stage_b_thread{};
+
+/// Whether the calling thread hands packets to the running ring. Only it may join B, and only
+/// its captured command list is live.
+[[nodiscard]] inline bool OwnsRing() {
+    const u64 epoch = g_ring_epoch.load(std::memory_order_relaxed);
+    return epoch != 0 && t_ring_epoch == epoch;
+}
+/// The calling thread starts handing packets to a ring.
+void ClaimRing();
+/// The ring stops (any thread): no thread owns it from here on.
+void ReleaseRing();
 
 /// Reads the switches (when the split starts and when the rasterizer is made).
 void Configure();
@@ -135,8 +154,7 @@ inline void Expect(Stage owner, const char* where) {
         return;
     }
     if (t_stage != Stage::Outside ? t_stage != owner
-                                  : owner == Stage::B && g_threaded && t_draw_thread &&
-                                        PacketsInFlight()) {
+                                  : owner == Stage::B && OwnsRing() && PacketsInFlight()) {
         Violation(owner, where);
     }
 }
@@ -174,7 +192,7 @@ public:
         }
         if (!g_threaded) {
             Count(site);
-        } else if (t_draw_thread) {
+        } else if (OwnsRing()) {
             JoinNow(site);
         }
         previous = std::exchange(t_stage, Stage::Outside);
@@ -203,7 +221,9 @@ inline void NoteFrontWait(DrainSite site) {
 /// Read slots, so a binding that stays the same costs one compare.
 inline constexpr u32 IndexSlot = 0;
 inline constexpr u32 UniformSlots = 5 * 18;
-inline constexpr u32 SlotCount = 1 + 32 + 5 * 64 + 5 * 32 + UniformSlots;
+inline constexpr u32 IndirectSlot = 1 + 32 + 5 * 64 + 5 * 32 + UniformSlots;
+inline constexpr u32 IndirectCountSlot = IndirectSlot + 1;
+inline constexpr u32 SlotCount = IndirectCountSlot + 1;
 [[nodiscard]] constexpr u32 VertexSlot(u32 index) {
     return 1 + index;
 }
@@ -263,6 +283,7 @@ private:
     std::vector<u64> filter; ///< One bit per hashed 64 KiB page
     std::vector<Memo> memo;
     bool filter_all{}; ///< A range too large to mark is in the table
+    std::optional<u64> last_overflow;
 };
 
 void NoteReadImpl(u32 slot, u64 begin, u64 size);

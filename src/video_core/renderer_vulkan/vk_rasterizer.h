@@ -241,6 +241,7 @@ private:
         bool indirect{};
         bool native_turing{}; ///< A native macro launched the draw
         u64 committed{};      ///< The packet's position in the ring
+        u64 map_serial{};     ///< The channel's address space as of stage A
         /// EDEN_NX2_BACK_STAGES_VERIFY: the device ranges B reads (begin, size, hash at A).
         std::vector<std::array<u64, 3>> reads;
     };
@@ -399,6 +400,7 @@ private:
     /// Stage A: the device range B reads for each read slot as of the latest packet.
     std::array<std::pair<u64, u64>, VideoCommon::DrawStages::SlotCount> back_held{};
     std::vector<u32> back_active; ///< Read slots in back_held with a range
+    std::array<bool, VideoCommon::DrawStages::SlotCount> back_read_active{};
     BackView back_view;
     /// Stage B: the latest value of each dynamic state group A took.
     DynamicStatePacket back_dynamic;
@@ -412,6 +414,7 @@ private:
         u64 ranges{};
         u64 differing{};
         u64 out_of_order{};
+        u64 remapped{};  ///< Packets recorded after the address space changed
         u64 b_submits{}; ///< Packets B recorded all of the dynamic state for after its own submit
         u32 logged{};
         std::chrono::steady_clock::time_point last_report{};

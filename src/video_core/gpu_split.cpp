@@ -64,8 +64,7 @@ void GpuSplit::CheckOwner(const char* where) {
         return;
     }
     // Stage B's thread (EDEN_NX2_BACK_STAGES=1) records the back's draws.
-    if (DrawStages::g_threaded && !DrawStages::t_draw_thread &&
-        DrawStages::t_stage == DrawStages::Stage::B) {
+    if (DrawStages::g_threaded && DrawStages::t_stage_b_thread) {
         return;
     }
     static std::atomic<u32> reports{};
@@ -647,7 +646,8 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
 }
 
 void GpuSplit::StoreConsumed(u64 position) {
-    if (DrawStages::BackRing* const ring = DrawStages::g_ring) {
+    if (DrawStages::BackRing* const ring =
+            DrawStages::OwnsRing() ? DrawStages::g_ring.load(std::memory_order_acquire) : nullptr) {
         // With stage B on its own thread the front's waits count B's position: entries are
         // consumed once B recorded the packets they made, and what the back holds goes to B now.
         ring->Publish();

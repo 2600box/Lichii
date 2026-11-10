@@ -155,6 +155,7 @@ void BackRing::RunMarks() {
 void BackRing::Loop(std::stop_token stop_token) {
     Common::SetCurrentThreadName("GPUStageB");
     t_stage = Stage::B;
+    t_stage_b_thread = true;
     if (thread_start) {
         thread_start();
     }
@@ -203,13 +204,25 @@ void BackRing::Loop(std::stop_token stop_token) {
     }
 }
 
+void ClaimRing() {
+    static std::atomic<u64> epochs{};
+    const u64 epoch = epochs.fetch_add(1, std::memory_order_relaxed) + 1;
+    t_ring_epoch = epoch;
+    g_ring_epoch.store(epoch, std::memory_order_release);
+}
+
+void ReleaseRing() {
+    g_ring_epoch.store(0, std::memory_order_release);
+}
+
 void JoinNow(Join site) {
-    if (g_ring == nullptr) {
+    BackRing* const ring = g_ring.load(std::memory_order_acquire);
+    if (ring == nullptr || !OwnsRing()) {
         return;
     }
-    if (g_ring->InFlight()) {
+    if (ring->InFlight()) {
         Count(site);
-        g_ring->Join();
+        ring->Join();
     }
     if (g_after_join != nullptr) {
         g_after_join(g_after_join_argument);
@@ -217,18 +230,21 @@ void JoinNow(Join site) {
 }
 
 bool PacketsInFlight() {
-    return g_ring != nullptr && g_ring->InFlight();
+    BackRing* const ring = g_ring.load(std::memory_order_acquire);
+    return ring != nullptr && ring->InFlight();
 }
 
 u64 RingConsumed() {
-    return g_ring != nullptr ? g_ring->Consumed() : 0;
+    BackRing* const ring = g_ring.load(std::memory_order_acquire);
+    return ring != nullptr ? ring->Consumed() : 0;
 }
 
 std::string FormatRing(u64 window_ns) {
-    if (g_ring == nullptr || !t_draw_thread || window_ns == 0) {
+    BackRing* const ring = g_ring.load(std::memory_order_acquire);
+    if (ring == nullptr || !OwnsRing() || window_ns == 0) {
         return {};
     }
-    BackRing::Stats& stats = g_ring->stats;
+    BackRing::Stats& stats = ring->stats;
     const auto rate = [window_ns](std::atomic<u64>& counter) {
         return static_cast<double>(counter.exchange(0, std::memory_order_relaxed)) * 1e9 /
                static_cast<double>(window_ns);

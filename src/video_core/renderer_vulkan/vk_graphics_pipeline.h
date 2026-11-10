@@ -193,11 +193,7 @@ public:
         mesh_groups = groups;
     }
 
-    struct MeshEmulationBuffer {
-        VkBuffer buffer{};
-        VkDeviceSize offset{};
-        VkDeviceSize size{};
-    };
+    using MeshEmulationBuffer = MeshEmulationDispatch::Buffer;
     /// With a task program: the task payload, offset and argument buffers, the arena counter,
     /// and the words of the output arena (the draw's group count is the task's).
     void SetMeshEmulationTaskBuffers(const MeshEmulationBuffer& payload,
@@ -207,6 +203,16 @@ public:
                                      u32 capacity_words) noexcept {
         mesh_task_buffers = {payload, offsets, args, counter};
         mesh_capacity = capacity_words;
+    }
+
+    /// Bytes a draw reserves in the descriptor buffer ring, at most (0: it uses none).
+    [[nodiscard]] VkDeviceSize DescriptorBufferBytes() const noexcept {
+        return descriptor_set_layout && uses_descriptor_buffer ? descriptor_buffer_layout.size : 0;
+    }
+
+    /// What the draw's dispatch uses, for its packet.
+    [[nodiscard]] MeshEmulationDispatch MeshDispatch() const noexcept {
+        return {mesh_task_buffers, mesh_groups, mesh_capacity};
     }
 
     [[nodiscard]] bool MeshEmulationHasTask() const noexcept {

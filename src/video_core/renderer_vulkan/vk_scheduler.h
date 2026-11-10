@@ -224,8 +224,10 @@ public:
     static void CaptureInto(PacketList* list) noexcept {
         t_capture = list;
     }
+    /// The list the calling thread records into: only the thread that owns the running ring
+    /// has one, so a capture left on a thread whose ring stopped is never used.
     [[nodiscard]] static PacketList* Capturing() noexcept {
-        return t_capture;
+        return VideoCommon::DrawStages::OwnsRing() ? t_capture : nullptr;
     }
     /// Stage B, or stage A while B is idle: records `list` in order and empties it.
     void SpliceList(PacketList& list);
@@ -245,8 +247,8 @@ public:
     class DirectScope {
     public:
         explicit DirectScope(VideoCommon::DrawStages::Join site)
-            : join{site, VideoCommon::DrawStages::g_threaded && t_capture != nullptr} {
-            if (VideoCommon::DrawStages::g_threaded) {
+            : join{site, Capturing() != nullptr} {
+            if (VideoCommon::DrawStages::OwnsRing()) {
                 saved = std::exchange(t_capture, nullptr);
                 t_a_changes += saved != nullptr ? 1 : 0;
             }
@@ -282,6 +284,10 @@ public:
         if (cmdlist_verify) {
             NoteRecorded(CommandTag<std::remove_cvref_t<T>>(), HashCommand(command));
         }
+        if (Capturing() != nullptr) {
+            Capture(command);
+            return;
+        }
         if (capturing) {
             if (command_list->Record(command)) {
                 return;
@@ -290,10 +296,6 @@ public:
             VideoCommon::DrawStages::Count(VideoCommon::DrawStages::Join::AListFull);
             SpliceCommands();
             (void)command_list->Record(command);
-            return;
-        }
-        if (VideoCommon::DrawStages::g_threaded && t_capture != nullptr) {
-            Capture(command);
             return;
         }
         VideoCommon::DrawStages::Expect(VideoCommon::DrawStages::Stage::B, "Scheduler::Record");

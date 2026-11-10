@@ -142,6 +142,7 @@ void OverlapRing::Read(u32 slot, u64 begin, u64 size, u64 packet) {
         Compact(packet);
         if (entries.size() == Capacity) {
             ++overflows;
+            last_overflow = packet;
             return;
         }
         hash = HashSlot(begin, end);
@@ -156,6 +157,9 @@ void OverlapRing::Read(u32 slot, u64 begin, u64 size, u64 packet) {
 }
 
 bool OverlapRing::Overlaps(u64 begin, u64 size, u64 packets) {
+    if (size != 0 && last_overflow && packets - *last_overflow <= Window) {
+        return true;
+    }
     if (entries.empty() || size == 0) {
         return false;
     }
@@ -222,23 +226,24 @@ void NoteWriteImpl(Join site, u64 begin, u64 size) {
     if (!t_draw_thread) {
         return;
     }
-    DrawThread& thread = Thread();
-    if (!g_threaded) {
-        if (thread.ring.Overlaps(begin, size, thread.packets)) {
-            Count(site);
+    if (g_threaded) {
+        // Stage A noted the ranges at each packet's sequence: those B has not consumed are
+        // live. Only the thread that hands the packets over holds them.
+        if (OwnsRing() && PacketsInFlight() &&
+            Thread().ring.Overlaps(begin, size, RingConsumed() + OverlapRing::Window)) {
+            JoinNow(site);
         }
         return;
     }
-    // Stage A noted the ranges at each packet's sequence: those B has not consumed are live.
-    if (PacketsInFlight() &&
-        thread.ring.Overlaps(begin, size, RingConsumed() + OverlapRing::Window)) {
-        JoinNow(site);
+    DrawThread& thread = Thread();
+    if (thread.ring.Overlaps(begin, size, thread.packets)) {
+        Count(site);
     }
 }
 
 void NoteGpuWriteImpl(Join site, const Tegra::MemoryManager& memory, GPUVAddr address,
                       u64 size) {
-    if (!t_draw_thread) {
+    if (!t_draw_thread || (g_threaded && !OwnsRing())) {
         g_counters.checked[static_cast<size_t>(site)].fetch_add(1, std::memory_order_relaxed);
         return;
     }
@@ -251,7 +256,8 @@ void NoteGpuWriteImpl(Join site, const Tegra::MemoryManager& memory, GPUVAddr ad
 }
 
 std::string FormatJoins(u64 window_ns) {
-    if (!(g_counting || g_threaded) || !t_draw_thread || window_ns == 0) {
+    if (!(g_counting || g_threaded) || !t_draw_thread || (g_threaded && !OwnsRing()) ||
+        window_ns == 0) {
         return {};
     }
     const auto rate = [window_ns](std::atomic<u64>& counter) {

@@ -1896,6 +1896,9 @@ void BufferCache<P>::SetUniformBuffersState(const std::array<u32, NUM_STAGES>& m
 
 template <class P>
 void BufferCache<P>::BeginGraphicsUniforms(const Nx2FastDraw::Delta* delta) {
+    if (DrawStages::g_threaded) {
+        return;
+    }
     UniformKeep& keep = uniform_keep;
     const bool unwritten = !keep.memory_writes_lost && keep.draw_deletions == buffer_deletions.load(std::memory_order_relaxed);
     keep.draw_deletions = buffer_deletions.load(std::memory_order_relaxed);
@@ -4356,7 +4359,11 @@ void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
             dirty_vertex_buffers.push_back(index);
         }
     }
-    std::ranges::for_each(channel_state->uniform_buffers, replace);
+    // With stage B on its own thread the graphics uniform bindings are A's (B binds from the
+    // packet): StopBackStages forgets their buffers instead.
+    if (!DrawStages::g_threaded) {
+        std::ranges::for_each(channel_state->uniform_buffers, replace);
+    }
     std::ranges::for_each(channel_state->storage_buffers, replace);
     replace(channel_state->transform_feedback_buffers);
     replace(channel_state->compute_uniform_buffers);
@@ -4581,6 +4588,16 @@ template <class P>
 std::span<u8> BufferCache<P>::ImmediateBuffer(size_t wanted_capacity) {
     immediate_buffer_alloc.resize_destructive(wanted_capacity);
     return std::span<u8>(immediate_buffer_alloc.data(), wanted_capacity);
+}
+
+template <class P>
+void BufferCache<P>::ForgetGraphicsUniformBuffers() {
+    uniform_keep = {};
+    for (auto& stage_bindings : channel_state->uniform_buffers) {
+        for (Binding& binding : stage_bindings) {
+            binding.buffer_id = BufferId{};
+        }
+    }
 }
 
 template <class P>

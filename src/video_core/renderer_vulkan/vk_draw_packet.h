@@ -14,6 +14,7 @@
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
+#include "video_core/renderer_vulkan/transform_feedback_query_state.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
@@ -332,6 +333,18 @@ inline void MergeDynamicState(DynamicStatePacket& to, const DynamicStatePacket& 
     return bytes;
 }
 
+/// An emulated mesh draw's compute dispatch, as stage A gave it to the pipeline for the draw.
+struct MeshEmulationDispatch {
+    struct Buffer {
+        VkBuffer buffer{};
+        VkDeviceSize offset{};
+        VkDeviceSize size{};
+    };
+    std::array<Buffer, 4> task_buffers{}; ///< Payload, offsets, arguments, arena counter
+    u32 groups{};
+    u32 capacity{}; ///< Words of the output arena (with a task program)
+};
+
 /// One draw, built by stage A from the registers, dirty flags and memory as they are at the
 /// draw, and recorded by stage B from it alone (docs/nx2/cmdlist.md).
 struct DrawPacket {
@@ -351,6 +364,7 @@ struct DrawPacket {
     u32 mesh_emulation_vertices_per_group{}; ///< 0 unless an emulated mesh draw
     VkBuffer mesh_emulation_indirect_buffer{};
     VkDeviceSize mesh_emulation_indirect_offset{};
+    MeshEmulationDispatch mesh_dispatch{};
     /// With stage B on its own thread: the vertex streams the runtime repacks for the draw.
     u32 vertex_repack_mask{};
 
@@ -367,6 +381,7 @@ struct DrawPacket {
     bool is_rescaling{};
     bool samples_render_target{}; ///< A fragment barrier is pending and the draw samples a target
     bool zpass_pixel_count{};
+    TransformFeedbackQueryState query_tfb{};
 
     DynamicStatePacket dynamic;
 
@@ -382,7 +397,7 @@ struct DrawPacket {
         if (!mesh_draw) {
             header -= sizeof(mesh_emulation_groups) + sizeof(mesh_emulation_vertices_per_group) +
                       sizeof(mesh_emulation_indirect_buffer) +
-                      sizeof(mesh_emulation_indirect_offset);
+                      sizeof(mesh_emulation_indirect_offset) + sizeof(mesh_dispatch);
         }
         if (!buffers.is_indexed) {
             header -= sizeof(buffers.index_format) + sizeof(buffers.index_format_size) +

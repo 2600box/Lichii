@@ -3,6 +3,7 @@
 
 #include <array>
 #include <atomic>
+#include <barrier>
 #include <chrono>
 #include <mutex>
 #include <thread>
@@ -13,11 +14,13 @@
 #include "video_core/buffer_cache/buffer_cache_base.h"
 #include "video_core/nx2_back_stages.h"
 #include "video_core/renderer_vulkan/vk_draw_packet.h"
+#include "video_core/renderer_vulkan/vk_scheduler.h"
 
 namespace {
 
 namespace DrawStages = VideoCommon::DrawStages;
 using DrawStages::BackRing;
+constexpr u64 SpliceOpValue = u64{1} << 60;
 
 TEST_CASE("Back stages: B consumes every packet in order, joins wait for it", "[back_stages]") {
     BackRing ring;
@@ -151,6 +154,7 @@ TEST_CASE("Back stages: joins from the thread that draws count their site", "[ba
     DrawStages::g_ring = &ring;
     DrawStages::g_counters.joins[static_cast<size_t>(DrawStages::Join::Present)] = 0;
     DrawStages::t_draw_thread = true;
+    DrawStages::ClaimRing();
     DrawStages::JoinB(DrawStages::Join::Present);
     REQUIRE(DrawStages::g_counters.joins[static_cast<size_t>(DrawStages::Join::Present)] == 0);
     (void)ring.Acquire();
@@ -164,6 +168,7 @@ TEST_CASE("Back stages: joins from the thread that draws count their site", "[ba
     releaser.join();
     REQUIRE_FALSE(DrawStages::PacketsInFlight());
     REQUIRE(DrawStages::g_counters.joins[static_cast<size_t>(DrawStages::Join::Present)] == 1);
+    DrawStages::ReleaseRing();
     DrawStages::g_ring = nullptr;
     DrawStages::g_threaded = false;
     DrawStages::g_counting = false;
@@ -171,25 +176,87 @@ TEST_CASE("Back stages: joins from the thread that draws count their site", "[ba
     ring.Stop();
 }
 
-TEST_CASE("Back stages: A and B on two threads through the ring, joins, marks and the cache lock",
+TEST_CASE("Back stages: stopping and restarting a ring invalidates another thread's capture",
           "[back_stages][threaded]") {
-    // Stands in for the rasterizer: A fills packet slots and captures commands into each slot's
-    // list, B records a slot's list and then its draw into the command buffer. A joins at writes
-    // over what a packet in flight reads, at the buffer cache's lock and at direct recordings, and
-    // splices its open list after each join, as the rasterizer's after-join hook does.
+    std::barrier phase{2};
+    std::atomic<bool> initially_owned{};
+    std::atomic<bool> capture_rejected{};
+    std::thread old_owner([&] {
+        Vulkan::Scheduler::PacketList list;
+        DrawStages::ClaimRing();
+        Vulkan::Scheduler::CaptureInto(&list);
+        initially_owned.store(Vulkan::Scheduler::Capturing() == &list);
+        phase.arrive_and_wait();
+        phase.arrive_and_wait();
+        capture_rejected.store(!DrawStages::OwnsRing() &&
+                               Vulkan::Scheduler::Capturing() == nullptr);
+        Vulkan::Scheduler::CaptureInto(nullptr);
+    });
+    phase.arrive_and_wait();
+    DrawStages::ReleaseRing();
+    DrawStages::ClaimRing();
+    phase.arrive_and_wait();
+    old_owner.join();
+    DrawStages::ReleaseRing();
+    REQUIRE(initially_owned.load());
+    REQUIRE(capture_rejected.load());
+}
+
+TEST_CASE("Back stages: A and B on two threads through the ring, lists, joins and the cache lock",
+          "[back_stages][threaded]") {
+    // Stands in for the rasterizer and the scheduler. Stage A fills packet slots and records
+    // commands and splice ops into each slot's command list. Stage B splices a slot's list and
+    // then records its draw. A joins at writes over what a packet in flight reads, at the buffer
+    // cache's lock and at direct recordings, and splices its open list after each join, as the
+    // rasterizer's after-join hook does. The ring, the lists, the joins, the overlap ring, the
+    // marks and the lock are the real ones.
+    using Vulkan::DynamicStatePacket;
+    using PacketList = Vulkan::Scheduler::PacketList;
     struct Slot {
-        Vulkan::DynamicStatePacket dynamic;
-        std::vector<u64> list;
+        Vulkan::DrawPacket draw;
+        PacketList list;
         u64 packet{};
-        u64 read_begin{};
+    };
+    struct Recorder {
+        std::vector<u64> command_buffer;
+
+        void Record(PacketList& list, u64 value) {
+            auto command = [this, value](Vulkan::vk::CommandBuffer, Vulkan::vk::CommandBuffer) {
+                command_buffer.push_back(value);
+            };
+            if (!list.commands->Record(command)) {
+                // A full list: a join splices it while B is idle.
+                DrawStages::JoinB(DrawStages::Join::AListFull);
+                (void)list.commands->Record(command);
+            }
+            ++list.count;
+        }
+        /// As Scheduler::SpliceList: the ops go where A asked for them, between the commands.
+        void Splice(PacketList& list) {
+            size_t next_op = 0;
+            u32 index = 0;
+            const auto apply_ops = [&](u32 position) {
+                while (next_op < list.ops.size() && list.ops[next_op].index <= position) {
+                    command_buffer.push_back(SpliceOpValue + list.ops[next_op++].index);
+                }
+            };
+            list.commands->TakeAll([&](auto& command) {
+                apply_ops(index);
+                command.Execute(Vulkan::vk::CommandBuffer{}, Vulkan::vk::CommandBuffer{});
+                ++index;
+            });
+            apply_ops(index);
+            list.count = 0;
+            list.ops.clear();
+        }
     };
     static constexpr u64 Packets = 6000;
     static constexpr u64 Page = 0x10000;
     BackRing ring;
     std::vector<Slot> slots(BackRing::Capacity);
-    std::vector<u64> command_buffer;
-    command_buffer.reserve(Packets * 8);
-    Vulkan::DynamicStatePacket b_dynamic;
+    Recorder recorder;
+    recorder.command_buffer.reserve(Packets * 8);
+    DynamicStatePacket b_dynamic;
     VideoCommon::BufferCacheLock cache_lock;
     u64 cache_state{};
     std::atomic<u64> out_of_order{};
@@ -202,26 +269,26 @@ TEST_CASE("Back stages: A and B on two threads through the ring, joins, marks an
 
     struct AfterJoin {
         std::vector<Slot>* slots;
-        std::vector<u64>* command_buffer;
+        Recorder* recorder;
         u32 slot;
-    } after_join{&slots, &command_buffer, 0};
+    } after_join{&slots, &recorder, 0};
 
     ring.Start(
         [&](u32 index) {
             std::scoped_lock lock{cache_lock};
             Slot& slot = slots[index];
-            if (slot.packet != b_next) {
+            if (slot.packet != b_next || slot.draw.sequence != slot.packet ||
+                slot.draw.query_tfb.patch_vertices != slot.packet + 1) {
                 out_of_order.fetch_add(1);
             }
             b_next = slot.packet + 1;
-            command_buffer.insert(command_buffer.end(), slot.list.begin(), slot.list.end());
-            slot.list.clear();
-            Vulkan::MergeDynamicState(b_dynamic, slot.dynamic);
+            recorder.Splice(slot.list);
+            Vulkan::MergeDynamicState(b_dynamic, slot.draw.dynamic);
             if (b_dynamic.line_width != static_cast<f32>(slot.packet / 3 * 3)) {
                 wrong_dynamic.fetch_add(1);
             }
             ++cache_state;
-            command_buffer.push_back(slot.packet * 16 + 8);
+            recorder.command_buffer.push_back(slot.packet * 16 + 8);
             b_consumed.fetch_add(1, std::memory_order_release);
         },
         [&](u64 value) {
@@ -235,20 +302,24 @@ TEST_CASE("Back stages: A and B on two threads through the ring, joins, marks an
     DrawStages::g_threaded = true;
     DrawStages::g_ring = &ring;
     DrawStages::t_draw_thread = true;
+    DrawStages::ClaimRing();
     DrawStages::g_after_join_argument = &after_join;
     DrawStages::g_after_join = [](void* argument) {
         auto& state = *static_cast<AfterJoin*>(argument);
-        auto& list = (*state.slots)[state.slot].list;
-        state.command_buffer->insert(state.command_buffer->end(), list.begin(), list.end());
-        list.clear();
+        state.recorder->Splice((*state.slots)[state.slot].list);
     };
 
-    // Another thread takes the lock as CPU invalidations do: it never joins.
+    // Other threads take the lock as CPU invalidations do. They own no ring: they never join,
+    // and a join they ask for does nothing.
     std::atomic<bool> stop_cpu{};
+    std::atomic<u64> foreign_joins{};
     std::thread cpu([&] {
+        DrawStages::t_draw_thread = true; // as a thread that drew before the ring started
         while (!stop_cpu.load()) {
             std::scoped_lock lock{cache_lock};
             ++cache_state;
+            DrawStages::JoinB(DrawStages::Join::Flush);
+            foreign_joins.fetch_add(DrawStages::OwnsRing() ? 1 : 0);
         }
     });
 
@@ -261,15 +332,23 @@ TEST_CASE("Back stages: A and B on two threads through the ring, joins, marks an
     for (u64 packet = 0; packet < Packets; ++packet) {
         Slot& slot = slots[index];
         slot.packet = packet;
-        slot.list.push_back(packet * 16 + 1);
+        slot.draw.sequence = packet;
+        slot.draw.query_tfb.patch_vertices = static_cast<u32>(packet + 1);
+        recorder.Record(slot.list, packet * 16 + 1);
         expected.push_back(packet * 16 + 1);
-        slot.dynamic.mask = 0;
-        if (packet % 3 == 0) {
-            slot.dynamic.Set(Vulkan::DynamicStatePacket::LineWidth);
-            slot.dynamic.line_width = static_cast<f32>(packet);
+        if (packet % 5 == 0) {
+            // A render pass end A asks for between its commands.
+            slot.list.ops.push_back({slot.list.count, Vulkan::Scheduler::SpliceOp::EndRenderPass});
+            expected.push_back(SpliceOpValue + slot.list.count);
+            recorder.Record(slot.list, packet * 16 + 3);
+            expected.push_back(packet * 16 + 3);
         }
-        slot.read_begin = Page * (1 + packet % 32);
-        DrawStages::NoteReadAt(DrawStages::VertexSlot(0), slot.read_begin, 0x100,
+        slot.draw.dynamic.mask = 0;
+        if (packet % 3 == 0) {
+            slot.draw.dynamic.Set(DynamicStatePacket::LineWidth);
+            slot.draw.dynamic.line_width = static_cast<f32>(packet);
+        }
+        DrawStages::NoteReadAt(DrawStages::VertexSlot(0), Page * (1 + packet % 32), 0x100,
                                ring.Committed());
         if (packet % 7 == 0) {
             // A write over a page a packet in flight reads waits until B recorded it.
@@ -285,11 +364,11 @@ TEST_CASE("Back stages: A and B on two threads through the ring, joins, marks an
             ++cache_state;
         }
         if (packet % 13 == 0) {
-            // A records directly once B is idle (a submit, a render pass request): its open
-            // list was spliced by the join, so the direct command follows it.
+            // A records directly once B is idle (a submit, a render pass request): the join
+            // spliced its open list, so the direct command follows it.
             DrawStages::JoinB(DrawStages::Join::ASchedulerUse);
-            REQUIRE(slot.list.empty());
-            command_buffer.push_back(packet * 16 + 2);
+            REQUIRE(slot.list.Empty());
+            recorder.command_buffer.push_back(packet * 16 + 2);
             expected.push_back(packet * 16 + 2);
         }
         expected.push_back(packet * 16 + 8);
@@ -302,21 +381,25 @@ TEST_CASE("Back stages: A and B on two threads through the ring, joins, marks an
         index = ring.Acquire();
         after_join.slot = index;
     }
-    DrawStages::JoinB(DrawStages::Join::Frame);
+    // The ring stops as the rasterizer stops it: a join, then no thread owns it.
+    ring.Join();
+    DrawStages::ReleaseRing();
+    DrawStages::g_threaded = false;
+    DrawStages::g_ring = nullptr;
+    DrawStages::g_after_join = nullptr;
+    REQUIRE_FALSE(DrawStages::OwnsRing());
     stop_cpu.store(true);
     cpu.join();
     ring.Stop();
-    DrawStages::g_after_join = nullptr;
-    DrawStages::g_ring = nullptr;
-    DrawStages::g_threaded = false;
     DrawStages::t_draw_thread = false;
 
     REQUIRE(out_of_order.load() == 0);
     REQUIRE(wrong_dynamic.load() == 0);
     REQUIRE(marks_early.load() == 0);
     REQUIRE(mark_reached.load() == marks);
+    REQUIRE(foreign_joins.load() == 0);
     REQUIRE(overlap_joins > 0);
-    REQUIRE(command_buffer == expected);
+    REQUIRE(recorder.command_buffer == expected);
 }
 
 } // namespace

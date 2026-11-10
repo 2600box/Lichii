@@ -1401,8 +1401,9 @@ bool GraphicsPipeline::ConfigureDraw(const DrawPacket& packet, size_t num_entrie
         if (!IsBuilt()) {
             scheduler.Record([this](vk::CommandBuffer) { build->Wait(!worker_only_build); });
         }
-        scheduler.Record([this, descriptor_data, groups = mesh_groups, capacity = mesh_capacity,
-                          task_buffers = mesh_task_buffers,
+        scheduler.Record([this, descriptor_data, groups = packet.mesh_dispatch.groups,
+                          capacity = packet.mesh_dispatch.capacity,
+                          task_buffers = packet.mesh_dispatch.task_buffers,
                           rescaling_data = packet.rescaling, is_rescaling = packet.is_rescaling,
                           uses_render_area = packet.render_area.uses_render_area,
                           render_area_data = packet.render_area.words](vk::CommandBuffer cmdbuf) {

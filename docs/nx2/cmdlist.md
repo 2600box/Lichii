@@ -180,7 +180,8 @@ line logs:
 
 `EDEN_NX2_BACK_STAGES=1` runs stage B on a thread of its own (`GPUStageB`) while the split's back
 draws. It is off by default; off, the draw runs both stages inline as in stage 3. The rasterizer
-starts the ring at the back's first draw and stops it if another thread draws.
+starts the ring at the back's first draw and stops it as that thread exits. Accurate GPU fences
+and legacy Aggressive VRAM mode keep draws inline; they need submitting waits during buffer resolve.
 
 - Stage A fills a packet slot and records everything else into the slot's command list
   (`Scheduler::PacketList`): uploads, copies, clears, barriers. Render pass ends, deferred clears,
@@ -195,7 +196,7 @@ starts the ring at the back's first draw and stops it if another thread draws.
 - A keeps the state tracker. Fast draws read A's view of the scheduler (`BackView`): the
   pipeline and framebuffer of the packets A handed over, until A changes the scheduler state.
 - Uniform buffers: A streams the small ones at the draw. The rest go to B in `uniform_binds`,
-  with their device address.
+  with their device address. The uniform keep optimization is disabled while B runs separately.
 - Joins wait until B has consumed every packet, then splice A's open list:
   - the buffer cache's lock, and any direct scheduler use: submits, waits, render pass requests
     and deferred clears;
@@ -213,25 +214,35 @@ starts the ring at the back's first draw and stops it if another thread draws.
     their tick is free.
   - The texture cache joins B before it creates a framebuffer: a new one can move the others in
     the slot vector. It also joins before it removes framebuffers. B's parked deferred clear lands
-    directly after that join.
+    directly after that join. A foreign-thread unmap removes framebuffers from the lookup table
+    but retains their objects until the drawing thread can join and retire them.
   - The texture cache destroys images and views on the frame ring, after a TickFrame, which joins
     first.
-- B submits on its own only when it must wait for space (the descriptor buffer ring). The
-  scheduler's part resets on B, and A resets its state tracker at its next draw. B records its
-  running copy of every dynamic state group A sent since the ring started. A invalidated its state
-  tracker at that start, so every group a pipeline needs was sent, with its latest value.
-- A draw B cannot record still sets the native macro engine's failure flag. A sets it at its next
-  draw.
+- B must not submit the current scheduler tick. A tags its staging memory and arenas with that
+  tick, including packets B has not recorded yet. A reserves descriptor capacity before preparing
+  each draw, and joins and finishes before it needs to rewind the descriptor frame. Reused-frame
+  waits also run on A, before packet preparation. The B-side exhaustion branch skips and counts
+  the draw rather than submitting; reaching it is a failed capacity-plan invariant. Multi-range
+  retirement can grow its retained-resource list on B instead of forcing a submitting wait.
+- B keeps a complete dynamic-state copy as a diagnostic backstop. The `Back stages` line counts
+  any unexpected B submit; this count and skipped-descriptor-draw count must stay zero.
+- Emulated mesh draws carry their dispatch (task buffers, group count, arena words) in the
+  packet. A sets the pipeline's copy for the next draw while B records an earlier one.
+- Transform-feedback query callbacks use the packet's enable, output topology, patch count and
+  buffer stream/stride state, including callbacks triggered while splicing render-pass ends.
+- A draw B cannot record still sets the native macro engine's failure flag. A receives it at its
+  next draw, join or ring stop.
 - The ring starts on the split's back and stops there as the back exits. The stop clears that
-  thread's capture and the ring's hooks before anything else records.
+  thread's capture and the ring's hooks before anything else records. An epoch also invalidates
+  captures left on other threads, so a later ring cannot revive an old capture pointer.
 
 `EDEN_NX2_BACK_STAGES_VERIFY=1` makes A hash each range B reads (its first 256 KiB). B hashes
 the range again before it records the packet and checks that packets arrive in order. B logs the
 first 16 differences. Every 10 s a `Back stages verify` line gives the packets, the ranges
-checked, those that changed after A built the packet, the packets out of order, and the packets B
-recorded the whole dynamic state for after a submit of its own. B does not resolve the
-addresses again: the packet holds device addresses only, and A's mappings can change while a
-packet is in flight. A remap shows up only as a content change. A
+checked, those that changed after A built the packet, the packets out of order, and packets
+recorded after the address-space serial changed. B does not resolve the addresses again: the
+packet holds device addresses only. The content hash and remap count cover the first PC run;
+they do not prove that a GPU address still translates to the same device address. A
 `Back stages` line gives the ring's hand-overs, joins, full-ring waits, A's wait time, and B's
 sleeps and busy time. With `EDEN_NX2_GPU_PROFILE`, the profile line counts the joins by site.
 

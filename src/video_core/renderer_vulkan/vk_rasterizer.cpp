@@ -1180,8 +1180,24 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, u32 instance_count, Func&& d
     fast_draw_verify = fast_draw_on && FastDraw::VerifyEnabled();
     const u64 fast_draw_start = fast_draw_on ? Profile::Now() : 0;
     // EDEN_NX2_BACK_STAGES=1: stage B runs on its own thread for the draws of the split's back.
-    if (back_staging_pool && !back_ring && VideoCommon::GpuSplit::OnBackThread()) {
-        StartBackStages();
+    if (back_staging_pool && VideoCommon::GpuSplit::OnBackThread()) {
+        bool requires_inline = Settings::IsGPUFenceBehaviorAccurate();
+#ifdef YUZU_LEGACY
+        requires_inline |= Settings::values.vram_usage_mode.GetValue() ==
+                           Settings::VramUsageMode::Aggressive;
+#endif
+        if (requires_inline) {
+            if (back_ring) {
+                StopBackStages();
+            }
+            static bool warned{};
+            if (!std::exchange(warned, true)) {
+                LOG_WARNING(Render_Vulkan,
+                            "Back stages: selected fence/VRAM behavior requires inline draws");
+            }
+        } else if (!back_ring) {
+            StartBackStages();
+        }
     }
     if (back_ring) {
         // The ring stops on its own thread as the split's back exits (g_back_exit).
@@ -1264,6 +1280,16 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, u32 instance_count, Func&& d
             }
         }
         return;
+    }
+    if (back_ring) {
+        const VkDeviceSize bytes = pipeline->DescriptorBufferBytes();
+        if (bytes != 0 && !descriptor_buffer_ring.Plan(bytes)) {
+            const Scheduler::DirectScope stall{
+                VideoCommon::DrawStages::Join::ADescriptorWrap};
+            scheduler.Finish();
+            descriptor_buffer_ring.Rewind();
+            (void)descriptor_buffer_ring.Plan(bytes);
+        }
     }
     if (VideoCommon::OotNetwork::BypassEnabled(Settings::GetCurrentProgramID())) {
         TrackOotTonemappedImage(*pipeline);
@@ -1499,6 +1525,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, u32 instance_count, Func&& d
         packet.mesh_emulation_vertices_per_group = mesh_emulation_vertices_per_group;
         packet.mesh_emulation_indirect_buffer = mesh_emulation_indirect.buffer;
         packet.mesh_emulation_indirect_offset = mesh_emulation_indirect.offset;
+        packet.mesh_dispatch = pipeline->MeshDispatch();
     }
     if (is_indirect) {
         packet.indirect = maxwell3d->draw_manager.indirect_state;
@@ -1507,6 +1534,8 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, u32 instance_count, Func&& d
             MakeDrawParams(maxwell3d->draw_manager.draw_state, instance_count, is_indexed);
     }
     packet.zpass_pixel_count = maxwell3d->regs.zpass_pixel_count_enable != 0;
+    packet.query_tfb = TransformFeedbackQueryState::FromRegs(
+        maxwell3d->regs, maxwell3d->draw_manager.draw_state.topology);
     if (packet.buffers.transform_feedback && device.IsExtTransformFeedbackSupported()) {
         UNIMPLEMENTED_IF(maxwell3d->regs.IsShaderConfigEnabled(Maxwell::ShaderType::TessellationInit) ||
                          maxwell3d->regs.IsShaderConfigEnabled(Maxwell::ShaderType::Tessellation));
@@ -1996,7 +2025,7 @@ void RasterizerVulkan::RecordDirectDraw(const DrawPacket& packet) {
     }
 
     if (Common::DkbFrameTrace::Enabled() &&
-        (!VideoCommon::DrawStages::g_threaded || VideoCommon::DrawStages::t_draw_thread) &&
+        !VideoCommon::DrawStages::t_stage_b_thread &&
         (draw_params.num_vertices == 0 || (!packet.mesh_draw && draw_params.num_instances == 0))) {
         ++trace_zero_direct;
     }
@@ -2196,11 +2225,13 @@ void RasterizerVulkan::StartBackStages() {
     back_view = {};
     back_held.fill({});
     back_active.clear();
+    back_read_active.fill(false);
     back_repack_mask = buffer_cache_runtime.RepackedVertexBuffers();
     back_resets_seen = scheduler.BackResets();
     back_b_resets = back_resets_seen;
     back_dynamic = {};
     back_verify = {};
+    descriptor_buffer_ring.PrepareFrame(scheduler);
     // The first packets carry every dynamic state group, B's running copy starts from them.
     state_tracker.InvalidateCommandBufferState();
     DrawStages::g_threaded_verify = DrawStages::BackStagesVerifyRequested();
@@ -2218,6 +2249,7 @@ void RasterizerVulkan::StartBackStages() {
     DrawStages::g_ring = back_ring.get();
     DrawStages::g_threaded = true;
     DrawStages::t_draw_thread = true;
+    DrawStages::ClaimRing();
     back_slot = &back_slots[back_ring->Acquire()];
     Scheduler::CaptureInto(&back_slot->list);
     LOG_INFO(Render_Vulkan, "Draw packets: stage B runs on its own thread{}",
@@ -2229,6 +2261,10 @@ void RasterizerVulkan::StopBackStages() {
     // On the thread that drew (the split's back as it exits): B records every packet, then that
     // thread's capture and the ring's hooks are cleared before anything else records.
     back_ring->Join();
+    if (back_native_failed.exchange(false, std::memory_order_relaxed)) {
+        maxwell3d->GetNativeMacroEngine().native_execution_failed = true;
+    }
+    DrawStages::ReleaseRing();
     DrawStages::g_threaded = false;
     DrawStages::g_threaded_verify = false;
     DrawStages::g_ring = nullptr;
@@ -2238,6 +2274,9 @@ void RasterizerVulkan::StopBackStages() {
     {
         std::scoped_lock lock{buffer_cache.mutex};
         scheduler.SpliceList(back_slot->list);
+        // B bound the graphics uniform buffers from the packets: the bindings' buffers were
+        // not kept up while it ran.
+        buffer_cache.ForgetGraphicsUniformBuffers();
     }
     back_ring->Stop();
     back_ring.reset();
@@ -2252,6 +2291,7 @@ void RasterizerVulkan::CommitBackSlot(bool indirect) {
     slot.indirect = indirect;
     slot.native_turing = maxwell3d->GetNativeMacroEngine().native_turing;
     slot.committed = back_ring->Committed();
+    slot.map_serial = gpu_memory->MapSerial();
     NoteBackReads(slot);
     back_view.Bind(slot.packet.pipeline, slot.packet.framebuffer);
     back_ring->Commit();
@@ -2260,6 +2300,9 @@ void RasterizerVulkan::CommitBackSlot(bool indirect) {
 }
 
 void RasterizerVulkan::SpliceCapturedCommands() {
+    if (back_native_failed.exchange(false, std::memory_order_relaxed)) {
+        maxwell3d->GetNativeMacroEngine().native_execution_failed = true;
+    }
     if (back_splicing || back_slot == nullptr || back_slot->list.Empty()) {
         return;
     }
@@ -2273,8 +2316,9 @@ void RasterizerVulkan::NoteBackReads(BackSlot& slot) {
     const auto& buffers = slot.packet.buffers;
     const auto hold = [this](u32 read_slot, u64 begin, u64 size) {
         auto& held = back_held[read_slot];
-        if (held.second == 0 && begin != 0 && size != 0) {
+        if (!back_read_active[read_slot] && begin != 0 && size != 0) {
             back_active.push_back(read_slot);
+            back_read_active[read_slot] = true;
         }
         held = begin != 0 ? std::pair{begin, size} : std::pair<u64, u64>{};
     };
@@ -2312,11 +2356,20 @@ void RasterizerVulkan::NoteBackReads(BackSlot& slot) {
     }
     u32 order = 0;
     for (const auto& bind : buffers.uniform_binds) {
-        if (!bind.streamed) {
-            hold(DrawStages::UniformSlot(order++), bind.device_addr, bind.size);
-        }
+        hold(DrawStages::UniformSlot(order++), bind.device_addr, bind.size);
     }
-    std::erase_if(back_active, [this](u32 read_slot) { return back_held[read_slot].second == 0; });
+    hold(DrawStages::IndirectSlot, buffers.indirect ? buffers.indirect_buffer.device_addr : 0,
+         buffers.indirect ? buffers.indirect_buffer.size : 0);
+    hold(DrawStages::IndirectCountSlot,
+         buffers.indirect_count ? buffers.count_buffer.device_addr : 0,
+         buffers.indirect_count ? buffers.count_buffer.size : 0);
+    std::erase_if(back_active, [this](u32 read_slot) {
+        if (back_held[read_slot].second != 0) {
+            return false;
+        }
+        back_read_active[read_slot] = false;
+        return true;
+    });
     const bool verify = DrawStages::g_threaded_verify;
     slot.reads.clear();
     for (const u32 read_slot : back_active) {
@@ -2339,6 +2392,9 @@ void RasterizerVulkan::VerifyBackReads(const BackSlot& slot) {
         }
     }
     stats.next = slot.committed + 1;
+    // B reads by device address, as A resolved it at the draw. A change of the address space
+    // since is counted: only a change of the bytes below is a difference.
+    stats.remapped += slot.map_serial != gpu_memory->MapSerial() ? 1 : 0;
     for (const auto& [begin, size, hash] : slot.reads) {
         ++stats.ranges;
         if (HashDeviceRange(device_memory, begin, size) == hash) {
@@ -2363,6 +2419,10 @@ void RasterizerVulkan::RecordBackDraw(BackSlot& slot) {
     namespace DrawStages = VideoCommon::DrawStages;
     namespace Profile = VideoCommon::Nx2Profile;
     const DrawPacket& packet = slot.packet;
+    query_cache_runtime.SetStageTransformFeedbackState(&packet.query_tfb);
+    SCOPE_EXIT {
+        query_cache_runtime.SetStageTransformFeedbackState(nullptr);
+    };
     if (DrawStages::g_threaded_verify) {
         VerifyBackReads(slot);
     }
@@ -2415,16 +2475,19 @@ void RasterizerVulkan::RecordBackDraw(BackSlot& slot) {
     const auto& stats = back_ring->stats;
     LOG_INFO(Render_Vulkan,
              "Back stages: {} packets in {} hand-overs, {} joins and {} full-ring waits ({} ms "
-             "waited by A), B slept {} times and was busy {} ms",
+             "waited by A), B slept {} times and was busy {} ms; {} submits of B's own, {} draws "
+             "skipped for a full descriptor buffer frame",
              stats.packets.load(), stats.batches.load(), stats.joins.load(),
              stats.full_waits.load(), stats.a_wait_ns.load() / 1'000'000, stats.b_sleeps.load(),
-             stats.b_busy_ns.load() / 1'000'000);
+             stats.b_busy_ns.load() / 1'000'000, back_verify.b_submits,
+             descriptor_buffer_ring.FullOnStageB());
     if (DrawStages::g_threaded_verify) {
         LOG_INFO(Render_Vulkan,
                  "Back stages verify: {} packets, {} ranges checked, {} changed after A built "
-                 "the packet, {} out of order, {} after a submit of B's own",
+                 "the packet, {} out of order; {} packets recorded after the address space "
+                 "changed",
                  back_verify.packets, back_verify.ranges, back_verify.differing,
-                 back_verify.out_of_order, back_verify.b_submits);
+                 back_verify.out_of_order, back_verify.remapped);
     }
 }
 
@@ -4167,6 +4230,9 @@ void RasterizerVulkan::TickFrame() {
     guest_descriptor_queue.TickFrame();
     compute_pass_descriptor_queue.TickFrame();
     descriptor_buffer_ring.TickFrame();
+    if (back_ring) {
+        descriptor_buffer_ring.PrepareFrame(scheduler);
+    }
     fence_manager.TickFrame();
     staging_pool.TickFrame();
     if (back_staging_pool) {

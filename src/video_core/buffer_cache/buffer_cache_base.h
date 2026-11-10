@@ -677,6 +677,10 @@ public:
     /// Return true when a CPU region is modified from the CPU
     [[nodiscard]] bool IsRegionCpuModified(DAddr addr, size_t size);
 
+    /// The graphics uniform bindings resolve their buffers again (the ring of stage B's thread
+    /// stopped: buffers deleted while it ran were not taken out of them).
+    void ForgetGraphicsUniformBuffers();
+
     void SetDrawIndirect(
         const Tegra::Engines::Maxwell3D::DrawManager::IndirectParams* current_draw_indirect_) {
         current_draw_indirect = current_draw_indirect_;
@@ -957,6 +961,9 @@ private:
     [[nodiscard]] bool UniformRangeKept(size_t stage, u32 index, DAddr device_addr,
                                         u32 size) const noexcept;
     void NoteUniformWrite(DAddr device_addr, u64 size) {
+        if (DrawStages::g_threaded) {
+            return;
+        }
         UniformKeep& keep = uniform_keep;
         if (keep.memory_writes.size() == keep.memory_writes.capacity()) {
             keep.memory_writes_lost = true;

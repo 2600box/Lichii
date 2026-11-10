@@ -29,6 +29,18 @@ TEST_CASE("Draw stages: writes join only over ranges the packets in flight read"
     REQUIRE(ring.Live(120) == 1);
 }
 
+TEST_CASE("Draw stages: a full overlap ring conservatively joins until the lost read expires",
+          "[draw_stages]") {
+    DrawStages::OverlapRing ring;
+    for (size_t i = 0; i <= DrawStages::OverlapRing::Capacity; ++i) {
+        ring.Read(DrawStages::IndexSlot, 0x10000 + i * 0x10000, 4, 0);
+    }
+    REQUIRE(ring.overflows == 1);
+    REQUIRE(ring.Overlaps(0x80000000, 4, DrawStages::OverlapRing::Window));
+    REQUIRE_FALSE(ring.Overlaps(0x80000000, 0, DrawStages::OverlapRing::Window));
+    REQUIRE_FALSE(ring.Overlaps(0x80000000, 4, DrawStages::OverlapRing::Window + 1));
+}
+
 TEST_CASE("Draw stages: owner checks, join counts and the profile line", "[draw_stages]") {
     DrawStages::g_counting = true;
     DrawStages::g_checking = true;
