@@ -119,8 +119,10 @@ static const constexpr frozen::map<StringKey, frozen::string, 29> strings = {
     {MigrationTooltipKeepOld,
      QT_TR_NOOP("Keeps the old data directory. This is recommended if you aren't\n"
                 "space-constrained and want to keep separate data for the old emulator.")},
-    {MigrationTooltipClearOld, QT_TR_NOOP("Deletes the old data directory.\nThis is recommended on "
-                                          "devices with space constraints.")},
+    {MigrationTooltipClearOld, QT_TR_NOOP("Copies and verifies the full profile before moving the "
+                                          "source aside as a recovery backup.\nRequires enough "
+                                          "free space for a full copy. Keep the backup until "
+                                          "you have checked your saves.")},
     {MigrationTooltipLinkOld,
      QT_TR_NOOP("Creates a filesystem link between the old directory and Lichii directory.\n"
                 "This is recommended if you want to share data between emulators.")},

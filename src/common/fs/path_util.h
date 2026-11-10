@@ -227,6 +227,8 @@ template <typename Path>
  */
 void SetAppDirectory(const std::string& app_directory);
 
+[[nodiscard]] bool IsPortableMode();
+
 /**
  * Gets the filesystem path associated with the EdenPath enum.
  *

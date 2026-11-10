@@ -17,7 +17,6 @@ public:
 
     bool migrated{false};
     Emulator selected_emu;
-    MigrationWorker::MigrationStrategy migration_strategy{};
 
 private:
     void ShowMigrationPrompt(QMainWindow* main_window);

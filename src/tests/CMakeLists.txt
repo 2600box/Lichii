@@ -227,6 +227,11 @@ target_compile_definitions(tests PRIVATE
 
 add_test(NAME tests COMMAND tests)
 
+add_executable(profile_migration_tests
+    common/profile_migration.cpp)
+target_link_libraries(profile_migration_tests PRIVATE common Catch2::Catch2WithMain)
+add_test(NAME profile_migration_tests COMMAND profile_migration_tests)
+
 if (TARGET SDL3::SDL3)
     add_executable(sdl_window_state_tests yuzu_cmd/sdl_window_state.cpp)
     target_link_libraries(sdl_window_state_tests PRIVATE SDL3::SDL3 Catch2::Catch2WithMain)
@@ -303,10 +308,18 @@ if (NOT ANDROID)
     add_executable(config_tests
         common/first_run_config.cpp
         common/recommended_settings.cpp
+        ../frontend_common/profile_import.cpp
         ../frontend_common/config.cpp)
     target_link_libraries(config_tests PRIVATE common SimpleIni::SimpleIni Catch2::Catch2WithMain
         ${PLATFORM_LIBRARIES})
     add_test(NAME config_tests COMMAND config_tests)
+
+    add_executable(profile_import_tests
+        frontend_common/profile_import.cpp
+        ../frontend_common/profile_import.cpp)
+    target_link_libraries(profile_import_tests PRIVATE common SimpleIni::SimpleIni
+        Catch2::Catch2WithMain ${PLATFORM_LIBRARIES})
+    add_test(NAME profile_import_tests COMMAND profile_import_tests)
 endif()
 
 # needed for vma

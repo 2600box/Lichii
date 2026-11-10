@@ -49,6 +49,7 @@
 #include "core/hle/service/filesystem/filesystem.h"
 #include "core/loader/loader.h"
 #include "frontend_common/config.h"
+#include "frontend_common/profile_import.h"
 #include "input_common/drivers/keyboard.h"
 #include "input_common/main.h"
 #include "network/network.h"
@@ -574,6 +575,13 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
     Common::Log::Initialize();
     Common::Log::SetColorConsoleBackendEnabled(true);
     Common::Log::Start();
+
+    try {
+        FrontendCommon::CheckLegacyProfileBeforeConfig();
+    } catch (const std::exception& exception) {
+        fmt::print(stderr, "{}\n", exception.what());
+        return SDL_APP_FAILURE;
+    }
 
     if (argc > 1 && std::string_view{argv[1]} == "--build-warm") {
         return BuildWarm(state->system, argc, argv) ? SDL_APP_SUCCESS : SDL_APP_FAILURE;

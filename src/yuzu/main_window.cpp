@@ -387,29 +387,6 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     filter.ParseFilterString(Settings::values.log_filter.GetValue());
     Common::Log::SetGlobalFilter(filter);
 
-    // A linked directory shares its config with the old emulator, and the old paths stay valid.
-    if (user_data_migrator.migrated &&
-        user_data_migrator.migration_strategy != MigrationWorker::MigrationStrategy::Link) {
-        // The migrated config keeps the old emulator's absolute storage paths. Move the ones
-        // inside its directory to the same place inside ours, and save them before anything can
-        // write there.
-        using namespace Common::FS;
-
-        static constexpr std::array paths = {
-            EdenPath::NANDDir, EdenPath::SDMCDir, EdenPath::DumpDir,       EdenPath::LoadDir,
-            EdenPath::TASDir,  EdenPath::SaveDir, EdenPath::ScreenshotsDir};
-
-        const auto old_root = GetLegacyPath(user_data_migrator.selected_emu.e_user_dir);
-        const auto new_root = GetEdenPath(EdenPath::EdenDir);
-        for (const EdenPath path : paths) {
-            const auto relative = GetEdenPath(path).lexically_relative(old_root);
-            if (!relative.empty() && *relative.begin() != "..") {
-                SetEdenPath(path, new_root / relative);
-            }
-        }
-        config->SaveAllValues();
-    }
-
 #ifdef __unix__
     SetupSigInterrupts();
 #endif
