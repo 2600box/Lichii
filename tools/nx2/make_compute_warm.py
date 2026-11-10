@@ -11,7 +11,7 @@ pipeline cache, and writes one cache-format entry per program:
 
 Env record fields match what the emulator writes for native compute shaders:
     local_memory_size = control u32 at byte 104 (QMD local alloc)
-    texture_bound     = 0 (tex_cb_index, 0 in every runtime record seen)
+    texture_bound     = the texture bank the lowering names, else 0 (tex_cb_index)
     start_address     = 80 (sizeof the 10-word header, compute header is all zero)
     read_lowest       = 0, read_highest = code size - 8
     viewport_transform_state = 1, stage = 5
@@ -56,15 +56,16 @@ def runtime_code(instructions, offsets):
 
 
 def read_override(path):
-    """Instructions and address map offsets of a lowered override record; raises on others."""
+    """Instructions, address map offsets and texture bank of a lowered override record; raises
+    ValueError or struct.error on others."""
     data = Path(path).read_bytes()
-    magic, version, source_size, count, _texture_buffer, map_count = struct.unpack_from('<6I', data)
+    magic, version, source_size, count, texture_buffer, map_count = struct.unpack_from('<6I', data)
     if magic != 0x4E454445 or version != 0x3230564F or map_count != source_size // 16:
         raise ValueError(f'{path}: not a mapped override record')
     at = 24 + source_size
     instructions = struct.unpack_from(f'<{count}Q', data, at)
     offsets = struct.unpack_from(f'<{map_count}I', data, at + count * 8)
-    return instructions, offsets
+    return instructions, offsets, texture_buffer
 
 
 def control_values(control):
@@ -74,8 +75,10 @@ def control_values(control):
     return workgroup, shared, local
 
 
-def entry(code, workgroup, shared, local):
-    env = ENV.pack(len(code), 0, 0, 0, 0, 0, local, 0, HEADER_WORDS * 8, 0, len(code) - 8, 1,
+def entry(code, workgroup, shared, local, texture_buffer):
+    # The emulator records the program's own bank when the lowering names one (ComputeEntry).
+    bound = texture_buffer if texture_buffer != 0xFFFFFFFF else 0
+    env = ENV.pack(len(code), 0, 0, 0, 0, 0, local, bound, HEADER_WORDS * 8, 0, len(code) - 8, 1,
                    COMPUTE_STAGE)
     trailer = struct.pack('<4I', *workgroup, shared)
     key = struct.pack('<QI3I', CityHash64(code) ^ HASH_XOR, shared, *workgroup)
@@ -125,12 +128,20 @@ def main():
         if record is None:
             failed += 1
             continue
-        code = runtime_code(*read_override(record))
-        workgroup, shared, local = control_values((corpus / program['control']).read_bytes())
+        # A truncated record (a sweep killed while writing it) or a short control file fails
+        # this program only, as ReadComputeControl skips a short control file.
+        try:
+            instructions, offsets, texture_buffer = read_override(record)
+            code = runtime_code(instructions, offsets)
+            workgroup, shared, local = control_values((corpus / program['control']).read_bytes())
+        except (ValueError, struct.error, OSError, KeyError) as ex:
+            print(f"{program['code_sha256']}: {type(ex).__name__}: {ex}", file=sys.stderr)
+            failed += 1
+            continue
         if not all(workgroup):
             failed += 1
             continue
-        data, key = entry(code, workgroup, shared, local)
+        data, key = entry(code, workgroup, shared, local, texture_buffer)
         entries.setdefault(key, data)
 
     out = Path(args.out)
