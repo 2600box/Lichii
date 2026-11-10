@@ -47,7 +47,7 @@ constexpr std::string_view StageConverting = "Converting";
 constexpr std::string_view StageWriting = "Writing";
 /// Conversions in flight (each holds a copy of its program).
 constexpr size_t MaxPendingJobs = 2048;
-constexpr u32 PrecachedPipelinesMagic = 0x31504750; // "PGP1"
+constexpr u32 PrecachedPipelinesMagic = 0x32504750; // "PGP2", with the graphics calls mode
 
 fs::path TitleDir(u64 title_id) {
     return Common::FS::GetEdenPath(Common::FS::EdenPath::ShaderDir) /
@@ -333,6 +333,12 @@ fs::path WarmMarkerPath(const fs::path& warm_file) {
     return marker;
 }
 
+fs::path WarmRetryPath(const fs::path& warm_file) {
+    fs::path retry = warm_file;
+    retry.replace_filename(warm_file.stem().string() + "-retry" + warm_file.extension().string());
+    return retry;
+}
+
 fs::path WarmCountPath(const fs::path& warm_file) {
     fs::path count = warm_file;
     count.replace_extension(".count");
@@ -432,6 +438,8 @@ std::unordered_set<u64> ReadPrecachedPipelines(const fs::path& file, const Drive
         !in.read(reinterpret_cast<char*>(&saved.driver), sizeof(saved.driver)) ||
         !in.read(reinterpret_cast<char*>(&saved.device_id), sizeof(saved.device_id)) ||
         !in.read(reinterpret_cast<char*>(&saved.cache_version), sizeof(saved.cache_version)) ||
+        !in.read(reinterpret_cast<char*>(&saved.graphics_no_inline),
+                 sizeof(saved.graphics_no_inline)) ||
         !in.read(reinterpret_cast<char*>(&count), sizeof(count)) || saved != stamp) {
         return hashes;
     }
@@ -452,6 +460,7 @@ bool WritePrecachedPipelines(const fs::path& file, const DriverStamp& stamp,
     Write(out, stamp.driver);
     Write(out, stamp.device_id);
     Write(out, stamp.cache_version);
+    Write(out, stamp.graphics_no_inline);
     Write(out, static_cast<u64>(hashes.size()));
     for (const u64 hash : hashes) {
         Write(out, hash);
@@ -475,7 +484,8 @@ bool DeleteWarmFiles(u64 title_id, std::string* error) {
     for (const auto& warm : {ComputeWarmPath(title_id), GraphicsWarmPath(title_id)}) {
         fs::path tmp = warm;
         tmp += ".tmp";
-        for (const auto& path : {warm, WarmMarkerPath(warm), WarmCountPath(warm), tmp}) {
+        for (const auto& path : {warm, WarmMarkerPath(warm), WarmCountPath(warm), tmp,
+                                 WarmMarkerPath(WarmRetryPath(warm))}) {
             remove(path);
         }
     }

@@ -118,6 +118,11 @@ public:
     /// Logs the counters of the last 10 s (Nx2Perf gpl), when there were any.
     void Report();
 
+    /// Releases the built libraries no pipeline holds any more (their pipelines were evicted), so
+    /// their driver memory goes with them. A key that failed stays, so it is not retried.
+    /// Returns how many were released.
+    size_t PruneUnused();
+
 private:
     struct Entry {
         std::mutex mutex;

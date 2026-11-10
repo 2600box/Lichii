@@ -297,6 +297,10 @@ public:
         return Find(cbuf_values, CbufKey(bank, offset), "constant buffer value",
                     bank == 0 ? guesses.cbuf0 : guesses.cbuf_other);
     }
+    /// Recorded constant buffer value only, never a guess: throws MissingContext when absent.
+    u32 RecordedCbufValue(u32 bank, u32 offset) const {
+        return Lookup(cbuf_values, CbufKey(bank, offset), "constant buffer value");
+    }
     Shader::TextureType ReadTextureType(u32 handle) override {
         return Find(texture_types, handle, "texture type",
                     static_cast<Shader::TextureType>(guesses.texture_type));
@@ -1417,7 +1421,9 @@ int main(int argc, char** argv) {
                                       Shader::Ampere::VerifyTrapGuards(
                                           std::span{native}.first(traps.back() / 16 + 1),
                                           [&](u32 bank, u32 offset) -> std::optional<u32> {
-                                              return env.ReadCbufValue(bank, offset);
+                                              // Guards are checked against captured values only,
+                                              // even with --guess-missing.
+                                              return env.RecordedCbufValue(bank, offset);
                                           });
                 if (!verified)
                     throw MissingContext("Native trap guards could not be verified");
