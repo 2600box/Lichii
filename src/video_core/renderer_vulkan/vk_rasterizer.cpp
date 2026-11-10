@@ -3176,10 +3176,10 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, bool r
         return false;
     }
     // Logs why the game's own upscale draws, when the reason changes and every 120th repeat.
-    const auto fail = [this](const char* reason) {
+    const auto fail = [this](const char* reason, std::string_view detail = {}) {
         if (reason != oot_fallback_reason || ++oot_fallback_repeats % 120 == 0) {
-            LOG_INFO(Render_Vulkan, "Ocarina temporal: the game's upscale draws frame {} ({})",
-                     render_trace_frame, reason);
+            LOG_INFO(Render_Vulkan, "Ocarina temporal: the game's upscale draws frame {} ({}{}{})",
+                     render_trace_frame, reason, detail.empty() ? "" : ": ", detail);
         }
         if (reason != oot_fallback_reason) {
             oot_fallback_reason = reason;
@@ -3239,7 +3239,26 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, bool r
         color.format != PixelFormat::E5B9G9R9_FLOAT || target.format != PixelFormat::B10G11R11_FLOAT ||
         color.size.width != extent.width || color.size.height != extent.height ||
         color.ImageHandle() == target.ImageHandle() || depth.ImageHandle() == target.ImageHandle()) {
-        return fail("unexpected upscale images");
+        const bool backed = color.BackingImage() && target.BackingImage();
+        const char* check = !valid_extents ? "target size"
+            : !backed ? "no backing image"
+            : color.IsRescaled() || target.IsRescaled() ? "rescaled"
+            : color.Samples() != VK_SAMPLE_COUNT_1_BIT || target.Samples() != VK_SAMPLE_COUNT_1_BIT ? "samples"
+            : color.range != VideoCommon::SubresourceRange{} || target.range != VideoCommon::SubresourceRange{} ? "subresource range"
+            : color.format != PixelFormat::E5B9G9R9_FLOAT ? "color format"
+            : target.format != PixelFormat::B10G11R11_FLOAT ? "target format"
+            : color.size.width != extent.width || color.size.height != extent.height ? "color size"
+            : "same image";
+        return fail("unexpected upscale images",
+                    fmt::format("{} failed; color {} {}x{} rescaled {} samples {} backed {}, target {} "
+                                "{}x{} rescaled {} samples {} backed {}, scene {}x{}, {}",
+                                check, color.format, color.size.width, color.size.height,
+                                color.IsRescaled(), static_cast<u32>(color.Samples()),
+                                color.BackingImage() != nullptr, target.format, target.size.width,
+                                target.size.height, target.IsRescaled(),
+                                static_cast<u32>(target.Samples()), target.BackingImage() != nullptr,
+                                extent.width, extent.height,
+                                upscale_4k ? "1440p shader" : native_size ? "full-size shader" : "4/3 shader"));
     }
 
     constexpr VkFormat output_format = VK_FORMAT_B10G11R11_UFLOAT_PACK32;
