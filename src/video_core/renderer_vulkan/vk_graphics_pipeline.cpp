@@ -1615,8 +1615,14 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
         });
     }
     if (!IsBuilt()) {
-        // Wait for the pipeline to be built
-        scheduler.Record([this](vk::CommandBuffer) {
+        // Wait for the pipeline to be built. The hold fields are copied here: the GPU thread
+        // rewrites them on the next lookup while the scheduler thread runs this.
+        const u8 reason = hold_reason;
+        const bool target_color = hold_target_color;
+        const u32 target_width = hold_target_width;
+        const u32 target_height = hold_target_height;
+        scheduler.Record([this, reason, target_color, target_width,
+                          target_height](vk::CommandBuffer) {
             const VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::PipelineWait};
             const auto begin = std::chrono::steady_clock::now();
             // With EDEN_NX2_HEAVY_SKIP the workers are busy with skipped heavy builds (seconds
@@ -1638,9 +1644,8 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                          "Nx2Perf held_draw: {:016x} ({} instructions) held {:.0f} ms: {} ({} {}x{})",
                          key.Hash(), source_words,
                          std::chrono::duration<double, std::milli>(held).count(),
-                         reasons[std::min<size_t>(hold_reason, reasons.size() - 1)],
-                         hold_target_color ? "color" : "depth", hold_target_width,
-                         hold_target_height);
+                         reasons[std::min<size_t>(reason, reasons.size() - 1)],
+                         target_color ? "color" : "depth", target_width, target_height);
             }
         });
     }
