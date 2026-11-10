@@ -13,6 +13,10 @@
 #include "common/settings_enums.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
+namespace VideoCore {
+struct DlssStatus;
+}
+
 namespace Vulkan {
 
 class Device;
@@ -57,6 +61,9 @@ public:
         return failed.load();
     }
 
+    /// Evaluations that succeeded in this process, for the status bar.
+    [[nodiscard]] static VideoCore::DlssStatus Status();
+
     [[nodiscard]] VkImage OutputImage() const noexcept {
         return *output_image;
     }
@@ -85,6 +92,7 @@ private:
     bool hdr_input = true;
     Settings::NvidiaDlssQuality quality_mode{};
     Settings::NvidiaDlssPreset model_preset{};
+    Settings::NvidiaDlssQuality evaluated_mode{}; ///< Recorded on the scheduler's worker
     u32 frame_index{};
     vk::Image output_image;
     vk::ImageView output_view;

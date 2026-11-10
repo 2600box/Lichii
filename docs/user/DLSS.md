@@ -5,6 +5,18 @@ preset. Apply or OK updates these two choices while playing. The master DLSS
 checkbox still takes effect when a game starts. These controls apply only to the
 supported game-upscaler replacements, not every game or the window scaling filter.
 
+## Checking that DLSS runs
+
+DLSS is the "Use NVIDIA DLSS in place of a game's DLSS" checkbox, not a window
+adapting filter. The filter button in the status bar (FSR 1, Bilinear and so on)
+is a separate step that scales the finished image to the window. While DLSS
+replaces a game's upscaler, the status bar and the performance overlay show
+**DLSS**, the mode it runs in and the preset, for example `DLSS DLAA M`. When an
+explicit mode doesn't fit the game's render size, they add the mode you chose,
+for example `DLSS QUALITY M (PERFORMANCE DOESN'T FIT)`. Nothing DLSS-related is
+shown when the game never calls its upscaler, or after DLSS has failed; a failure
+keeps DLSS off until the game restarts, and the log says why.
+
 ## Model presets
 
 Lichii defaults to **M** for every quality mode. The available choices are NVIDIA

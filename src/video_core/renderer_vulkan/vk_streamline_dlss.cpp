@@ -4,12 +4,14 @@
 // NVIDIA DLSS (through NVIDIA Streamline) in place of a game's DLSS evaluation.
 
 #include <array>
+#include <atomic>
 #include <cstdlib>
 
 #include "common/logging.h"
 #include "common/settings.h"
 #include "video_core/dlss_evaluation.h"
 #include "video_core/dlss_mode.h"
+#include "video_core/renderer_base.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_streamline_dlss.h"
 #include "video_core/vulkan_common/streamline.h"
@@ -25,6 +27,9 @@ constexpr VkFormat OUTPUT_FORMAT = VK_FORMAT_R16G16B16A16_SFLOAT;
 constexpr VkImageUsageFlags OUTPUT_USAGE = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
                                            VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
                                            VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+
+std::atomic<u64> evaluations{};
+std::atomic<u32> last_evaluation{}; ///< Mode, requested mode and preset, a byte each
 
 // slEvaluateFeature returns eWarnOutOfVRAM after it has evaluated DLSS, when the VRAM budget is
 // used up (commonInterface.cpp, slEvaluateFeatureInternal). The output is written; it is a warning.
@@ -281,7 +286,8 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
 
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([this, in, reset, options, options_changed, requested = settings.quality,
-                      index = frame_index++, output_image_handle = *output_image,
+                      preset_setting = settings.preset, index = frame_index++,
+                      output_image_handle = *output_image,
                       output_view_handle = *output_view](vk::CommandBuffer cmdbuf) {
         const Streamline::Api& api = Streamline::GetApi();
         const sl::ViewportHandle viewport{0u};
@@ -444,6 +450,7 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
                     return false;
                 }
                 validated.mode = ModeFor(*selection.mode);
+                evaluated_mode = *selection.mode;
                 LOG_INFO(Render_Vulkan,
                          "NVIDIA DLSS (Streamline): {}x{} -> {}x{}, mode {}, preset {}, {}",
                          in.render_size.width, in.render_size.height, in.upscale_size.width,
@@ -489,6 +496,11 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
             clear_output();
             return;
         }
+        last_evaluation.store(static_cast<u32>(evaluated_mode) |
+                                  (static_cast<u32>(requested) << 8) |
+                                  (static_cast<u32>(preset_setting) << 16),
+                              std::memory_order_relaxed);
+        evaluations.fetch_add(1, std::memory_order_release);
         // NGX doesn't report the model it picked, but its memory tells them apart: at 3840x2160
         // output DLSS 310.9 allocates about 198 MB for presets E and F and 307 MB for J and K.
         sl::DLSSState state{};
@@ -502,6 +514,17 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
     // DLSS binds its own pipelines and descriptors on the command buffer.
     scheduler.InvalidateState();
     return true;
+}
+
+VideoCore::DlssStatus StreamlineDlssUpscaler::Status() {
+    const u64 count = evaluations.load(std::memory_order_acquire);
+    const u32 last = last_evaluation.load(std::memory_order_relaxed);
+    return {
+        .evaluations = count,
+        .mode = static_cast<Settings::NvidiaDlssQuality>(last & 0xff),
+        .requested = static_cast<Settings::NvidiaDlssQuality>((last >> 8) & 0xff),
+        .preset = static_cast<Settings::NvidiaDlssPreset>((last >> 16) & 0xff),
+    };
 }
 
 } // namespace Vulkan

@@ -183,9 +183,14 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "download button below.\nFire Emblem: Fortune's Weave also needs "
               "EDEN_NX2_DLSS_REPLACEMENT=dlss. Without that override, its spatial workaround "
               "remains active.\nIn The Legend of Zelda: Ocarina of Time it replaces the game's "
-              "upscaler at 1x resolution scale.\nTakes effect when a game starts."));
+              "upscaler at 1x resolution scale.\nThe window adapting filter (the FSR 1, Bilinear "
+              "and similar button in the status bar) is separate and runs after DLSS. While DLSS "
+              "runs, the status bar shows DLSS, its mode and its preset. If DLSS fails, it stays "
+              "off until the game restarts and the log says why.\nTakes effect when a game "
+              "starts."));
     INSERT(Settings, nvidia_dlss_quality, tr("NVIDIA DLSS quality:"),
-           tr("Automatic selects a mode for the game's render/output sizes. Native (DLAA) "
+           tr("Applies only when a game uses its own DLSS.\nAutomatic selects a mode for the "
+              "game's render/output sizes. Native (DLAA) "
               "applies anti-aliasing at the game's render resolution, then scales to its output; "
               "Ocarina's 1440p mode stays at 1440p instead of reconstructing to 4K.\n"
               "Explicit modes only apply when the game's render size is within NVIDIA's "
@@ -194,7 +199,8 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "playing."));
     INSERT(
         Settings, nvidia_dlss_preset, tr("NVIDIA DLSS model preset:"),
-        tr("M (DLSS 4.5) is Lichii's default for every quality mode. NVIDIA recommends K for "
+        tr("Applies only when a game uses its own DLSS.\nM (DLSS 4.5) is Lichii's default for "
+           "every quality mode. NVIDIA recommends K for "
            "DLAA/Quality/Balanced, M for Performance, and L for Ultra Performance.\n"
            "L/M cost more on RTX 20/30 GPUs; consider K. J may reduce ghosting but flicker more. "
            "E/F are deprecated CNN models. NVIDIA default lets the runtime choose.\n"
