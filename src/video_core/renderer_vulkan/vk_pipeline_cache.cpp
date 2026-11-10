@@ -1909,6 +1909,9 @@ size_t PipelineCache::PrecacheGraphicsWarm(u64 title_id, size_t num_threads, siz
         for (size_t thread = 0; thread < num_threads; ++thread) {
             threads.emplace_back([this, &reader, &cancel, missing_dynamic_states] {
                 Common::SetCurrentThreadName("VkShaderPrecache");
+                // One thread per CPU thread: below normal, like the shader job workers, so the
+                // UI thread (menus, the configure dialog) is not starved during the warm-up.
+                Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
                 static const GuessMissing guess{};
                 GraphicsPipelineLibraryCache::SetNoRetainOnThisThread(true);
                 ShaderPools pools;
