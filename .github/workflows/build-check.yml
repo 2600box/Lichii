@@ -143,6 +143,57 @@ jobs:
       - name: Test Linux switch discovery
         run: CXX=g++-13 python3 tools/nx2/test_switches.py
 
+      # Test branches only: a self-contained AppImage, same recipe as release-binaries.yml.
+      # linuxdeploy bundles every library except the base system ones (glibc, X11/Wayland client
+      # libraries, the GPU driver and Vulkan loader); its Qt plugin adds Qt. Runs on glibc 2.39+.
+      - name: Package Linux AppImage
+        run: |
+          set -euo pipefail
+          test -x build/bin/lichii
+          test -x build/bin/eden-cli
+          test -f build/bin/libnxformat.so
+          strip build/bin/lichii build/bin/eden-cli
+          tools="$RUNNER_TEMP/linuxdeploy"
+          mkdir -p "$tools"
+          arch=$(uname -m)
+          curl -fsSL -o "$tools/linuxdeploy-$arch.AppImage" \
+          https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-$arch.AppImage
+          curl -fsSL -o "$tools/linuxdeploy-plugin-qt-$arch.AppImage" \
+          https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-$arch.AppImage
+          chmod +x "$tools"/*.AppImage
+          # The desktop file names its icon io.github.zortos293.lichii.
+          icon="$RUNNER_TEMP/io.github.zortos293.lichii.png"
+          cp dist/lichii.png "$icon"
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          export QMAKE="$QT_ROOT_DIR/bin/qmake"
+          export EXTRA_QT_MODULES=waylandcompositor
+          export EXTRA_PLATFORM_PLUGINS='libqwayland-egl.so;libqwayland-generic.so'
+          export LDAI_VERSION="test-${GITHUB_SHA::10}"
+          export LDAI_OUTPUT="lichii-${GITHUB_SHA}-linux-x86_64.AppImage"
+          export OUTPUT="$LDAI_OUTPUT"
+          export ARCH="$arch"
+          mkdir -p AppDir/usr/bin
+          cp build/bin/nx2_switches.txt AppDir/usr/bin/
+          "$tools/linuxdeploy-$arch.AppImage" --appdir AppDir \
+            --executable build/bin/lichii \
+            --executable build/bin/eden-cli \
+            --desktop-file dist/io.github.zortos293.lichii.desktop \
+            --icon-file "$icon" \
+            --plugin qt \
+            --output appimage
+          test -s "$LDAI_OUTPUT"
+          ls -la "$LDAI_OUTPUT"
+          ls AppDir/usr/lib
+          mkdir -p appimage
+          mv "$LDAI_OUTPUT" appimage/
+
+      - name: Upload the Linux AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: lichii-linux-appimage-${{ github.sha }}
+          path: appimage/
+          retention-days: 7
+
       - name: Save dependencies and compiler objects
         if: always()
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
