@@ -4397,7 +4397,8 @@ void MainWindow::OnGameListConvertToNup(const std::string& game_path) {
     if (nup_running)
         return;
 
-    const auto root = FileSys::Nup::DumpRootFromMain(game_path);
+    const auto root =
+        FileSys::Nup::DumpRootFromMain(std::filesystem::path{Common::FS::ToU8String(game_path)});
     if (!root)
         return;
     const QString convert_title = tr("Convert to NUP");
