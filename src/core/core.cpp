@@ -260,9 +260,12 @@ struct System::Impl {
         // are not up yet there is nothing to refresh: they read the current settings when
         // they start.
         auto& manager = system.ServiceManager();
-        auto settings_service = manager.GetService<Service::Set::ISystemSettingsServer>("set:sys");
-        auto static_service_a = manager.GetService<Service::Glue::Time::StaticService>("time:a");
-        auto static_service_s = manager.GetService<Service::PSC::Time::StaticService>("time:s");
+        auto settings_service =
+            manager.GetService<Service::Set::ISystemSettingsServer>("set:sys");
+        auto static_service_a =
+            manager.GetService<Service::Glue::Time::StaticService>("time:a");
+        auto static_service_s =
+            manager.GetService<Service::PSC::Time::StaticService>("time:s");
         if (!settings_service || !static_service_a || !static_service_s) {
             LOG_INFO(Core, "Time services not started yet, they will use the current settings");
             return;
