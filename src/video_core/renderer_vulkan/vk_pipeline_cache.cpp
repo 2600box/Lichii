@@ -1818,9 +1818,15 @@ u64 WarmVariant(bool graphics) {
     return Common::CityHash64(reinterpret_cast<const char*>(inputs.data()), sizeof(inputs));
 }
 
-/// Graphics marker bit 2: the device has no dynamic vertex input, so the warm-up left out the
-/// entries made for it. Turning the feature on later no longer matches, and they get built.
-constexpr u32 WarmWithoutDynamicVertexInput = 4;
+/// Graphics marker bits 2 and up: the dynamic states the device lacks (KeyDynamicState bits),
+/// whose entries the warm-up left out. Gaining one later no longer matches, and they get built.
+constexpr u32 WarmMissingDynamicStateShift = 2;
+// Bit 2 stays dynamic vertex input, so markers written before the other states still match.
+static_assert((KeyDynamicState::VertexInput << WarmMissingDynamicStateShift) == 4);
+
+u32 GraphicsWarmModeBits(const DynamicFeatures& features) {
+    return NoInlineBits() | (MissingKeyDynamicStates(features) << WarmMissingDynamicStateShift);
+}
 } // Anonymous namespace
 
 size_t PipelineCache::PrecacheGraphicsWarm(u64 title_id, size_t num_threads, size_t done_before,
@@ -1837,9 +1843,8 @@ size_t PipelineCache::PrecacheGraphicsWarm(u64 title_id, size_t num_threads, siz
     if (!std::filesystem::exists(warm_file, ec)) {
         return 0;
     }
-    const u32 mode_bits =
-        NoInlineBits() |
-        (dynamic_features.has_dynamic_vertex_input ? 0U : WarmWithoutDynamicVertexInput);
+    const u32 mode_bits = GraphicsWarmModeBits(dynamic_features);
+    const u32 missing_dynamic_states = MissingKeyDynamicStates(dynamic_features);
     const auto stamp = [&](u64 entries) {
         return ShaderWarm::CurrentWarmStamp(warm_file, entries, device.GetDriverVersion(),
                                             device.GetDeviceID(), CACHE_VERSION, mode_bits,
@@ -1863,7 +1868,7 @@ size_t PipelineCache::PrecacheGraphicsWarm(u64 title_id, size_t num_threads, siz
         std::atomic<size_t> driver_failures{};
         /// Left out on purpose: vertex programs that read their position input.
         std::atomic<size_t> skipped_builds{};
-        /// Left out: entries made for dynamic vertex input on a device without it.
+        /// Left out: entries made for a dynamic state this device lacks.
         std::atomic<size_t> unsupported_builds{};
         size_t read{}; ///< Entries taken from the file (under the mutex)
         std::streamoff position{};
@@ -1902,7 +1907,7 @@ size_t PipelineCache::PrecacheGraphicsWarm(u64 title_id, size_t num_threads, siz
     {
         std::vector<std::jthread> threads;
         for (size_t thread = 0; thread < num_threads; ++thread) {
-            threads.emplace_back([this, &reader, &cancel] {
+            threads.emplace_back([this, &reader, &cancel, missing_dynamic_states] {
                 Common::SetCurrentThreadName("VkShaderPrecache");
                 static const GuessMissing guess{};
                 GraphicsPipelineLibraryCache::SetNoRetainOnThisThread(true);
@@ -1937,8 +1942,7 @@ size_t PipelineCache::PrecacheGraphicsWarm(u64 title_id, size_t num_threads, siz
                         }
                     }
                     // Its libraries would name a dynamic state this device does not have.
-                    if (key.state.dynamic_vertex_input != 0 &&
-                        !dynamic_features.has_dynamic_vertex_input) {
+                    if ((KeyDynamicStates(key.state) & missing_dynamic_states) != 0) {
                         reader.unsupported_builds.fetch_add(1);
                         continue;
                     }
@@ -2009,8 +2013,8 @@ size_t PipelineCache::PrecacheGraphicsWarm(u64 title_id, size_t num_threads, siz
     }
     LOG_INFO(Render_Vulkan,
              "Shader precache: graphics programs {}, {} built, {} failed ({} by the driver), "
-             "{} skipped (vertex reads its position input), {} skipped (made for dynamic vertex "
-             "input), {:.1f} s",
+             "{} skipped (vertex reads its position input), {} skipped (made for dynamic state "
+             "this device lacks), {:.1f} s",
              stop_loading.stop_requested() ? "stopped" : (skipped ? "skipped" : "finished"),
              reader.built.load(), reader.failed_builds.load(), reader.driver_failures.load(),
              reader.skipped_builds.load(), reader.unsupported_builds.load(),
@@ -2110,9 +2114,7 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
         }
         const auto graphics_current = ShaderWarm::CurrentWarmStamp(
             graphics_file, 0, device.GetDriverVersion(), device.GetDeviceID(), CACHE_VERSION,
-            NoInlineBits() |
-                (dynamic_features.has_dynamic_vertex_input ? 0U : WarmWithoutDynamicVertexInput),
-            LinkModeBits(device), WarmVariant(true));
+            GraphicsWarmModeBits(dynamic_features), LinkModeBits(device), WarmVariant(true));
         const auto graphics_marker = ShaderWarm::ReadWarmMarker(graphics_file);
         return !(graphics_current && graphics_marker &&
                  graphics_marker->Matches(*graphics_current));

@@ -282,6 +282,53 @@ TEST_CASE("ShaderPrecache: programs that cannot be lowered are refused", "[video
     REQUIRE(lowered.code.empty());
 }
 
+TEST_CASE("ShaderPrecache: graphics entries made for a dynamic state the device lacks are found",
+          "[video_core]") {
+    namespace KeyDynamicState = Vulkan::KeyDynamicState;
+    constexpr u32 all = KeyDynamicState::VertexInput | KeyDynamicState::Extended |
+                        KeyDynamicState::Extended2 | KeyDynamicState::Extended2LogicOp |
+                        KeyDynamicState::Extended3Blend | KeyDynamicState::Extended3Enables |
+                        KeyDynamicState::ColorWriteEnable;
+    Vulkan::DynamicFeatures features{};
+    REQUIRE(Vulkan::MissingKeyDynamicStates(features) == all);
+    features.has_dynamic_vertex_input = true;
+    features.has_extended_dynamic_state = true;
+    features.has_extended_dynamic_state_2 = true;
+    features.has_extended_dynamic_state_2_logic_op = true;
+    features.has_extended_dynamic_state_3_blend = true;
+    features.has_extended_dynamic_state_3_enables = true;
+    features.has_color_write_enable = true;
+    REQUIRE(Vulkan::MissingKeyDynamicStates(features) == 0);
+
+    Vulkan::FixedPipelineState state;
+    std::memset(&state, 0, sizeof(state));
+    REQUIRE(Vulkan::KeyDynamicStates(state) == 0);
+    state.extended_dynamic_state.Assign(1);
+    state.extended_dynamic_state_2.Assign(1);
+    REQUIRE(Vulkan::KeyDynamicStates(state) ==
+            (KeyDynamicState::Extended | KeyDynamicState::Extended2));
+    state.dynamic_vertex_input.Assign(1);
+    state.extended_dynamic_state_2_logic_op.Assign(1);
+    state.extended_dynamic_state_3_blend.Assign(1);
+    state.extended_dynamic_state_3_enables.Assign(1);
+    state.color_write_enable_dynamic.Assign(1);
+    REQUIRE(Vulkan::KeyDynamicStates(state) == all);
+
+    // A device without EDS3 blending or color write enable: keys naming either are left out.
+    features.has_extended_dynamic_state_3_blend = false;
+    features.has_color_write_enable = false;
+    const u32 missing = Vulkan::MissingKeyDynamicStates(features);
+    REQUIRE(missing == (KeyDynamicState::Extended3Blend | KeyDynamicState::ColorWriteEnable));
+    REQUIRE((Vulkan::KeyDynamicStates(state) & missing) != 0);
+    state.extended_dynamic_state_3_blend.Assign(0);
+    REQUIRE((Vulkan::KeyDynamicStates(state) & missing) != 0);
+    state.color_write_enable_dynamic.Assign(0);
+    REQUIRE((Vulkan::KeyDynamicStates(state) & missing) == 0);
+
+    // Dynamic vertex input keeps the lowest bit: graphics marker bit 2 from earlier markers.
+    REQUIRE(KeyDynamicState::VertexInput == 1);
+}
+
 TEST_CASE("ShaderPrecache: draw state guesses come from the v2 log, else the older cache",
           "[video_core]") {
     namespace V2 = VideoCommon::ShaderCacheV2;

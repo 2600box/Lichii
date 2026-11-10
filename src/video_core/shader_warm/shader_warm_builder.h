@@ -48,7 +48,8 @@ u64 ReadWarmCount(const std::filesystem::path& warm_file);
 /// What a marker records: the precache file's size and last-write time, its entry count, the GPU
 /// driver version and device ID, the pipeline cache version and whether shared shader functions
 /// were built as calls (compute bit 0, graphics bit 1: the SPIR-V the driver compiled differs;
-/// graphics bit 2 when the device has no dynamic vertex input and those entries were left out),
+/// graphics bits 2 and up for the dynamic states the device lacks, whose entries were left out,
+/// bit 2 being dynamic vertex input),
 /// and the graphics link mode (bit 0 fast links usable, bit 1 optimized links on: together they
 /// decide whether libraries keep link time optimization info, which changes what the driver
 /// caches), and the variant: a hash of the build's SPIR-V emission sources (EmissionStamp) and
