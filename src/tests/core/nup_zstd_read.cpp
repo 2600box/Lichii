@@ -400,4 +400,9 @@ TEST_CASE("NUP serves a sound sibling in place of a .zs member with no zstd head
     // A member that cannot be decoded is not known to be damaged, so it is not replaced.
     REQUIRE(read("Broken_A_01_Nrm.bntx.zs").empty());
     REQUIRE(read("Model.bfres") == zeros);
+
+    // Extraction reads the package tree, which keeps the stored bytes.
+    const auto package = nup.GetPackageDir(0);
+    REQUIRE(package != nullptr);
+    REQUIRE(package->GetFile("Rock_WaterTemple_Gate_M_01_Nrm.bntx.zs")->ReadAllBytes() == damaged);
 }

@@ -965,7 +965,7 @@ std::optional<std::size_t> NupContainer::FindStandIn(std::size_t damaged,
     return best;
 }
 
-void NupContainer::BuildDirTree(u32 dir_index, VectorVfsDirectory& out) {
+void NupContainer::BuildDirTree(u32 dir_index, VectorVfsDirectory& out, bool serve_stand_ins) {
     const DirNode& node = dirs[dir_index];
     const u64 end = static_cast<u64>(node.first_child) + node.child_count;
     std::vector<std::size_t> dir_files;
@@ -978,7 +978,7 @@ void NupContainer::BuildDirTree(u32 dir_index, VectorVfsDirectory& out) {
             // A game .zs is already compressed, so the NUP only recompresses one that shrinks,
             // which a zeroed range does: only those members need their header checked.
             const FileNode& member = files[index];
-            if (member.codec == CodecZstd && member.name.ends_with(".zs") &&
+            if (serve_stand_ins && member.codec == CodecZstd && member.name.ends_with(".zs") &&
                 HasZstdMagic(index) == false) {
                 damaged.push_back(index);
             } else {
@@ -988,7 +988,7 @@ void NupContainer::BuildDirTree(u32 dir_index, VectorVfsDirectory& out) {
             auto sub = std::make_shared<VectorVfsDirectory>(std::vector<VirtualFile>{},
                                                             std::vector<VirtualDir>{},
                                                             dirs[child].name);
-            BuildDirTree(child, *sub);
+            BuildDirTree(child, *sub, serve_stand_ins);
             out.AddDirectory(sub);
         }
     }
@@ -1010,10 +1010,10 @@ void NupContainer::BuildDirTree(u32 dir_index, VectorVfsDirectory& out) {
     }
 }
 
-VirtualDir NupContainer::BuildPackageDir(u32 dir_index) {
+VirtualDir NupContainer::BuildPackageDir(u32 dir_index, bool serve_stand_ins) {
     auto out = std::make_shared<VectorVfsDirectory>(std::vector<VirtualFile>{},
                                                     std::vector<VirtualDir>{}, dirs[dir_index].name);
-    BuildDirTree(dir_index, *out);
+    BuildDirTree(dir_index, *out, serve_stand_ins);
     return out;
 }
 
@@ -1025,7 +1025,7 @@ VirtualDir NupContainer::GetExeFSDir(std::size_t package_index) {
         exefs_dir_cache.resize(packages.size());
     }
     if (exefs_dir_cache[package_index] == nullptr) {
-        auto dir = BuildPackageDir(packages[package_index].exefs_dir);
+        auto dir = BuildPackageDir(packages[package_index].exefs_dir, false);
         if (dir->GetFiles().empty() && dir->GetSubdirectories().empty()) {
             return nullptr;
         }
@@ -1042,7 +1042,8 @@ VirtualDir NupContainer::GetRomFSDir(std::size_t package_index) {
         romfs_dir_cache.resize(packages.size());
     }
     if (romfs_dir_cache[package_index] == nullptr) {
-        romfs_dir_cache[package_index] = BuildPackageDir(packages[package_index].romfs_dir);
+        // Only the game sees stand-ins; extraction and other package readers get stored bytes.
+        romfs_dir_cache[package_index] = BuildPackageDir(packages[package_index].romfs_dir, true);
     }
     return romfs_dir_cache[package_index];
 }
@@ -1051,7 +1052,7 @@ VirtualDir NupContainer::GetPackageDir(std::size_t package_index) {
     if (package_index >= packages.size()) {
         return nullptr;
     }
-    return BuildPackageDir(packages[package_index].root_dir);
+    return BuildPackageDir(packages[package_index].root_dir, false);
 }
 
 VirtualDir NupContainer::MergeShadowDirs(const VirtualDir& base, const VirtualDir& overlay) {
