@@ -68,6 +68,7 @@ SWITCHABLE(OotAntiAliasing, false);
 SWITCHABLE(NvidiaDlssQuality, false);
 SWITCHABLE(NvidiaDlssPreset, false);
 SWITCHABLE(HdrMode, false);
+SWITCHABLE(HdrSwapchain, false);
 SWITCHABLE(AspectRatio, true);
 SWITCHABLE(AstcDecodeMode, true);
 SWITCHABLE(AstcRecompression, true);
@@ -342,15 +343,14 @@ struct Values {
                                                                 linkage, true, "cpuopt_unsafe_ignore_global_monitor", Category::CpuUnsafe};
 
     // Renderer
-    // Off: the game always renders SDR. On: the game is told the display is HDR. Auto: HDR while
-    // the monitor showing the game runs in HDR, where the host can tell (Windows; elsewhere SDR).
-    SwitchableSetting<HdrMode> hdr_mode{linkage,
-#ifdef _WIN32
-                                        HdrMode::Auto,
-#else
-                                        HdrMode::Off,
-#endif
-                                        "hdr_mode", Category::Renderer};
+    // Off: the game always renders SDR. On: HDR whenever the surface offers an HDR format.
+    // Auto: HDR while the monitor showing the game runs in HDR, where the host can tell (Windows;
+    // elsewhere SDR). The game is told HDR only while the swapchain really presents HDR.
+    SwitchableSetting<HdrMode> hdr_mode{linkage, HdrMode::Off, "hdr_mode", Category::Renderer};
+    // HDR10: 10-bit PQ BT.2020 swapchain. scRGB: 16-bit float linear BT.709, for displays or
+    // drivers that band with 10-bit (reported on NVIDIA in fullscreen).
+    SwitchableSetting<HdrSwapchain> hdr_swapchain{linkage, HdrSwapchain::Hdr10, "hdr_swapchain",
+                                                  Category::Renderer};
     SwitchableSetting<u16, true> hdr_reference_white{linkage, 0, 0, 1000, "hdr_reference_white",
                                                   Category::Renderer, Specialization::Scalar};
     SwitchableSetting<u16, true> hdr_peak_luminance{linkage, 0, 0, 10000, "hdr_peak_luminance",
