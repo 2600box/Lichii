@@ -505,7 +505,7 @@ std::optional<Account> EnsureGameToken(std::string_view client_id) {
             client.Post(std::string{TokenPath}, BaseHeaders(client_id), form), "token refresh", error);
         if (!token || token->access_token.empty()) {
             last_renewal_failure = now;
-            return account;
+            return LoadAccount();
         }
         ApplyTokens(*account, *token);
         // The server retires the old refresh token a minute after handing out a new one.
@@ -514,14 +514,13 @@ std::optional<Account> EnsureGameToken(std::string_view client_id) {
         }
     }
     if (FetchGameToken(client, client_id, *account, error)) {
-        if (!SaveRenewedAccount(*account, generation)) {
-            return LoadAccount();
-        }
+        SaveRenewedAccount(*account, generation);
     } else {
         last_renewal_failure = now;
         LOG_WARNING(Common, "Could not renew the Nextendo game token: {}", error);
     }
-    return account;
+    // What is stored now, which a sign-in or sign-out during the requests may have replaced.
+    return LoadAccount();
 }
 
 } // namespace Common::Nextendo
