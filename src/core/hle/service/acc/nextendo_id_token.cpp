@@ -4,10 +4,8 @@
 // SPDX-FileCopyrightText: Copyright 2026 citron Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <array>
 #include <chrono>
 #include <cstring>
-#include <mutex>
 #include <vector>
 
 #include <fmt/format.h>
@@ -18,7 +16,6 @@
 
 #include "common/hex_util.h"
 #include "common/logging.h"
-#include "common/settings.h"
 #include "common/uuid.h"
 #include "core/core.h"
 #include "core/file_sys/control_metadata.h"
@@ -156,18 +153,20 @@ std::string BuildIdToken(Core::System& system, const Common::Nextendo::Account& 
     return input + "." + signature;
 }
 
-void WriteIdToken(HLERequestContext& ctx, std::string_view token) {
+std::size_t WriteIdToken(HLERequestContext& ctx, std::string_view token) {
     const std::size_t capacity = ctx.GetWriteBufferSize();
     if (capacity == 0) {
-        return;
+        return 0;
     }
     if (token.size() >= capacity) {
         LOG_ERROR(Service_ACC, "Nextendo id token ({} bytes) does not fit the {}-byte buffer",
                   token.size(), capacity);
     }
+    const std::size_t written = (std::min)(token.size(), capacity - 1);
     std::vector<u8> out(capacity, 0);
-    std::memcpy(out.data(), token.data(), (std::min)(token.size(), capacity - 1));
+    std::memcpy(out.data(), token.data(), written);
     ctx.WriteBuffer(out);
+    return written;
 }
 
 } // namespace Service::Account::Nextendo

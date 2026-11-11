@@ -237,7 +237,8 @@ static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestConte
 }
 
 void SFDNSRES::GetHostByNameRequest(HLERequestContext& ctx) {
-    auto [data_size, emu_gai_err] = GetHostByNameRequestImpl(ctx, system.GetApplicationProcessProgramID());
+    auto [data_size, emu_gai_err] =
+        GetHostByNameRequestImpl(ctx, system.GetApplicationProcessProgramID());
 
     struct OutputParameters {
         NetDbError netdb_error;
@@ -256,7 +257,8 @@ void SFDNSRES::GetHostByNameRequest(HLERequestContext& ctx) {
 }
 
 void SFDNSRES::GetHostByNameRequestWithOptions(HLERequestContext& ctx) {
-    auto [data_size, emu_gai_err] = GetHostByNameRequestImpl(ctx, system.GetApplicationProcessProgramID());
+    auto [data_size, emu_gai_err] =
+        GetHostByNameRequestImpl(ctx, system.GetApplicationProcessProgramID());
 
     struct OutputParameters {
         u32 data_size;
@@ -369,7 +371,8 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
 }
 
 void SFDNSRES::GetAddrInfoRequest(HLERequestContext& ctx) {
-    auto [data_size, emu_gai_err] = GetAddrInfoRequestImpl(ctx, system.GetApplicationProcessProgramID());
+    auto [data_size, emu_gai_err] =
+        GetAddrInfoRequestImpl(ctx, system.GetApplicationProcessProgramID());
 
     struct OutputParameters {
         Errno bsd_errno;
@@ -403,7 +406,8 @@ void SFDNSRES::GetGaiStringErrorRequest(HLERequestContext& ctx) {
 
 void SFDNSRES::GetAddrInfoRequestWithOptions(HLERequestContext& ctx) {
     // Additional options are ignored
-    auto [data_size, emu_gai_err] = GetAddrInfoRequestImpl(ctx, system.GetApplicationProcessProgramID());
+    auto [data_size, emu_gai_err] =
+        GetAddrInfoRequestImpl(ctx, system.GetApplicationProcessProgramID());
 
     struct OutputParameters {
         u32 data_size;

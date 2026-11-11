@@ -31,7 +31,8 @@ std::optional<Common::Nextendo::Account> LinkedAccount();
 // nx2 token from its "nnex" claim and the installed title version from "tv".
 std::string BuildIdToken(Core::System& system, const Common::Nextendo::Account& account);
 
-// Titles read the token as a C string, so the rest of their buffer is zeroed.
-void WriteIdToken(HLERequestContext& ctx, std::string_view token);
+// Titles read the token as a C string, so the rest of their buffer is zeroed. Returns the token
+// bytes written.
+std::size_t WriteIdToken(HLERequestContext& ctx, std::string_view token);
 
 } // namespace Service::Account::Nextendo
