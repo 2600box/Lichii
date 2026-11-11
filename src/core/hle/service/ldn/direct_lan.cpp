@@ -5,9 +5,10 @@
 #include <array>
 
 #ifdef _WIN32
-#include <mstcpip.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+
+#include <mstcpip.h>
 #else
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -132,6 +133,7 @@ bool DirectLan::Open(Network::IPv4Address ip, Network::IPv4Address subnet_mask) 
 
     LOG_INFO(Service_LDN, "LAN play on {}, broadcasting to {}",
              Network::IPv4AddressToString(local_ip), Network::IPv4AddressToString(broadcast_ip));
+    Network::SetDirectLanActive(true);
     worker = std::jthread([this](std::stop_token stop_token) { Run(stop_token); });
     return true;
 }
@@ -140,6 +142,7 @@ void DirectLan::Close() {
     if (worker.joinable()) {
         worker.request_stop();
         worker.join();
+        Network::SetDirectLanActive(false);
     }
     std::scoped_lock lock{mutex};
     host.reset();
