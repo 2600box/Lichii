@@ -677,7 +677,8 @@ public:
 
         RegisterHandlers(functions);
 
-        completion_event = service_context.CreateEvent("IAsyncNetworkServiceLicenseKindContext:Done");
+        completion_event =
+            service_context.CreateEvent("IAsyncNetworkServiceLicenseKindContext:Done");
         completion_event->Signal(system_.Kernel());
     }
 
@@ -729,12 +730,12 @@ static bool ReplyNextendoIdToken(Core::System& system, HLERequestContext& ctx) {
     if (!account) {
         return false;
     }
-    const std::string token = Nextendo::BuildIdToken(system, *account);
-    Nextendo::WriteIdToken(ctx, token);
+    const std::size_t written =
+        Nextendo::WriteIdToken(ctx, Nextendo::BuildIdToken(system, *account));
 
     IPC::ResponseBuilder rb{ctx, 3};
     rb.Push(ResultSuccess);
-    rb.Push(static_cast<u32>(token.size()));
+    rb.Push(static_cast<u32>(written));
     return true;
 }
 

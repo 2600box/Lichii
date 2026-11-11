@@ -15,8 +15,9 @@ TEST_CASE("Nextendo: PKCE S256 matches RFC 7636 appendix B", "[common]") {
             "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
 
     const auto pkce = Nextendo::MakePkce();
-    REQUIRE(pkce.verifier.size() == 43);
-    REQUIRE(pkce.challenge == Nextendo::PkceChallenge(pkce.verifier));
+    REQUIRE(pkce.has_value());
+    REQUIRE(pkce->verifier.size() == 43);
+    REQUIRE(pkce->challenge == Nextendo::PkceChallenge(pkce->verifier));
 }
 
 TEST_CASE("Nextendo: base64url has no padding", "[common]") {
@@ -45,16 +46,22 @@ TEST_CASE("Nextendo: callback parsing", "[common]") {
     using Params = std::multimap<std::string, std::string>;
 
     const auto ok = Nextendo::ParseCallback(Params{{"code", "abc"}, {"state", "s1"}}, "s1");
+    REQUIRE(ok.matched);
     REQUIRE(ok.error.empty());
     REQUIRE(ok.code == "abc");
 
     const auto wrong_state =
         Nextendo::ParseCallback(Params{{"code", "abc"}, {"state", "other"}}, "s1");
+    REQUIRE_FALSE(wrong_state.matched);
     REQUIRE(wrong_state.code.empty());
-    REQUIRE_FALSE(wrong_state.error.empty());
+
+    // A stray local request with an error but not this sign-in's state must not end it.
+    const auto stray = Nextendo::ParseCallback(Params{{"error", "access_denied"}}, "s1");
+    REQUIRE_FALSE(stray.matched);
 
     const auto denied = Nextendo::ParseCallback(
         Params{{"error", "access_denied"}, {"error_description", "no"}, {"state", "s1"}}, "s1");
+    REQUIRE(denied.matched);
     REQUIRE(denied.error == "access_denied: no");
 
     const auto no_code = Nextendo::ParseCallback(Params{{"state", "s1"}}, "s1");
@@ -102,4 +109,27 @@ TEST_CASE("Nextendo: token responses", "[common]") {
     REQUIRE(game->expires_in == 86400);
 
     REQUIRE_FALSE(Nextendo::ParseTokenResponse("not json").has_value());
+}
+
+TEST_CASE("Nextendo: only invalid_grant ends the session", "[common]") {
+    REQUIRE(Nextendo::RefreshTokenRejected(R"({"error":"invalid_grant"})"));
+    REQUIRE(Nextendo::RefreshTokenRejected(
+        R"({"error":"invalid_grant","error_description":"refresh token expired"})"));
+    REQUIRE_FALSE(Nextendo::RefreshTokenRejected(R"({"error":"invalid_client"})"));
+    REQUIRE_FALSE(Nextendo::RefreshTokenRejected(R"({"error":null})"));
+    REQUIRE_FALSE(Nextendo::RefreshTokenRejected("<html>Bad Gateway</html>"));
+}
+
+TEST_CASE("Nextendo: online status reply", "[common]") {
+    const auto refused = Nextendo::ParseOnlineStatus(R"({"allow":false,"reason":"unverified"})");
+    REQUIRE(refused.has_value());
+    REQUIRE_FALSE(refused->allow);
+    REQUIRE(refused->reason == "unverified");
+
+    const auto allowed = Nextendo::ParseOnlineStatus(R"({"allow":true,"reason":""})");
+    REQUIRE(allowed.has_value());
+    REQUIRE(allowed->allow);
+
+    REQUIRE_FALSE(Nextendo::ParseOnlineStatus(R"({"error":"Session invalide"})").has_value());
+    REQUIRE_FALSE(Nextendo::ParseOnlineStatus("not json").has_value());
 }
