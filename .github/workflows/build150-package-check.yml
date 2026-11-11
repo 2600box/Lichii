@@ -41,7 +41,7 @@ jobs:
       - name: Bundle app-local Microsoft runtime
         shell: pwsh
         run: |
-          $crt = Get-ChildItem 'C:/Program Files/Microsoft Visual Studio/2022/*/VC/Redist/MSVC/*/x64/Microsoft.VC143.CRT' -Directory | Sort-Object FullName -Descending | Select-Object -First 1
+          $crt = Get-Item 'C:/Program Files/Microsoft Visual Studio/2022/*/VC/Redist/MSVC/*/x64/Microsoft.VC143.CRT' | Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $crt) { throw 'Microsoft redistributable runtime directory missing' }
           Copy-Item "$($crt.FullName)/*.dll" package/ -Force
           foreach ($dll in 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
