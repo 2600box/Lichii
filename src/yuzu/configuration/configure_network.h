@@ -23,6 +23,8 @@ private:
     void changeEvent(QEvent*) override;
     void RetranslateUI();
     void SetConfiguration();
+    void SignInToNextendo();
+    void UpdateNextendoStatus(const QString& error = {});
 
     std::unique_ptr<Ui::ConfigureNetwork> ui;
 

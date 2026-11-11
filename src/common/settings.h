@@ -1069,6 +1069,13 @@ struct Values {
     Setting<std::string> network_interface{linkage, std::string(), "network_interface",
                                            Category::Network};
     SwitchableSetting<bool> airplane_mode{linkage, true, "airplane_mode", Category::Network};
+    Setting<bool> nextendo_enabled{linkage, false, "nextendo_enabled", Category::Network};
+    Setting<std::string> nextendo_server_ip{linkage, "51.178.29.194", "nextendo_server_ip",
+                                           Category::Network};
+    Setting<std::string> nextendo_nat_ip{linkage, "164.132.111.120", "nextendo_nat_ip",
+                                        Category::Network};
+    Setting<std::string> nextendo_client_id{linkage, "nxc_eHeSgpYwMkFV", "nextendo_client_id",
+                                           Category::Network};
 
     // WebService
     Setting<std::string> web_api_url{linkage, "api.ynet-fun.xyz", "web_api_url",
