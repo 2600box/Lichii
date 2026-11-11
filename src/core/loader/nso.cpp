@@ -15,15 +15,14 @@
 #include "common/hex_util.h"
 #include "common/logging.h"
 #include "common/npln_patch_catalog.h"
+#include "common/npln_patch_manifest.h"
 #include "common/lz4_compression.h"
 #include "common/zbic_compression.h"
 #include "common/settings.h"
 #include "common/swap.h"
 #include "core/core.h"
 #include "core/arm/dynarmic/window_trace.h"
-#include "core/file_sys/ips_layer.h"
 #include "core/file_sys/patch_manager.h"
-#include "core/file_sys/vfs/vfs_vector.h"
 #include "core/hle/kernel/code_set.h"
 #include "core/hle/kernel/k_page_table.h"
 #include "core/hle/kernel/k_process.h"
@@ -195,27 +194,14 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
     }
 
     // The signed Nextendo patch fixed for this launch, applied after mods as citron-nextendo does.
-    const auto build_id = Common::HexToString(nso_header.build_id);
-    if (pm && Common::NplnPatchCatalog::HasEntry(pm->GetTitleID(), build_id, name)) {
-        std::span<u8> section(codeset.memory.data() + module_start,
-                              codeset.memory.size() - module_start);
-        std::vector<u8> image(sizeof(NSOHeader) + section.size());
-        std::memcpy(image.data(), &nso_header, sizeof(NSOHeader));
-        std::memcpy(image.data() + sizeof(NSOHeader), section.data(), section.size());
-        const auto lookup =
-            Common::NplnPatchCatalog::Find(pm->GetTitleID(), build_id, name, image);
-        if (!lookup.ips.empty()) {
-            const auto patched = FileSys::PatchIPS(
-                std::make_shared<FileSys::VectorVfsFile>(std::move(image), name),
-                std::make_shared<FileSys::VectorVfsFile>(lookup.ips, "npln.ips32"));
-            if (patched && patched->GetSize() == sizeof(NSOHeader) + section.size()) {
-                patched->Read(section.data(), section.size(), sizeof(NSOHeader));
-                LOG_INFO(Loader, "Nextendo: NPLN patch {} v{} applied to {} build {}", lookup.id,
-                         lookup.version, name, build_id);
-            } else {
-                LOG_ERROR(Loader, "Nextendo: NPLN patch {} failed to apply to {}", lookup.id,
-                          name);
-            }
+    static_assert(sizeof(NSOHeader) == Common::NplnPatchCatalog::NsoHeaderSize);
+    if (pm) {
+        const auto build_id = Common::HexToString(nso_header.build_id);
+        if (const auto applied = Common::NplnPatchCatalog::Apply(
+                pm->GetTitleID(), build_id, name,
+                std::span(codeset.memory).subspan(module_start))) {
+            LOG_INFO(Loader, "Nextendo: NPLN patch {} v{} applied to {} build {}", applied->id,
+                     applied->version, name, build_id);
         }
     }
 

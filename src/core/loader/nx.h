@@ -57,6 +57,8 @@ public:
     void RegisterContent(FileSys::ManualContentProvider& provider) const;
 
 private:
+    void RegisterFrontendContent(Core::System& system) const;
+
     struct Impl;
     std::unique_ptr<Impl> impl;
 };

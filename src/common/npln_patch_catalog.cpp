@@ -8,7 +8,6 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
-#include <future>
 #include <map>
 #include <mutex>
 #include <stdexcept>
@@ -29,20 +28,22 @@
 namespace Common::NplnPatchCatalog {
 namespace {
 
+using Clock = std::chrono::steady_clock;
+
 // citron-nextendo's verification key for nextendo.network's signed NPLN catalogue (public).
 constexpr std::string_view PublicKey = "LAI+Pi+GZtj3p4DpNM5ORBraw1cbZCVSMFgUmAVWNeA=";
-constexpr std::size_t MaxDocument = 1024 * 1024;
 constexpr auto RefreshInterval = std::chrono::minutes(15);
+constexpr auto PrepareTimeout = std::chrono::seconds(10);
 
 struct State {
     std::mutex mutex;
     std::once_flag initialized;
     PatchState patches;
     TitleIndexState index;
-    std::once_flag index_started;
-    std::shared_future<void> index_check;
-    std::chrono::steady_clock::time_point index_deadline;
-    std::map<std::string, std::chrono::steady_clock::time_point> next_refresh;
+    // When the index was last fetched or confirmed; a failed fetch leaves it, so the next launch
+    // tries again.
+    std::optional<Clock::time_point> index_checked;
+    std::map<std::string, Clock::time_point> next_refresh;
 };
 
 State& Cache() {
@@ -75,9 +76,10 @@ std::string ReadDocument(const std::filesystem::path& path) {
 std::vector<std::filesystem::path> Documents(const std::filesystem::path& directory) {
     std::vector<std::filesystem::path> paths;
     std::error_code error;
-    for (const auto& file : std::filesystem::directory_iterator(directory, error)) {
-        if (file.is_regular_file() && file.path().extension() == ".json") {
-            paths.push_back(file.path());
+    for (std::filesystem::directory_iterator it(directory, error), end; !error && it != end;
+         it.increment(error)) {
+        if (it->is_regular_file(error) && it->path().extension() == ".json") {
+            paths.push_back(it->path());
         }
     }
     return paths;
@@ -120,26 +122,32 @@ void LoadCache() {
     }
 }
 
+// A failed write only costs the offline copy; the verified document is used either way.
 void SaveDocument(const std::filesystem::path& path, const std::string& envelope) {
-    auto temporary = path;
-    temporary += ".tmp";
-    std::filesystem::create_directories(path.parent_path());
-    {
-        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-        output.write(envelope.data(), static_cast<std::streamsize>(envelope.size()));
-        output.flush();
-        if (!output) {
-            throw std::runtime_error("Cannot write the verified catalog");
+    try {
+        auto temporary = path;
+        temporary += ".tmp";
+        std::filesystem::create_directories(path.parent_path());
+        {
+            std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+            output.write(envelope.data(), static_cast<std::streamsize>(envelope.size()));
+            output.flush();
+            if (!output) {
+                throw std::runtime_error("cannot write the file");
+            }
         }
-    }
 #ifdef _WIN32
-    if (!MoveFileExW(temporary.c_str(), path.c_str(),
-                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        throw std::runtime_error("Cannot replace the verified catalog");
-    }
+        if (!MoveFileExW(temporary.c_str(), path.c_str(),
+                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            throw std::runtime_error("cannot replace the file");
+        }
 #else
-    std::filesystem::rename(temporary, path);
+        std::filesystem::rename(temporary, path);
 #endif
+    } catch (const std::exception& error) {
+        LOG_WARNING(WebService, "Nextendo: NPLN cache {} not saved: {}", path.filename().string(),
+                    error.what());
+    }
 }
 
 struct Response {
@@ -148,11 +156,17 @@ struct Response {
     std::string body;
 };
 
-// Downloads over HTTPS from nextendo.network, never following a redirect, within 10 seconds and
-// MaxDocument bytes.
-std::optional<Response> Get(const std::string& path, const std::string& tag) {
+// Downloads over HTTPS from nextendo.network, never following a redirect, within the deadline
+// and MaxDocument bytes.
+std::optional<Response> Get(const std::string& path, const std::string& tag,
+                            Clock::time_point deadline) {
+    const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now());
+    if (left <= std::chrono::milliseconds::zero()) {
+        return std::nullopt;
+    }
     httplib::Client client{std::string{Nextendo::ApiBase}};
     Nextendo::ConfigureClient(client, 5);
+    client.set_max_timeout(left);
     client.set_follow_location(false);
     httplib::Headers headers{{"User-Agent", "Lichii"},
                              {"Accept", "application/json"},
@@ -161,10 +175,8 @@ std::optional<Response> Get(const std::string& path, const std::string& tag) {
         headers.emplace("If-None-Match", tag);
     }
     Response response;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     const auto result = client.Get(path, headers, [&](const char* data, std::size_t length) {
-        if (std::chrono::steady_clock::now() >= deadline ||
-            length > MaxDocument - response.body.size()) {
+        if (length > MaxDocument - response.body.size()) {
             return false;
         }
         response.body.append(data, length);
@@ -178,92 +190,78 @@ std::optional<Response> Get(const std::string& path, const std::string& tag) {
     return response;
 }
 
-void DownloadTitleIndex() {
-    try {
-        auto& state = Cache();
-        std::call_once(state.initialized, LoadCache);
-        std::string tag;
-        {
-            std::scoped_lock lock(state.mutex);
-            tag = state.index.Tag();
-        }
-        const auto response = Get("/service-catalog/v1/npln-title-index", tag);
-        if (response && response->status == 304 && !tag.empty() && response->etag == tag) {
-            LOG_INFO(WebService, "Nextendo: NPLN title index unchanged");
-            return;
-        }
-        if (!response || response->status != 200) {
-            throw std::runtime_error("Title index download unavailable");
-        }
-        const auto index = VerifyTitleIndex(response->body, PublicKey, Now());
-        if (response->etag != index.etag) {
-            throw std::runtime_error("Title index response tag mismatch");
-        }
+void DownloadTitleIndex(State& state, Clock::time_point deadline) {
+    std::string tag;
+    {
         std::scoped_lock lock(state.mutex);
-        auto next = state.index;
-        next.Remember(index);
-        SaveDocument(CacheDir() / "title-index" / fmt::format("revision-{}.json", index.revision),
-                     response->body);
-        state.index = std::move(next);
-        LOG_INFO(WebService, "Nextendo: NPLN title index verified, revision {}, {} titles",
-                 index.revision, index.titles.size());
-    } catch (const std::exception& error) {
-        LOG_WARNING(WebService, "Nextendo: NPLN title index check failed, keeping the verified "
-                                "index: {}",
-                    error.what());
+        tag = state.index.Tag();
     }
+    const auto response = Get("/service-catalog/v1/npln-title-index", tag, deadline);
+    if (response && response->status == 304 && !tag.empty() && response->etag == tag) {
+        std::scoped_lock lock(state.mutex);
+        state.index_checked = Clock::now();
+        return;
+    }
+    if (!response || response->status != 200) {
+        throw std::runtime_error("title index download unavailable");
+    }
+    const auto index = VerifyTitleIndex(response->body, PublicKey, Now());
+    if (response->etag != index.etag) {
+        throw std::runtime_error("title index response tag mismatch");
+    }
+    {
+        std::scoped_lock lock(state.mutex);
+        state.index.Remember(index);
+        state.index_checked = Clock::now();
+    }
+    SaveDocument(CacheDir() / "title-index" / fmt::format("revision-{}.json", index.revision),
+                 response->body);
+    LOG_INFO(WebService, "Nextendo: NPLN title index verified, revision {}, {} titles",
+             index.revision, index.titles.size());
 }
 
-void Download(u64 title_id, const std::string& build_id) {
-    const auto target = TargetName(title_id, build_id);
-    try {
-        auto& state = Cache();
-        std::string tag;
-        {
-            std::scoped_lock lock(state.mutex);
-            tag = state.patches.Tag(title_id, build_id);
-        }
-        const auto response = Get(
-            fmt::format("/service-catalog/v1/npln-patches/{:016x}/{}", title_id, build_id), tag);
-        if (response && response->status == 304 && !tag.empty() && response->etag == tag) {
-            LOG_INFO(WebService, "Nextendo: NPLN patch for {} unchanged", target);
-            return;
-        }
-        if (!response || response->status != 200) {
-            throw std::runtime_error("Patch download unavailable");
-        }
-        const auto manifest =
-            VerifyBuildManifest(response->body, PublicKey, Now(), title_id, build_id);
-        if (response->etag != manifest.etag) {
-            throw std::runtime_error("Patch response tag mismatch");
-        }
+// Returns once the server answered for this build: a verified patch, unchanged, or none.
+void Download(State& state, u64 title_id, const std::string& build_id,
+              Clock::time_point deadline) {
+    std::string tag;
+    {
+        std::scoped_lock lock(state.mutex);
+        tag = state.patches.Tag(title_id, build_id);
+    }
+    const auto response = Get(
+        fmt::format("/service-catalog/v1/npln-patches/{:016x}/{}", title_id, build_id), tag,
+        deadline);
+    if (response && (response->status == 404 ||
+                     (response->status == 304 && !tag.empty() && response->etag == tag))) {
+        return;
+    }
+    if (!response || response->status != 200) {
+        throw std::runtime_error("patch download unavailable");
+    }
+    const auto manifest = VerifyBuildManifest(response->body, PublicKey, Now(), title_id, build_id);
+    if (response->etag != manifest.etag) {
+        throw std::runtime_error("patch response tag mismatch");
+    }
+    {
         std::scoped_lock lock(state.mutex);
         if (manifest.revision < state.patches.Revision(title_id, build_id)) {
-            throw std::runtime_error("Patch catalog revision rollback rejected");
-        }
-        try {
-            SaveDocument(CacheDir() / "verified" /
-                             fmt::format("{}-revision-{}.json", target, manifest.revision),
-                         response->body);
-        } catch (const std::exception& error) {
-            LOG_WARNING(WebService, "Nextendo: NPLN patch cache write failed: {}", error.what());
+            throw std::runtime_error("patch catalog revision rollback rejected");
         }
         state.patches.Remember(manifest);
-        LOG_INFO(WebService, "Nextendo: NPLN patch {} v{} verified for build {}",
-                 manifest.patches[0].id, manifest.patches[0].version, build_id);
-    } catch (const std::exception& error) {
-        LOG_WARNING(WebService, "Nextendo: NPLN patch refresh for {} failed, keeping verified "
-                                "patches: {}",
-                    target, error.what());
     }
+    SaveDocument(CacheDir() / "verified" /
+                     fmt::format("{}-revision-{}.json", TargetName(title_id, build_id),
+                                 manifest.revision),
+                 response->body);
+    LOG_INFO(WebService, "Nextendo: NPLN patch {} v{} verified for build {}",
+             manifest.patches[0].id, manifest.patches[0].version, build_id);
 }
 
-// Refreshes when the last check of this build, here or in an earlier run, is RefreshInterval old.
+// Whether this build was last answered RefreshInterval ago, here or in an earlier run.
 bool RefreshDue(State& state, const std::string& target) {
-    const auto now = std::chrono::steady_clock::now();
-    const auto checks = CacheDir() / "checks" / (target + ".txt");
+    const auto now = Clock::now();
     if (!state.next_refresh.contains(target)) {
-        std::ifstream last_check(checks);
+        std::ifstream last_check(CacheDir() / "checks" / (target + ".txt"));
         s64 checked_at{};
         const s64 wall_now = Now();
         const s64 interval =
@@ -274,38 +272,40 @@ bool RefreshDue(State& state, const std::string& target) {
                 now + std::chrono::seconds(interval - (wall_now - checked_at));
         }
     }
-    if (now < state.next_refresh[target]) {
-        return false;
-    }
-    state.next_refresh[target] = now + RefreshInterval;
-    try {
-        std::filesystem::create_directories(checks.parent_path());
-        std::ofstream last_check(checks, std::ios::trunc);
-        last_check << Now() << '\n';
-    } catch (const std::exception& error) {
-        LOG_WARNING(WebService, "Nextendo: NPLN check time not saved: {}", error.what());
-    }
-    return true;
+    return now >= state.next_refresh[target];
 }
 
-} // namespace
-
-void PrepareForGame(u64 title_id,
-                    const std::function<std::optional<std::string>()>& read_build_id) {
-    auto& state = Cache();
+void RecordCheck(State& state, const std::string& target) {
     {
         std::scoped_lock lock(state.mutex);
-        state.patches.EndGame();
+        state.next_refresh[target] = Clock::now() + RefreshInterval;
     }
-    if (!Nextendo::OnlinePlayActive()) {
-        return;
-    }
-    std::call_once(state.index_started, [&state] {
-        state.index_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(12);
-        state.index_check = std::async(std::launch::async, DownloadTitleIndex).share();
-    });
-    state.index_check.wait_until(state.index_deadline);
+    const auto checks = CacheDir() / "checks" / (target + ".txt");
+    std::error_code error;
+    std::filesystem::create_directories(checks.parent_path(), error);
+    std::ofstream last_check(checks, std::ios::trunc);
+    last_check << Now() << '\n';
+}
+
+void Prepare(State& state, u64 title_id,
+             const std::function<std::optional<std::string>()>& read_build_id) {
+    const auto deadline = Clock::now() + PrepareTimeout;
     std::call_once(state.initialized, LoadCache);
+
+    bool index_due;
+    {
+        std::scoped_lock lock(state.mutex);
+        index_due = !state.index_checked || Clock::now() - *state.index_checked >= RefreshInterval;
+    }
+    if (index_due) {
+        try {
+            DownloadTitleIndex(state, deadline);
+        } catch (const std::exception& error) {
+            LOG_WARNING(WebService, "Nextendo: NPLN title index check failed, keeping the verified "
+                                    "index: {}",
+                        error.what());
+        }
+    }
 
     // A title the index stops listing keeps its verified patches until a signed entry withdraws
     // them, so its builds are still refreshed.
@@ -322,14 +322,22 @@ void PrepareForGame(u64 title_id,
         return;
     }
 
-    bool refresh = false;
+    const auto target = TargetName(title_id, *build_id);
+    bool refresh;
     {
         std::scoped_lock lock(state.mutex);
         const auto cached = state.patches.Cached(title_id, *build_id);
-        refresh = !(cached && cached->final) && RefreshDue(state, TargetName(title_id, *build_id));
+        refresh = !(cached && cached->final) && RefreshDue(state, target);
     }
     if (refresh) {
-        Download(title_id, *build_id);
+        try {
+            Download(state, title_id, *build_id, deadline);
+            RecordCheck(state, target);
+        } catch (const std::exception& error) {
+            LOG_WARNING(WebService, "Nextendo: NPLN patch refresh for {} failed, keeping verified "
+                                    "patches: {}",
+                        target, error.what());
+        }
     }
 
     std::scoped_lock lock(state.mutex);
@@ -338,40 +346,49 @@ void PrepareForGame(u64 title_id,
              state.patches.LatestRevision());
 }
 
-bool HasEntry(u64 title_id, std::string_view build_id, std::string_view module) {
-    if (!Nextendo::OnlinePlayActive()) {
-        return false;
-    }
+} // namespace
+
+void PrepareForGame(u64 title_id,
+                    const std::function<std::optional<std::string>()>& read_build_id) {
     auto& state = Cache();
-    std::scoped_lock lock(state.mutex);
-    return state.patches.Find(title_id, build_id, module) != nullptr;
+    {
+        std::scoped_lock lock(state.mutex);
+        state.patches.EndGame();
+    }
+    if (!Nextendo::OnlinePlayActive()) {
+        return;
+    }
+    try {
+        Prepare(state, title_id, read_build_id);
+    } catch (const std::exception& error) {
+        LOG_WARNING(WebService, "Nextendo: NPLN patch check failed: {}", error.what());
+    }
 }
 
-Lookup Find(u64 title_id, std::string_view build_id, std::string_view module,
-            std::span<const u8> image) {
+std::optional<AppliedPatch> Apply(u64 title_id, std::string_view build_id, std::string_view module,
+                                  std::span<u8> section) {
     if (!Nextendo::OnlinePlayActive()) {
-        return {};
+        return std::nullopt;
     }
     auto& state = Cache();
     std::scoped_lock lock(state.mutex);
     const auto patch = state.patches.Find(title_id, build_id, module);
     if (!patch) {
-        return {};
+        return std::nullopt;
     }
-    Lookup result{true, patch->id, patch->version, {}};
     if (!patch->enabled) {
         LOG_WARNING(WebService, "Nextendo: NPLN patch {} withdrawn by the signed catalog",
                     patch->id);
-        return result;
+        return std::nullopt;
     }
-    if (!CheckGuards(*patch, image)) {
+    if (!CheckGuards(*patch, section)) {
         LOG_ERROR(WebService, "Nextendo: NPLN patch {} rejected, the original instructions do not "
                               "match",
                   patch->id);
-        return result;
+        return std::nullopt;
     }
-    result.ips = patch->ips;
-    return result;
+    ApplyGuards(*patch, section);
+    return AppliedPatch{patch->id, patch->version};
 }
 
 } // namespace Common::NplnPatchCatalog

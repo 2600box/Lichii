@@ -131,14 +131,16 @@ TEST_CASE("NPLN: guards must match the image", "[common]") {
     const Signer signer{7};
     const auto patch = VerifyManifest(signer.Sign(Document()), signer.public_key, 1).patches[0];
 
-    std::vector<u8> image(0x1000);
-    std::copy(Original.begin(), Original.end(), image.begin() + GuardOffset);
-    REQUIRE(CheckGuards(patch, image));
-    std::copy(Patched.begin(), Patched.end(), image.begin() + GuardOffset);
-    REQUIRE(CheckGuards(patch, image));
-    image[GuardOffset] = 0xFF;
-    REQUIRE_FALSE(CheckGuards(patch, image));
-    REQUIRE_FALSE(CheckGuards(patch, std::span(image).first(GuardOffset + 2)));
+    constexpr u32 at = GuardOffset - NsoHeaderSize;
+    std::vector<u8> section(0x1000);
+    std::copy(Original.begin(), Original.end(), section.begin() + at);
+    REQUIRE(CheckGuards(patch, section));
+    ApplyGuards(patch, section);
+    REQUIRE(std::equal(Patched.begin(), Patched.end(), section.begin() + at));
+    REQUIRE(CheckGuards(patch, section));
+    section[at] = 0xFF;
+    REQUIRE_FALSE(CheckGuards(patch, section));
+    REQUIRE_FALSE(CheckGuards(patch, std::span(section).first(at + 2)));
 }
 
 TEST_CASE("NPLN: build response for another title or build rejected", "[common]") {
@@ -164,11 +166,10 @@ TEST_CASE("NPLN: build response for another title or build rejected", "[common]"
 
 TEST_CASE("NPLN: nothing is looked up while online play is off", "[common]") {
     Settings::values.nextendo_enabled = true;
+    std::vector<u8> section(0x1000);
     if constexpr (!Common::Nextendo::OnlinePlayAvailable) {
-        std::vector<u8> image(0x1000);
-        REQUIRE_FALSE(HasEntry(TitleId, BuildId, "main"));
-        REQUIRE_FALSE(Find(TitleId, BuildId, "main", image).authoritative);
+        REQUIRE_FALSE(Apply(TitleId, BuildId, "main", section));
     }
     Settings::values.nextendo_enabled = false;
-    REQUIRE_FALSE(HasEntry(TitleId, BuildId, "main"));
+    REQUIRE_FALSE(Apply(TitleId, BuildId, "main", section));
 }

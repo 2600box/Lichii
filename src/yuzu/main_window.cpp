@@ -139,7 +139,6 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 
 // Common //
 #include "common/fs/fs.h"
-#include "common/hex_util.h"
 #include "common/logging.h"
 #include "common/memory_detect.h"
 #include "common/nextendo.h"
@@ -2182,14 +2181,8 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
         QEventLoop loop;
         connect(&watcher, &QFutureWatcher<void>::finished, &loop, &QEventLoop::quit);
         watcher.setFuture(QtConcurrent::run([&loader, title_id] {
-            Common::NplnPatchCatalog::PrepareForGame(title_id, [&]() -> std::optional<std::string> {
-                std::array<u8, 0x20> build_id{};
-                if (loader->ReadMainBuildId(*QtCommon::system, build_id) !=
-                    Loader::ResultStatus::Success) {
-                    return std::nullopt;
-                }
-                return Common::HexToString(build_id);
-            });
+            Common::NplnPatchCatalog::PrepareForGame(
+                title_id, [&] { return loader->ReadMainBuildIdHex(*QtCommon::system); });
         }));
         progress.show();
         loop.exec();

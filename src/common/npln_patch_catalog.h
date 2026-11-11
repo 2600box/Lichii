@@ -11,7 +11,6 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <vector>
 
 #include "common/common_types.h"
 
@@ -20,23 +19,20 @@
 // src/web_service/npln_patch_catalog.cpp.
 namespace Common::NplnPatchCatalog {
 
-struct Lookup {
-    // Set when the launch has a signed entry for the module; ips stays empty when that entry is
-    // withdrawn or its guards do not match, and nothing may be applied in its place.
-    bool authoritative{};
+struct AppliedPatch {
     std::string id;
     u64 version{};
-    std::vector<u8> ips;
 };
 
-// Runs on a frontend worker before the game loads, never in the loader. While Nextendo is on and
-// the signed title index lists the title, reads the main build ID, refreshes that build's patch
-// at most every 15 minutes and fixes the patches this launch sees.
+// Runs on a frontend worker before the game loads, never in the loader, and takes at most about
+// 10 seconds. While online play is on and the signed title index lists the title, reads the main
+// build ID, refreshes that build's patch at most every 15 minutes and fixes the patches this
+// launch sees.
 void PrepareForGame(u64 title_id, const std::function<std::optional<std::string>()>& read_build_id);
 
-// For the loader: no network access, and nothing while Nextendo is off.
-bool HasEntry(u64 title_id, std::string_view build_id, std::string_view module);
-Lookup Find(u64 title_id, std::string_view build_id, std::string_view module,
-            std::span<const u8> image);
+// For the loader, with no network access: applies this launch's patch for the module to section,
+// the module after its NSO header, when every guard matches. Nothing while online play is off.
+std::optional<AppliedPatch> Apply(u64 title_id, std::string_view build_id, std::string_view module,
+                                  std::span<u8> section);
 
 } // namespace Common::NplnPatchCatalog

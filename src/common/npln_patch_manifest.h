@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <map>
 #include <span>
 #include <string>
@@ -18,6 +19,10 @@
 // The signed NPLN patch catalogue documents and the patches kept from them, ported from
 // citron-nextendo's src/web_service/npln_patch_manifest.cpp and npln_patch_state.h.
 namespace Common::NplnPatchCatalog {
+
+constexpr std::size_t MaxDocument = 1024 * 1024;
+// Patch offsets count from the start of the NSO header, which the guards never touch.
+constexpr u32 NsoHeaderSize = 0x100;
 
 struct Guard {
     u32 offset;
@@ -105,7 +110,10 @@ Manifest VerifyManifest(const std::string& envelope, std::string_view public_key
 Manifest VerifyBuildManifest(const std::string& envelope, std::string_view public_key, s64 now,
                              u64 title_id, std::string_view build_id);
 
-// image is [NSO header][decompressed segments]; each guard must find its original or patched bytes.
-bool CheckGuards(const Patch& patch, std::span<const u8> image);
+// section is the module's decompressed segments after its NSO header. Every guard must find its
+// original or patched bytes there.
+bool CheckGuards(const Patch& patch, std::span<const u8> section);
+// Writes the patched bytes. The IPS32 records were verified to be exactly these writes.
+void ApplyGuards(const Patch& patch, std::span<u8> section);
 
 } // namespace Common::NplnPatchCatalog

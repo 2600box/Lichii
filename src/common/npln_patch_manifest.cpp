@@ -23,7 +23,6 @@ namespace Common::NplnPatchCatalog {
 namespace {
 
 using Json = nlohmann::json;
-constexpr std::size_t MaxDocument = 1024 * 1024;
 
 std::vector<u8> Base64(std::string_view text) {
     if (text.empty() || text.size() > MaxDocument || text.size() % 4 != 0) {
@@ -135,7 +134,7 @@ void ValidateRecords(const Patch& patch) {
             (static_cast<std::size_t>(bytes[position]) << 8) | bytes[position + 1];
         position += 2;
 
-        if (length == 0 || offset < 0x100 || offset < previous_end ||
+        if (length == 0 || offset < NsoHeaderSize || offset < previous_end ||
             static_cast<u64>(offset) + length > 512ULL * 1024 * 1024 ||
             position + length > bytes.size() - 4 || offset != guard.offset ||
             length != guard.original.size() || length != guard.patched.size() ||
@@ -312,18 +311,26 @@ Manifest VerifyBuildManifest(const std::string& envelope, std::string_view publi
     return manifest;
 }
 
-bool CheckGuards(const Patch& patch, std::span<const u8> image) {
+bool CheckGuards(const Patch& patch, std::span<const u8> section) {
     for (const auto& guard : patch.guards) {
-        if (guard.offset > image.size() || guard.original.size() > image.size() - guard.offset) {
+        const std::size_t offset = guard.offset - NsoHeaderSize;
+        if (offset > section.size() || guard.original.size() > section.size() - offset) {
             return false;
         }
-        const auto begin = image.begin() + guard.offset;
+        const auto begin = section.begin() + offset;
         if (!std::equal(guard.original.begin(), guard.original.end(), begin) &&
             !std::equal(guard.patched.begin(), guard.patched.end(), begin)) {
             return false;
         }
     }
     return true;
+}
+
+void ApplyGuards(const Patch& patch, std::span<u8> section) {
+    for (const auto& guard : patch.guards) {
+        std::copy(guard.patched.begin(), guard.patched.end(),
+                  section.begin() + (guard.offset - NsoHeaderSize));
+    }
 }
 
 void PatchState::Remember(const Manifest& manifest) {

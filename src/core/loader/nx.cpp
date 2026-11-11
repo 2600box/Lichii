@@ -816,6 +816,16 @@ void AppLoader_NX::RegisterContent(FileSys::ManualContentProvider& provider) con
     }
 }
 
+// The frontend owns this provider; the game list fills it the same way. Adding an entry again
+// replaces it, so the build ID read before Load sees the same update.
+void AppLoader_NX::RegisterFrontendContent(Core::System& system) const {
+    if (const auto* slot = system.GetContentProviderUnion().GetSlotProvider(
+            FileSys::ContentProviderUnionSlot::FrontendManual)) {
+        RegisterContent(*const_cast<FileSys::ManualContentProvider*>(
+            static_cast<const FileSys::ManualContentProvider*>(slot)));
+    }
+}
+
 AppLoader::LoadResult AppLoader_NX::Load(Kernel::KProcess& process, Core::System& system) {
     if (is_loaded) {
         return {ResultStatus::ErrorAlreadyLoaded, {}};
@@ -823,12 +833,7 @@ AppLoader::LoadResult AppLoader_NX::Load(Kernel::KProcess& process, Core::System
     if (impl->status != ResultStatus::Success) {
         return {impl->status, {}};
     }
-    // The frontend owns this provider; the game list fills it the same way.
-    if (const auto* slot = system.GetContentProviderUnion().GetSlotProvider(
-            FileSys::ContentProviderUnionSlot::FrontendManual)) {
-        RegisterContent(*const_cast<FileSys::ManualContentProvider*>(
-            static_cast<const FileSys::ManualContentProvider*>(slot)));
-    }
+    RegisterFrontendContent(system);
     if (!impl->tree) {
         const auto result = impl->native->Load(process, system);
         is_loaded = result.first == ResultStatus::Success;
@@ -983,6 +988,7 @@ ResultStatus AppLoader_NX::ReadMainBuildId(Core::System& system, std::array<u8, 
     if (impl->status != ResultStatus::Success) {
         return impl->status;
     }
+    RegisterFrontendContent(system);
     return impl->tree ? impl->tree_executable->ReadMainBuildId(system, build_id)
                       : impl->native->ReadMainBuildId(system, build_id);
 }

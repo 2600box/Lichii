@@ -33,7 +33,6 @@
 
 #include "common/fs/fs_util.h"
 #include "common/fs/path_util.h"
-#include "common/hex_util.h"
 #include "common/logging.h"
 #include "common/nextendo.h"
 #include "common/npln_patch_catalog.h"
@@ -705,14 +704,8 @@ extern "C" SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv) {
             load_parameters.program_id, load_parameters.program_index);
         u64 title_id{};
         if (loader && loader->ReadProgramId(title_id) == Loader::ResultStatus::Success) {
-            Common::NplnPatchCatalog::PrepareForGame(title_id, [&]() -> std::optional<std::string> {
-                std::array<u8, 0x20> build_id{};
-                if (loader->ReadMainBuildId(state->system, build_id) !=
-                    Loader::ResultStatus::Success) {
-                    return std::nullopt;
-                }
-                return Common::HexToString(build_id);
-            });
+            Common::NplnPatchCatalog::PrepareForGame(
+                title_id, [&] { return loader->ReadMainBuildIdHex(state->system); });
         }
     }
     const Core::SystemResultStatus load_result = state->system.Load(*state->emu_window, lp.filepath, load_parameters);

@@ -357,6 +357,9 @@ public:
         return ResultStatus::ErrorNotImplemented;
     }
 
+    // ReadMainBuildId as the uppercase hex string the NPLN patch catalogue keys on.
+    std::optional<std::string> ReadMainBuildIdHex(Core::System& system);
+
     using Modules = std::map<VAddr, std::string>;
 
     virtual ResultStatus ReadNSOModules(Modules& modules) {
