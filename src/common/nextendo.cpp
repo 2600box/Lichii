@@ -33,7 +33,9 @@ namespace Common::Nextendo {
 namespace {
 
 std::mutex account_mutex;
+// Held across a token renewal, so a sign-in or sign-out can't be overwritten by its stale copy.
 std::mutex refresh_mutex;
+s64 last_renewal_failure = 0;
 std::optional<Account> cached_account;
 bool account_loaded = false;
 
@@ -115,10 +117,10 @@ s64 IntField(const nlohmann::json& object, const char* key) {
     return it != object.end() && it->is_number_integer() ? it->get<s64>() : 0;
 }
 
-void ConfigureClient(httplib::Client& client) {
-    client.set_connection_timeout(15);
-    client.set_read_timeout(15);
-    client.set_write_timeout(15);
+void ConfigureClient(httplib::Client& client, time_t timeout_seconds) {
+    client.set_connection_timeout(timeout_seconds);
+    client.set_read_timeout(timeout_seconds);
+    client.set_write_timeout(timeout_seconds);
     client.set_follow_location(true);
 #ifdef YUZU_BUNDLED_OPENSSL
     client.load_ca_cert_store(kCert, sizeof(kCert));
@@ -247,7 +249,7 @@ void SaveAccount(const Account& account) {
 }
 
 void ClearAccount() {
-    std::scoped_lock lock{account_mutex};
+    std::scoped_lock lock{refresh_mutex, account_mutex};
     void(FS::RemoveFile(AccountPath()));
     cached_account.reset();
     account_loaded = true;
@@ -399,7 +401,7 @@ SignInResult SignIn(std::string_view client_id,
     }
 
     httplib::Client client{std::string{ApiBase}};
-    ConfigureClient(client);
+    ConfigureClient(client, 15);
     const httplib::Params form{
         {"grant_type", "authorization_code"}, {"code", callback->code},
         {"client_id", std::string{client_id}}, {"redirect_uri", RedirectUri()},
@@ -442,7 +444,10 @@ SignInResult SignIn(std::string_view client_id,
         }
     }
 
-    SaveAccount(account);
+    {
+        std::scoped_lock lock{refresh_mutex};
+        SaveAccount(account);
+    }
     out.ok = true;
     return out;
 }
@@ -455,9 +460,14 @@ std::optional<Account> EnsureGameToken(std::string_view client_id) {
         (account->access_token.empty() && account->refresh_token.empty())) {
         return account;
     }
+    // A game asks for its id token on the IPC thread, so an unreachable server is retried at most
+    // every five minutes and with short timeouts.
+    if (now - last_renewal_failure < 5 * 60) {
+        return account;
+    }
 
     httplib::Client client{std::string{ApiBase}};
-    ConfigureClient(client);
+    ConfigureClient(client, 5);
     std::string error;
     if (account->access_token.empty() || account->access_expires <= now + 60) {
         if (account->refresh_token.empty()) {
@@ -472,6 +482,7 @@ std::optional<Account> EnsureGameToken(std::string_view client_id) {
         const auto token = ReadReply(
             client.Post(std::string{TokenPath}, BaseHeaders(client_id), form), "token refresh", error);
         if (!token || token->access_token.empty()) {
+            last_renewal_failure = now;
             return account;
         }
         ApplyTokens(*account, *token);
@@ -481,6 +492,7 @@ std::optional<Account> EnsureGameToken(std::string_view client_id) {
     if (FetchGameToken(client, client_id, *account, error)) {
         SaveAccount(*account);
     } else {
+        last_renewal_failure = now;
         LOG_WARNING(Common, "Could not renew the Nextendo game token: {}", error);
     }
     return account;
