@@ -220,9 +220,11 @@ public:
             });
     }
 
-    /// Whether anything was recorded since the last Flush or Finish.
+    /// Whether anything was recorded since the last Flush or Finish, or waits to be: batched
+    /// uploads and a deferred clear reach the command buffer only at the next record or submit.
     [[nodiscard]] bool RecordedSinceSubmit() const noexcept {
-        return record_serial != submitted_serial || uploads_pending;
+        return record_serial != submitted_serial || uploads_pending ||
+               deferred_clear.framebuffer != nullptr;
     }
     /// Counts a flush skipped because nothing was recorded (GPU profile).
     static void CountSkippedFlush();
