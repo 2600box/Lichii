@@ -31,7 +31,7 @@ jobs:
         run: |
           set -euo pipefail
           job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN/jobs" --jq '.jobs[0].id')
-          gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job/logs" > build.log
+          gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job/logs" --allow-escape-sequences > build.log
           python3 - <<'PYCODE'
           import re
           from pathlib import Path
