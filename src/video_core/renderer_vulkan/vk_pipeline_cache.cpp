@@ -1340,9 +1340,16 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     size_t compute_records = 0;
     size_t skipped_pipelines = 0;
     size_t queued_graphics = 0;
-    // build_all_cached_shaders: the rest too, up to the pipelines kept built
+    // build_all_cached_shaders: the rest too, in the room the recent sessions' pipelines leave
+    // under the pipelines kept built
     const bool build_all = Settings::values.build_all_cached_shaders.GetValue();
     const size_t kept_pipelines = KeptPipelines();
+    const size_t boot_used =
+        used_pipelines.empty() ? MaxPipelinesWithoutUsedList : used_pipelines.size();
+    const size_t spare_pipelines = kept_pipelines == 0
+                                       ? std::numeric_limits<size_t>::max()
+                                       : kept_pipelines - std::min(kept_pipelines, boot_used);
+    size_t queued_spare = 0;
     for (const CacheV2::LogRecord* const planned : plan) {
         const CacheV2::LogRecord& record = *planned;
         if (stop_loading.stop_requested()) {
@@ -1379,7 +1386,9 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
         }
         const bool used = used_pipelines.empty() ? queued_graphics < MaxPipelinesWithoutUsedList
                                                  : used_pipelines.contains(hash);
-        if (used || (build_all && (kept_pipelines == 0 || queued_graphics < kept_pipelines))) {
+        const bool spare = !used && build_all && queued_spare < spare_pipelines;
+        if (used || spare) {
+            queued_spare += spare ? 1 : 0;
             ++queued_graphics;
             boot_graphics.emplace_back(index, *key);
             continue;
