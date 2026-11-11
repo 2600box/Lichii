@@ -2,6 +2,11 @@ name: Build 150 portable package native startup check
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: Verify a package or snapshot current build logs
+        type: choice
+        default: package
+        options: [package, logs]
       run_id:
         description: Successful build150 Windows PGO workflow run ID
         type: string
@@ -14,7 +19,37 @@ permissions:
   contents: read
   actions: read
 jobs:
+  log-snapshot:
+    if: inputs.mode == 'logs'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Snapshot compiler progress
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN/jobs" --jq '.jobs[0].id')
+          gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job/logs" > build.log
+          python3 - <<'PYCODE'
+          import re
+          from pathlib import Path
+          s = Path('build.log').read_text(errors='replace')
+          print('Log bytes:', Path('build.log').stat().st_size)
+          print('Last build progress:', re.findall(r'\[\d+/\d+\]', s)[-5:])
+          print('Compiler errors:', re.findall(r'.{0,70}error:.{0,250}', s)[-12:])
+          print('Last log lines:')
+          for line in s.splitlines()[-25:]:
+              print(line[-600:])
+          PYCODE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build150-live-log-${{ github.run_id }}
+          path: build.log
+          retention-days: 7
   native-startup:
+    if: inputs.mode != 'logs'
     runs-on: windows-2022
     timeout-minutes: 15
     steps:
@@ -38,15 +73,54 @@ jobs:
           pattern: build150-pgo-warmup-evidence-*
           path: .
           merge-multiple: true
+      - name: Bundle app-local Microsoft runtime
+        shell: pwsh
+        run: |
+          $crt = Get-Item 'C:/Program Files/Microsoft Visual Studio/2022/*/VC/Redist/MSVC/*/x64/Microsoft.VC143.CRT' | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $crt) { throw 'Microsoft redistributable runtime directory missing' }
+          Copy-Item "$($crt.FullName)/*.dll" package/ -Force
+          foreach ($dll in 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
+            if (-not (Test-Path "package/$dll")) { throw "Missing app-local $dll" }
+          }
       - name: Verify PE architecture, feature presence and portable isolation
         shell: pwsh
         run: python tools/windows/warmup-test/verify-package.py
       - name: Report effective flags and profile exclusions
         shell: pwsh
-        run: python tools/windows/warmup-test/audit.py
+        run: |
+          python tools/windows/warmup-test/audit.py
+          if ($LASTEXITCODE -ne 0) { throw 'Optimisation audit failed' }
+          Get-Content evidence/profile-mismatch-summary.json
+          Get-Content evidence/compiler.txt
+          Get-Content evidence/ctest.log | Select-Object -Last 25
       - name: Start the native GUI using only package and system dependencies
         shell: pwsh
         run: ./tools/windows/warmup-test/native-smoke.ps1
+      - name: Add build and runtime evidence to the portable package
+        shell: pwsh
+        run: |
+          @(
+            'Compiled source commit:'
+            (Get-Content evidence/build-commit.txt)
+            'Training profile Git blob (unchanged):'
+            (Get-Content evidence/profile-blob.txt)
+            (Get-Content evidence/compiler.txt)
+            (Get-Content evidence/optimisation-audit.txt)
+            (Get-Content evidence/native-runtime-smoke.txt)
+            'Shared GPU shader functions default to calls, not inlined. GPU gameplay and performance remain unverified.'
+          ) | Set-Content package/BUILD-INFO.txt
+          $readme = Get-Content package/README-TEST.txt -Raw
+          $readme.Replace('choose Prepare shaders before the game starts.', 'choose Precache shaders before game start.').Replace('Prepare shaders (warm-up).', 'Build Shader Precache (or Rebuild Shader Precache).') | Set-Content package/README-TEST.txt
+          Get-ChildItem package -Recurse -File | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash)  $([IO.Path]::GetRelativePath((Resolve-Path package), $_.FullName))"
+          } | Set-Content evidence/final-package-sha256.txt
+      - name: Upload verified portable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: lichii-build150-windows-x64-pgo-warmup-verified-${{ github.run_id }}
+          path: package/
+          if-no-files-found: error
+          retention-days: 14
       - name: Upload native startup and corrected optimisation evidence
         if: always()
         uses: actions/upload-artifact@v4
