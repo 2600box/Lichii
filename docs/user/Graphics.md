@@ -6,41 +6,46 @@ Graphical enhancements and visual quality improvments. This doesn't cover textur
 
 ### Native HDR output
 
-**HDR follows the monitor on Windows (Auto) and is off elsewhere.** Setting it to On assumes that
-you have configured a compatible HDR environment: Vulkan, a suitable GPU and driver,
-an HDR-capable display, and HDR enabled in the operating system where required.
-Verifying and maintaining that environment is the user's responsibility. Configure
-it before starting the game.
+**HDR output is Off by default.** Set Graphics > HDR output to Auto to present the native HDR
+of Switch 2 games that have an HDR mode (Mario Kart World, Kirby Air Riders, Donkey Kong
+Bananza, Ocarina of Time and others). It does not add HDR to SDR-only games. It needs Vulkan.
 
-This feature preserves native HDR output from Switch 2 games that support it. It
-does not add HDR to SDR-only games. The HDR setting is Auto by default on Windows:
-the game is told the display runs HDR only while Windows HDR is on for the monitor
-that shows it, with that monitor's peak luminance and its SDR content brightness as
-reference white (HDR Peak Luminance and HDR Reference White at 0); on an SDR desktop
-the game renders SDR. Elsewhere it is Off by default, and Auto means SDR because the
-host state is not known; On declares that your environment supports both HDR10 and
-scRGB. The emulator starts with an SDR swapchain and selects HDR output when the game
-supplies native HDR frames, and sends HDR10 metadata (BT.2020 primaries, the
-reported peak).
+- **Off**: the game is always told the display is SDR.
+- **Auto**: HDR while Windows HDR ("Use HDR") is on for the monitor that shows the game. Other
+  hosts cannot tell, so Auto means SDR there.
+- **On**: HDR whenever the display driver offers an HDR swapchain format.
 
-The emulator does not enable operating-system HDR, tone-map HDR into SDR, or
-reinterpret HDR pixels as SDR. If the surface does not offer the HDR format the game
-needs, it logs an error and presents SDR. Captures are not promised HDR-to-SDR tone
-mapping.
+While HDR output is on, Lichii presents an HDR swapchain: HDR10 (10-bit PQ BT.2020) or, with
+HDR format set to scRGB, a 16-bit float one. It uses the other one if the driver offers only
+that, and SDR if it offers neither. The game is told the display is HDR only while that
+swapchain really is HDR, with the monitor's peak luminance and its SDR content brightness as
+reference white (HDR Peak Luminance and HDR Reference White at 0). An HDR10 swapchain gets
+HDR10 metadata with that peak. Which images hold HDR follows that answer, not the pixel format:
+Fire Emblem: Fortune's Weave draws SDR into 10-bit images.
 
-On Windows, Auto follows changes during play: toggling Windows HDR, moving the window
-to another monitor, changing the SDR content brightness or running the Windows HDR
-Calibration app is picked up within half a second, and the game is asked to query the
-display again (games that listen switch between SDR and HDR images; the HDR10 metadata
-is updated too). Run the Windows HDR Calibration app for your monitor first: Windows
-reports the peak from the display's colour profile where one is set, else from its
-EDID, and the game tone maps to that peak.
+SDR layers (games without HDR, system menus) are shown at the reference white on an HDR
+swapchain. An HDR image shown on an SDR swapchain, and every screenshot or capture of an HDR
+frame, is tone mapped to SDR: the reference white becomes SDR white and highlights roll off to
+the peak.
 
-Windows Auto HDR applies to SDR output of DirectX 11 and 12 games. With HDR on Auto
-and Windows HDR on, a game with an HDR mode presents native HDR10, which Auto HDR
-leaves alone. If you keep HDR Off on an HDR desktop and Auto HDR engages for the
-emulator, turn Auto HDR off for `lichii.exe` / `eden-cli.exe` in Settings > System > Display > Graphics, so
-SDR frames are shown as SDR.
+While HDR is active, anti-aliasing, post-processing, FSR/SGSR/FSR 3 upscaling and frame
+generation are off, and the window is scaled bilinearly. Upscalers that replace a game's own
+network (DLSS, FSR 3.1 in Ocarina of Time) run inside the game's frame and keep working.
+
+On Windows, Auto follows changes during play: toggling Windows HDR, moving the window to
+another monitor, changing the SDR content brightness or running the Windows HDR Calibration app
+is picked up within half a second. Lichii switches the swapchain and asks the game to query the
+display again; games that listen switch between SDR and HDR images. Run the Windows HDR
+Calibration app for your monitor first: Windows reports the peak from the display's colour
+profile where one is set, else from its EDID, and the game tone maps to that peak.
+
+If HDR shows banding, try HDR format scRGB: some NVIDIA drivers band with a 10-bit swapchain in
+fullscreen.
+
+Windows Auto HDR applies to SDR output of DirectX 11 and 12 games and leaves an HDR swapchain
+alone. If you keep HDR output Off on an HDR desktop and Auto HDR engages for the emulator, turn
+Auto HDR off for `lichii.exe` / `eden-cli.exe` in Settings > System > Display > Graphics, so SDR
+frames are shown as SDR.
 
 ### Anti-aliasing
 
