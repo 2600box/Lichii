@@ -2,6 +2,11 @@ name: Build 150 portable package native startup check
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: Verify a package or snapshot current build logs
+        type: choice
+        default: package
+        options: [package, logs]
       run_id:
         description: Successful build150 Windows PGO workflow run ID
         type: string
@@ -14,7 +19,37 @@ permissions:
   contents: read
   actions: read
 jobs:
+  log-snapshot:
+    if: inputs.mode == 'logs'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Snapshot compiler progress
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          job=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN/jobs" --jq '.jobs[0].id')
+          gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job/logs" > build.log
+          python3 - <<'PYCODE'
+          import re
+          from pathlib import Path
+          s = Path('build.log').read_text(errors='replace')
+          print('Log bytes:', Path('build.log').stat().st_size)
+          print('Last build progress:', re.findall(r'\[\d+/\d+\]', s)[-5:])
+          print('Compiler errors:', re.findall(r'.{0,70}error:.{0,250}', s)[-12:])
+          print('Last log lines:')
+          for line in s.splitlines()[-25:]:
+              print(line[-600:])
+          PYCODE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build150-live-log-${{ github.run_id }}
+          path: build.log
+          retention-days: 7
   native-startup:
+    if: inputs.mode != 'logs'
     runs-on: windows-2022
     timeout-minutes: 15
     steps:
