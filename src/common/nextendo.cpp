@@ -119,16 +119,6 @@ s64 IntField(const nlohmann::json& object, const char* key) {
     return it != object.end() && it->is_number_integer() ? it->get<s64>() : 0;
 }
 
-void ConfigureClient(httplib::Client& client, time_t timeout_seconds) {
-    client.set_connection_timeout(timeout_seconds);
-    client.set_read_timeout(timeout_seconds);
-    client.set_write_timeout(timeout_seconds);
-    client.set_follow_location(true);
-#ifdef YUZU_BUNDLED_OPENSSL
-    client.load_ca_cert_store(kCert, sizeof(kCert));
-#endif
-}
-
 httplib::Headers BaseHeaders(std::string_view client_id) {
     return {{"User-Agent", "Lichii"}, {"X-Nextendo-Client-Id", std::string{client_id}}};
 }
@@ -202,6 +192,16 @@ bool FetchGameToken(httplib::Client& client, std::string_view client_id, Account
 }
 
 } // namespace
+
+void ConfigureClient(httplib::Client& client, time_t timeout_seconds) {
+    client.set_connection_timeout(timeout_seconds);
+    client.set_read_timeout(timeout_seconds);
+    client.set_write_timeout(timeout_seconds);
+    client.set_follow_location(true);
+#ifdef YUZU_BUNDLED_OPENSSL
+    client.load_ca_cert_store(kCert, sizeof(kCert));
+#endif
+}
 
 bool OnlinePlayActive() {
     return OnlinePlayAvailable && Settings::values.nextendo_enabled.GetValue();

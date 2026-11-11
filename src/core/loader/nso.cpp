@@ -14,13 +14,16 @@
 #include "common/game_presets.h"
 #include "common/hex_util.h"
 #include "common/logging.h"
+#include "common/npln_patch_catalog.h"
 #include "common/lz4_compression.h"
 #include "common/zbic_compression.h"
 #include "common/settings.h"
 #include "common/swap.h"
 #include "core/core.h"
 #include "core/arm/dynarmic/window_trace.h"
+#include "core/file_sys/ips_layer.h"
 #include "core/file_sys/patch_manager.h"
+#include "core/file_sys/vfs/vfs_vector.h"
 #include "core/hle/kernel/code_set.h"
 #include "core/hle/kernel/k_page_table.h"
 #include "core/hle/kernel/k_process.h"
@@ -189,6 +192,31 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
         pi_header = pm->PatchNSO(pi_header, name);
 
         std::copy(pi_header.begin() + sizeof(NSOHeader), pi_header.end(), patchable_section.data());
+    }
+
+    // The signed Nextendo patch fixed for this launch, applied after mods as citron-nextendo does.
+    const auto build_id = Common::HexToString(nso_header.build_id);
+    if (pm && Common::NplnPatchCatalog::HasEntry(pm->GetTitleID(), build_id, name)) {
+        std::span<u8> section(codeset.memory.data() + module_start,
+                              codeset.memory.size() - module_start);
+        std::vector<u8> image(sizeof(NSOHeader) + section.size());
+        std::memcpy(image.data(), &nso_header, sizeof(NSOHeader));
+        std::memcpy(image.data() + sizeof(NSOHeader), section.data(), section.size());
+        const auto lookup =
+            Common::NplnPatchCatalog::Find(pm->GetTitleID(), build_id, name, image);
+        if (!lookup.ips.empty()) {
+            const auto patched = FileSys::PatchIPS(
+                std::make_shared<FileSys::VectorVfsFile>(std::move(image), name),
+                std::make_shared<FileSys::VectorVfsFile>(lookup.ips, "npln.ips32"));
+            if (patched && patched->GetSize() == sizeof(NSOHeader) + section.size()) {
+                patched->Read(section.data(), section.size(), sizeof(NSOHeader));
+                LOG_INFO(Loader, "Nextendo: NPLN patch {} v{} applied to {} build {}", lookup.id,
+                         lookup.version, name, build_id);
+            } else {
+                LOG_ERROR(Loader, "Nextendo: NPLN patch {} failed to apply to {}", lookup.id,
+                          name);
+            }
+        }
     }
 
     // Mario Kart World selects a 1- or 2-vblank frame mode in its main loop. Force its native
@@ -370,6 +398,17 @@ AppLoader_NSO::LoadResult AppLoader_NSO::Load(Kernel::KProcess& process, Core::S
 
 ResultStatus AppLoader_NSO::ReadNSOModules(Modules& out_modules) {
     out_modules = this->modules;
+    return ResultStatus::Success;
+}
+
+ResultStatus AppLoader_NSO::ReadMainBuildId(Core::System& system,
+                                            std::array<u8, 0x20>& build_id) {
+    NSOHeader header{};
+    if (!file || file->ReadObject(&header) != sizeof(header) ||
+        header.magic != Common::MakeMagic('N', 'S', 'O', '0')) {
+        return ResultStatus::ErrorLoadingNSO;
+    }
+    build_id = header.build_id;
     return ResultStatus::Success;
 }
 

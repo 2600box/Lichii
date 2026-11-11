@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <array>
 #include <functional>
 #include <iosfwd>
 #include <memory>
@@ -348,6 +349,11 @@ public:
      * @return ResultStatus result of function
      */
     virtual ResultStatus ReadManualRomFS(FileSys::VirtualFile& out_file) {
+        return ResultStatus::ErrorNotImplemented;
+    }
+
+    // The main NSO's build ID before the game loads, with the update that loading applies.
+    virtual ResultStatus ReadMainBuildId(Core::System& system, std::array<u8, 0x20>& build_id) {
         return ResultStatus::ErrorNotImplemented;
     }
 

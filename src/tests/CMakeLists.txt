@@ -161,6 +161,7 @@ add_executable(tests
     core/host_memory_failure.cpp
     common/multi_level_page_table.cpp
     common/nextendo.cpp
+    common/npln_patch_manifest.cpp
     common/page_table.cpp
     common/param_package.cpp
     common/range_map.cpp
@@ -226,6 +227,7 @@ create_target_directory_groups(tests)
 
 target_link_libraries(tests PRIVATE common core audio_core input_common video_core frontend_common)
 target_link_libraries(tests PRIVATE ${PLATFORM_LIBRARIES} Catch2::Catch2WithMain Threads::Threads)
+target_link_libraries(tests PRIVATE nlohmann_json::nlohmann_json OpenSSL::Crypto)
 
 if (TARGET dynarmic::dynarmic)
     target_sources(tests PRIVATE core/jit_ordered_loads.cpp core/window_trace.cpp)

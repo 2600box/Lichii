@@ -979,4 +979,12 @@ ResultStatus AppLoader_NX::ReadNSOModules(Modules& modules) {
                       : impl->native->ReadNSOModules(modules);
 }
 
+ResultStatus AppLoader_NX::ReadMainBuildId(Core::System& system, std::array<u8, 0x20>& build_id) {
+    if (impl->status != ResultStatus::Success) {
+        return impl->status;
+    }
+    return impl->tree ? impl->tree_executable->ReadMainBuildId(system, build_id)
+                      : impl->native->ReadMainBuildId(system, build_id);
+}
+
 } // namespace Loader

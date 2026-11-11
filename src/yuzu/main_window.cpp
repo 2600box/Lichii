@@ -139,8 +139,11 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 
 // Common //
 #include "common/fs/fs.h"
+#include "common/hex_util.h"
 #include "common/logging.h"
 #include "common/memory_detect.h"
+#include "common/nextendo.h"
+#include "common/npln_patch_catalog.h"
 #include "common/scm_rev.h"
 #include "common/scope_exit.h"
 #include "common/string_util.h"
@@ -2150,6 +2153,32 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
                                   tr("Game preparation failed. See the log for details."));
             return;
         }
+        if (close_pending) {
+            return;
+        }
+    }
+
+    if (loader && Common::Nextendo::OnlinePlayActive()) {
+        QProgressDialog progress(tr("Checking online patches..."), QString{}, 0, 0, this);
+        progress.setWindowModality(Qt::ApplicationModal);
+        progress.setWindowFlag(Qt::WindowCloseButtonHint, false);
+        progress.setCancelButton(nullptr);
+        progress.setMinimumDuration(0);
+        QFutureWatcher<void> watcher;
+        QEventLoop loop;
+        connect(&watcher, &QFutureWatcher<void>::finished, &loop, &QEventLoop::quit);
+        watcher.setFuture(QtConcurrent::run([&loader, title_id] {
+            Common::NplnPatchCatalog::PrepareForGame(title_id, [&]() -> std::optional<std::string> {
+                std::array<u8, 0x20> build_id{};
+                if (loader->ReadMainBuildId(*QtCommon::system, build_id) !=
+                    Loader::ResultStatus::Success) {
+                    return std::nullopt;
+                }
+                return Common::HexToString(build_id);
+            });
+        }));
+        progress.show();
+        loop.exec();
         if (close_pending) {
             return;
         }

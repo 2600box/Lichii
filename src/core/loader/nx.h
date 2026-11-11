@@ -49,6 +49,7 @@ public:
     ResultStatus ReadControlData(FileSys::NACP& control) override;
     ResultStatus ReadDisplayVersion(std::string& version) override;
     ResultStatus ReadNSOModules(Modules& modules) override;
+    ResultStatus ReadMainBuildId(Core::System& system, std::array<u8, 0x20>& build_id) override;
 
 
     /// Adds the update and add-on NCAs of a native archive to a content provider, so the
