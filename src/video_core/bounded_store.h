@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <deque>
 #include <optional>
 #include <unordered_map>
@@ -32,6 +33,13 @@ public:
                 entries.erase(it);
             }
         }
+        // Taken and replaced values leave their age records behind; at twice the live ones they go.
+        if (order.size() >= 2 * entries.size() + 64) {
+            std::erase_if(order, [this](const std::pair<Key, u64>& record) {
+                const auto it = entries.find(record.first);
+                return it == entries.end() || it->second.serial != record.second;
+            });
+        }
         total_bytes += bytes;
         order.emplace_back(key, ++last_serial);
         entries.insert_or_assign(key, Entry{std::move(value), bytes, last_serial});
@@ -53,6 +61,11 @@ public:
 
     [[nodiscard]] u64 Bytes() const noexcept {
         return total_bytes;
+    }
+
+    /// Age records held, live and stale
+    [[nodiscard]] size_t AgeRecords() const noexcept {
+        return order.size();
     }
 
 private:

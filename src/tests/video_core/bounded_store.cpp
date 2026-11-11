@@ -32,6 +32,15 @@ TEST_CASE("BoundedStore ages a value again when it is added again", "[video_core
     REQUIRE(store.Bytes() == 0);
 }
 
+TEST_CASE("BoundedStore drops the age records of taken values", "[video_core][bounded_store]") {
+    BoundedStore<int, int> store{100};
+    for (int i = 0; i < 10'000; ++i) {
+        store.Add(1, i, 10);
+        REQUIRE(store.Take(1) == i);
+    }
+    REQUIRE(store.AgeRecords() <= 65);
+}
+
 TEST_CASE("BoundedStore keeps nothing larger than its size", "[video_core][bounded_store]") {
     BoundedStore<int, int> store{100};
     store.Add(1, 10, 50);

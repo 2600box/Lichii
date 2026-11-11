@@ -644,7 +644,8 @@ GraphicsPipeline::GraphicsPipeline(
                 kept_spirv[stage] = Common::Compression::CompressDataZSTD(
                     reinterpret_cast<const u8*>(spirv[stage].data()),
                     spirv[stage].size() * sizeof(u32), 1);
-                spirv[stage] = {};
+                kept_spirv[stage].shrink_to_fit();
+                spirv[stage] = std::vector<u32>{};
             }
         }
         if (worker_only_build) {
