@@ -39,6 +39,7 @@ struct HdrConvertParams {
     f32 reference_white{};
     f32 peak{};
     f32 nits_per_unit{};
+    bool premultiplied{}; ///< colour is premultiplied by alpha (kept so across the conversion)
 };
 
 [[nodiscard]] HdrEncoding EncodingOf(Tegra::ColorSpace color_space);
@@ -51,9 +52,38 @@ struct HdrConvertParams {
 /// False when the layer's values already are what the frame needs.
 [[nodiscard]] bool NeedsHdrConvert(const HdrConvertParams& params);
 
+/// vulkan_hdr_convert.frag drawing into framebuffers of one format (Eglantine #557's passes, one
+/// shader).
+class HdrConvertPass {
+public:
+    explicit HdrConvertPass(const Device& device, size_t image_count, VkFormat output_format);
+    ~HdrConvertPass();
+
+    /// Every attachment is overwritten, so its old contents and layout are discarded.
+    [[nodiscard]] VkRenderPass RenderPass() const {
+        return *m_renderpass;
+    }
+
+    /// Draws input converted into framebuffer, an output-format attachment of output_image.
+    void Record(const Device& device, Scheduler& scheduler, size_t image_index,
+                const HdrConvertParams& params, VkImage input_image, VkImageView input_view,
+                VkImage output_image, VkFramebuffer framebuffer, VkExtent2D extent);
+
+private:
+    vk::ShaderModule m_vertex_shader{};
+    vk::ShaderModule m_fragment_shader{};
+    vk::DescriptorPool m_descriptor_pool{};
+    vk::DescriptorSetLayout m_descriptor_set_layout{};
+    std::vector<vk::DescriptorSets> m_descriptor_sets{};
+    vk::PipelineLayout m_pipeline_layout{};
+    vk::RenderPass m_renderpass{};
+    vk::Pipeline m_pipeline{};
+    vk::Sampler m_sampler{};
+};
+
 /// Converts a layer between SDR, HDR10 and scRGB before it is drawn into the frame: HDR layers
 /// on an SDR frame or a screenshot are tone mapped, SDR layers on an HDR frame are put at the
-/// reference white (Eglantine #557's passes, one shader).
+/// reference white.
 class HdrConvert {
 public:
     explicit HdrConvert(const Device& device, MemoryAllocator& allocator, size_t image_count,
@@ -69,22 +99,13 @@ public:
 
 private:
     struct Image {
-        vk::DescriptorSets descriptor_sets{};
-        vk::Framebuffer framebuffer{};
         vk::Image image{};
         vk::ImageView image_view{};
+        vk::Framebuffer framebuffer{};
     };
+    HdrConvertPass m_pass;
     std::vector<Image> m_images{};
     const VkExtent2D m_extent;
-    vk::ShaderModule m_vertex_shader{};
-    vk::ShaderModule m_fragment_shader{};
-    vk::DescriptorPool m_descriptor_pool{};
-    vk::DescriptorSetLayout m_descriptor_set_layout{};
-    vk::PipelineLayout m_pipeline_layout{};
-    vk::Pipeline m_pipeline{};
-    vk::RenderPass m_renderpass{};
-    vk::Sampler m_sampler{};
-    bool m_images_ready{};
 };
 
 } // namespace Vulkan

@@ -20,6 +20,7 @@ layout (push_constant) uniform Params {
     float reference_white; // nits SDR white is shown at
     float peak;            // nits an SDR output rolls highlights off to
     float nits_per_unit;   // nits of linear 1.0 in a scRGB input
+    uint premultiplied;    // colour is premultiplied by alpha
 };
 
 const float PQ_M1 = 0.1593017578125;
@@ -88,5 +89,10 @@ vec3 Encode(vec3 nits) {
 
 void main() {
     vec4 src = texture(input_texture, posPos.xy);
+    if (premultiplied != 0) {
+        vec3 color = src.a > 0.0 ? src.rgb / src.a : vec3(0.0);
+        frag_color = vec4(Encode(Decode(color)) * src.a, src.a);
+        return;
+    }
     frag_color = vec4(Encode(Decode(src.rgb)), src.a);
 }

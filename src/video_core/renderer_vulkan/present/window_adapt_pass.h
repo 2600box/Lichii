@@ -23,7 +23,6 @@ struct FramebufferConfig;
 namespace Vulkan {
 
 class Device;
-struct Frame;
 class Layer;
 class Scheduler;
 class RasterizerVulkan;
@@ -34,10 +33,11 @@ public:
                              vk::ShaderModule&& fragment_shader);
     ~WindowAdaptPass();
 
-    /// Draws the layers to dst, each converted to the frame's encoding (output).
+    /// Draws the layers into framebuffer, each converted to the encoding output.
     void Draw(const Device& device, RasterizerVulkan& rasterizer, Scheduler& scheduler, size_t image_index,
               std::list<Layer>& layers, std::span<const Tegra::FramebufferConfig> configs,
-              const Layout::FramebufferLayout& layout, Frame* dst, const HdrPresent& output);
+              const Layout::FramebufferLayout& layout, VkFramebuffer framebuffer,
+              VkExtent2D extent, const HdrPresent& output);
 
     VkDescriptorSetLayout GetDescriptorSetLayout();
     VkRenderPass GetRenderPass();

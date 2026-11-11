@@ -133,6 +133,9 @@ void Layer::ConfigureDraw(const Device& device, PresentPushConstants* out_push_c
     if (NeedsHdrConvert(convert)) {
         if (!hdr_convert || hdr_convert->Extent().width != scaled_width ||
             hdr_convert->Extent().height != scaled_height) {
+            for (const u64 tick : resource_ticks) {
+                scheduler.Wait(tick);
+            }
             hdr_convert.emplace(device, memory_allocator, image_count,
                                 VkExtent2D{scaled_width, scaled_height});
         }

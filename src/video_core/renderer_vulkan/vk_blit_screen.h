@@ -8,6 +8,8 @@
 
 #include <list>
 #include <memory>
+#include <optional>
+#include <vector>
 
 #include "core/frontend/framebuffer_layout.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
@@ -72,6 +74,12 @@ public:
 private:
     void WaitIdle(const Device& device);
     void SetWindowAdaptPass(const Device& device);
+    /// The render pass of the frame's framebuffer: the HDR10 encode's, else the window adapt's.
+    VkRenderPass FrameRenderPass() const;
+    /// Composites the layers in scRGB, then encodes the composite to PQ into the frame.
+    void DrawHdr10(const Device& device, RasterizerVulkan& rasterizer, Frame* frame,
+                   std::span<const Tegra::FramebufferConfig> framebuffers,
+                   const Layout::FramebufferLayout& layout, const HdrPresent& output);
     vk::Framebuffer CreateFramebuffer(const Device& device, const VkImageView& image_view, VkExtent2D extent,
                                       VkRenderPass render_pass);
 
@@ -87,6 +95,16 @@ private:
     Settings::ScalingFilter scaling_filter{};
     std::unique_ptr<WindowAdaptPass> window_adapt{};
     std::list<Layer> layers{};
+
+    struct Hdr10Composite {
+        vk::Image image{};
+        vk::ImageView image_view{};
+        vk::Framebuffer framebuffer{};
+        u64 tick{};
+    };
+    std::optional<HdrConvertPass> hdr10_encode{};
+    std::vector<Hdr10Composite> hdr10_composite{};
+    VkExtent2D hdr10_composite_extent{};
 };
 
 } // namespace Vulkan

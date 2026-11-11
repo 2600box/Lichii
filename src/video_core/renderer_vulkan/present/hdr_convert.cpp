@@ -23,6 +23,7 @@ struct PushConstants {
     f32 reference_white;
     f32 peak;
     f32 nits_per_unit;
+    u32 premultiplied;
 };
 
 } // Anonymous namespace
@@ -60,6 +61,7 @@ HdrConvertParams MakeHdrConvertParams(const Tegra::FramebufferConfig& framebuffe
         .nits_per_unit = framebuffer.linear_unit_luminance != 0
                              ? static_cast<f32>(framebuffer.linear_unit_luminance)
                              : ScrgbNits,
+        .premultiplied = framebuffer.blending == Tegra::BlendMode::Premultiplied,
     };
 }
 
@@ -70,17 +72,8 @@ bool NeedsHdrConvert(const HdrConvertParams& params) {
     return params.input == HdrEncoding::Scrgb && params.nits_per_unit != ScrgbNits;
 }
 
-HdrConvert::HdrConvert(const Device& device, MemoryAllocator& allocator, size_t image_count,
-                       VkExtent2D extent)
-    : m_extent(extent) {
-    m_renderpass = CreateWrappedRenderPass(device, IntermediateFormat);
-    for (size_t i = 0; i < image_count; ++i) {
-        Image& image = m_images.emplace_back();
-        image.image = CreateWrappedImage(allocator, m_extent, IntermediateFormat);
-        image.image_view = CreateWrappedImageView(device, image.image, IntermediateFormat);
-        image.framebuffer =
-            CreateWrappedFramebuffer(device, m_renderpass, image.image_view, m_extent);
-    }
+HdrConvertPass::HdrConvertPass(const Device& device, size_t image_count, VkFormat output_format) {
+    m_renderpass = CreateWrappedRenderPass(device, output_format, VK_IMAGE_LAYOUT_UNDEFINED);
     m_sampler = CreateWrappedSampler(device);
     m_vertex_shader = CreateWrappedShaderModule(device, FXAA_VERT_SPV);
     m_fragment_shader = CreateWrappedShaderModule(device, VULKAN_HDR_CONVERT_FRAG_SPV);
@@ -89,9 +82,9 @@ HdrConvert::HdrConvert(const Device& device, MemoryAllocator& allocator, size_t 
     m_descriptor_set_layout = CreateWrappedDescriptorSetLayout(
         device,
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER});
-    for (auto& image : m_images) {
-        image.descriptor_sets =
-            CreateWrappedDescriptorSets(m_descriptor_pool, {*m_descriptor_set_layout});
+    for (size_t i = 0; i < image_count; ++i) {
+        m_descriptor_sets.push_back(
+            CreateWrappedDescriptorSets(m_descriptor_pool, {*m_descriptor_set_layout}));
     }
     const VkPushConstantRange push_constant_range{
         .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -111,29 +104,18 @@ HdrConvert::HdrConvert(const Device& device, MemoryAllocator& allocator, size_t 
                                        std::tie(m_vertex_shader, m_fragment_shader));
 }
 
-HdrConvert::~HdrConvert() = default;
+HdrConvertPass::~HdrConvertPass() = default;
 
-void HdrConvert::Draw(const Device& device, Scheduler& scheduler, size_t image_index,
-                      const HdrConvertParams& params, VkImage* inout_image,
-                      VkImageView* inout_image_view) {
-    if (!m_images_ready) {
-        scheduler.Record([this](vk::CommandBuffer cmdbuf) {
-            for (auto& image : m_images) {
-                ClearColorImage(cmdbuf, *image.image);
-            }
-        });
-        scheduler.Finish();
-        m_images_ready = true;
-    }
-
-    const Image& image{m_images[image_index]};
+void HdrConvertPass::Record(const Device& device, Scheduler& scheduler, size_t image_index,
+                            const HdrConvertParams& params, VkImage input_image,
+                            VkImageView input_view, VkImage output_image,
+                            VkFramebuffer framebuffer, VkExtent2D extent) {
+    const VkDescriptorSet descriptor_set{m_descriptor_sets[image_index][0]};
     std::vector<VkDescriptorImageInfo> image_infos;
     image_infos.reserve(2);
     const std::array updates{
-        CreateWriteDescriptorSet(image_infos, *m_sampler, *inout_image_view,
-                                 image.descriptor_sets[0], 0),
-        CreateWriteDescriptorSet(image_infos, *m_sampler, *inout_image_view,
-                                 image.descriptor_sets[0], 1),
+        CreateWriteDescriptorSet(image_infos, *m_sampler, input_view, descriptor_set, 0),
+        CreateWriteDescriptorSet(image_infos, *m_sampler, input_view, descriptor_set, 1),
     };
     device.GetLogical().UpdateDescriptorSets(updates, {});
 
@@ -143,20 +125,15 @@ void HdrConvert::Draw(const Device& device, Scheduler& scheduler, size_t image_i
         .reference_white = params.reference_white,
         .peak = params.peak,
         .nits_per_unit = params.nits_per_unit,
+        .premultiplied = params.premultiplied ? 1U : 0U,
     };
-    const VkImage input_image{*inout_image};
-    const VkImage output_image{*image.image};
-    const VkDescriptorSet descriptor_set{image.descriptor_sets[0]};
-    const VkFramebuffer framebuffer{*image.framebuffer};
     const VkRenderPass renderpass{*m_renderpass};
     const VkPipeline pipeline{*m_pipeline};
     const VkPipelineLayout layout{*m_pipeline_layout};
-    const VkExtent2D extent{m_extent};
 
     scheduler.RequestOutsideRenderPassOperationContext();
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
         TransitionImageLayout(cmdbuf, input_image, VK_IMAGE_LAYOUT_GENERAL);
-        TransitionImageLayout(cmdbuf, output_image, VK_IMAGE_LAYOUT_GENERAL);
         BeginRenderPass(cmdbuf, renderpass, framebuffer, extent);
         cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
         cmdbuf.BindDescriptorSets(VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, descriptor_set, {});
@@ -165,7 +142,37 @@ void HdrConvert::Draw(const Device& device, Scheduler& scheduler, size_t image_i
         cmdbuf.EndRenderPass();
         TransitionImageLayout(cmdbuf, output_image, VK_IMAGE_LAYOUT_GENERAL);
     });
+}
 
+HdrConvert::HdrConvert(const Device& device, MemoryAllocator& allocator, size_t image_count,
+                       VkExtent2D extent)
+    : m_pass(device, image_count, IntermediateFormat), m_extent(extent) {
+    for (size_t i = 0; i < image_count; ++i) {
+        Image& image = m_images.emplace_back();
+        image.image = CreateWrappedImage(allocator, m_extent, IntermediateFormat);
+        image.image_view = CreateWrappedImageView(device, image.image, IntermediateFormat);
+        image.framebuffer = device.GetLogical().CreateFramebuffer(VkFramebufferCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .renderPass = m_pass.RenderPass(),
+            .attachmentCount = 1,
+            .pAttachments = image.image_view.address(),
+            .width = m_extent.width,
+            .height = m_extent.height,
+            .layers = 1,
+        });
+    }
+}
+
+HdrConvert::~HdrConvert() = default;
+
+void HdrConvert::Draw(const Device& device, Scheduler& scheduler, size_t image_index,
+                      const HdrConvertParams& params, VkImage* inout_image,
+                      VkImageView* inout_image_view) {
+    const Image& image{m_images[image_index]};
+    m_pass.Record(device, scheduler, image_index, params, *inout_image, *inout_image_view,
+                  *image.image, *image.framebuffer, m_extent);
     *inout_image = *image.image;
     *inout_image_view = *image.image_view;
 }
