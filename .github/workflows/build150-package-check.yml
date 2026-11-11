@@ -1,0 +1,56 @@
+name: Build 150 portable package native startup check
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful build150 Windows PGO workflow run ID
+        type: string
+        required: true
+      source_ref:
+        description: Branch containing package validation scripts
+        type: string
+        default: test/build150-pgo-warmup
+permissions:
+  contents: read
+  actions: read
+jobs:
+  native-startup:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+      - name: Download original runnable package
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.run_id }}
+          pattern: lichii-build150-windows-x64-pgo-warmup-*
+          path: package
+          merge-multiple: true
+      - name: Download build evidence
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.run_id }}
+          pattern: build150-pgo-warmup-evidence-*
+          path: .
+          merge-multiple: true
+      - name: Verify PE architecture, feature presence and portable isolation
+        shell: pwsh
+        run: python tools/windows/warmup-test/verify-package.py
+      - name: Report effective flags and profile exclusions
+        shell: pwsh
+        run: python tools/windows/warmup-test/audit.py
+      - name: Start the native GUI using only package and system dependencies
+        shell: pwsh
+        run: ./tools/windows/warmup-test/native-smoke.ps1
+      - name: Upload native startup and corrected optimisation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build150-native-package-evidence-${{ github.run_id }}
+          path: evidence/
+          retention-days: 14
