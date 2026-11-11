@@ -12,6 +12,7 @@ add_executable(tests
     video_core/block_linear_swizzle.cpp
     video_core/aftermath_dump.cpp
     video_core/frame_dump_schedule.cpp
+    video_core/spirv_inline_control.cpp
     video_core/nx2_stutter_trace.cpp
     video_core/host_mip_limits.cpp
     video_core/gpu_timestamp.cpp
@@ -81,6 +82,7 @@ add_executable(tests
     video_core/ampere_trap_guards.cpp
     video_core/async_draw_policy.cpp
     video_core/async_shader_emission.cpp
+    video_core/graphics_pipeline_library_policy.cpp
     video_core/oot_network.cpp
     video_core/page_filter.cpp
     video_core/pipeline_optimization.cpp

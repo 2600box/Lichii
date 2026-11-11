@@ -7,11 +7,16 @@
 #include <fstream>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
 #include "shader_recompiler/exception.h"
+#include "video_core/pipeline_cache_files.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+#include "video_core/shader_cache_v2/cache.h"
+#include "video_core/shader_cache_v2/cache_file.h"
+#include "video_core/shader_cache_v2/cache_format.h"
 #include "video_core/shader_environment.h"
 #include "video_core/shader_warm/shader_archives.h"
 #include "video_core/shader_warm/shader_warm_builder.h"
@@ -39,6 +44,26 @@ struct TempDir {
 void WriteBytes(const std::filesystem::path& file, std::string_view bytes) {
     std::ofstream out(file, std::ios::binary | std::ios::trunc);
     out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+}
+
+/// A graphics pipeline record of one vertex (0) or fragment (4) stage, as the Vulkan disk cache
+/// and the graphics records of the v2 log hold it: env count, env, key.
+std::vector<u8> StageRecord(u32 stage, const ShaderWarm::GraphicsKey& state, u64 stage_hash,
+                            u64 attribute_types) {
+    ShaderWarm::LoweredCode lowered;
+    lowered.code.resize(16 * sizeof(u64));
+    for (size_t i = 0; i < lowered.code.size(); ++i) {
+        lowered.code[i] = static_cast<u8>(i * 5 + stage_hash);
+    }
+    const std::vector<u8> program(128 + 16 * 16);
+    std::vector<u8> record(sizeof(u32));
+    const u32 env_count = 1;
+    std::memcpy(record.data(), &env_count, sizeof(env_count));
+    const auto env = ShaderWarm::GraphicsEnv(stage, lowered, program);
+    record.insert(record.end(), env.begin(), env.end());
+    const auto key = ShaderWarm::GraphicsEntryKey(stage, state, stage_hash, attribute_types);
+    record.insert(record.end(), key.begin(), key.end());
+    return record;
 }
 
 } // Anonymous namespace
@@ -80,6 +105,9 @@ TEST_CASE("ShaderPrecache: the marker matches only the same file and driver", "[
     REQUIRE(stamp->size == 8);
     REQUIRE(ShaderWarm::WriteWarmMarker(warm, *stamp));
     REQUIRE(ShaderWarm::WarmMarkerPath(warm) == dir.path / "warm-compute.done");
+    // The retry record has a marker of its own, next to the real one.
+    REQUIRE(ShaderWarm::WarmMarkerPath(ShaderWarm::WarmRetryPath(warm)) ==
+            dir.path / "warm-compute-retry.done");
 
     const auto marker = ShaderWarm::ReadWarmMarker(warm);
     REQUIRE(marker.has_value());
@@ -94,6 +122,64 @@ TEST_CASE("ShaderPrecache: the marker matches only the same file and driver", "[
     REQUIRE_FALSE(marker->Matches(*ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53)));
 }
 
+TEST_CASE("ShaderPrecache: the marker matches only the same variant", "[video_core]") {
+    TempDir dir;
+    const auto warm = dir.path / "warm-graphics.bin";
+    WriteBytes(warm, "precache");
+    const u64 variant = 0xfedcba9876543210ULL;
+    const auto stamp = ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53, 3, 1, variant);
+    REQUIRE(stamp.has_value());
+    REQUIRE(ShaderWarm::WriteWarmMarker(warm, *stamp));
+
+    const auto marker = ShaderWarm::ReadWarmMarker(warm);
+    REQUIRE(marker.has_value());
+    REQUIRE(marker->variant == variant);
+    REQUIRE(marker->Matches(*ShaderWarm::CurrentWarmStamp(warm, 0, 0x1234, 0x2206, 53, 3, 1,
+                                                          variant)));
+    REQUIRE_FALSE(marker->Matches(*ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53, 3, 1,
+                                                                variant + 1)));
+    REQUIRE_FALSE(
+        marker->Matches(*ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53, 3, 1)));
+    REQUIRE(ShaderWarm::EmissionStamp() != 0);
+}
+
+TEST_CASE("ShaderPrecache: a marker written before the variant is not read", "[video_core]") {
+    TempDir dir;
+    const auto warm = dir.path / "warm-compute.bin";
+    WriteBytes(warm, "precache");
+    const auto stamp = ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53, 1, 0);
+    REQUIRE(stamp.has_value());
+    // The older format: every field up to the link mode, then the line end.
+    {
+        std::ofstream out(ShaderWarm::WarmMarkerPath(warm), std::ios::trunc);
+        out << stamp->size << ' ' << stamp->write_time << ' ' << stamp->entries << ' '
+            << stamp->driver << ' ' << stamp->device_id << ' ' << stamp->cache_version << ' '
+            << stamp->no_inline << ' ' << stamp->link_mode << '\n';
+    }
+    REQUIRE_FALSE(ShaderWarm::ReadWarmMarker(warm).has_value());
+}
+
+TEST_CASE("ShaderPrecache: the marker records the shader calls mode", "[video_core]") {
+    TempDir dir;
+    const auto warm = dir.path / "warm-compute.bin";
+    WriteBytes(warm, "precache");
+
+    const auto stamp = ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53, 1);
+    REQUIRE(stamp.has_value());
+    REQUIRE(ShaderWarm::WriteWarmMarker(warm, *stamp));
+    const auto marker = ShaderWarm::ReadWarmMarker(warm);
+    REQUIRE(marker.has_value());
+    REQUIRE(marker->no_inline == 1);
+    REQUIRE(marker->Matches(*ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53, 1)));
+    REQUIRE_FALSE(marker->Matches(*ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53, 0)));
+    REQUIRE_FALSE(marker->Matches(*ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53, 2)));
+
+    // A marker from before the mode was recorded (six fields) no longer reads, so the precache
+    // runs once more.
+    WriteBytes(ShaderWarm::WarmMarkerPath(warm), "8 1 12 4660 8710 53\n");
+    REQUIRE_FALSE(ShaderWarm::ReadWarmMarker(warm).has_value());
+}
+
 TEST_CASE("ShaderPrecache: precached pipelines are kept per driver", "[video_core]") {
     TempDir dir;
     const auto file = dir.path / "precache-graphics.bin";
@@ -106,6 +192,8 @@ TEST_CASE("ShaderPrecache: precached pipelines are kept per driver", "[video_cor
     REQUIRE(ShaderWarm::ReadPrecachedPipelines(file, {0x1235, 0x2206, 53}).empty());
     REQUIRE(ShaderWarm::ReadPrecachedPipelines(file, {0x1234, 0x2207, 53}).empty());
     REQUIRE(ShaderWarm::ReadPrecachedPipelines(file, {0x1234, 0x2206, 54}).empty());
+    // A change of the graphics shader calls mode precaches them again.
+    REQUIRE(ShaderWarm::ReadPrecachedPipelines(file, {0x1234, 0x2206, 53, 1}).empty());
 
     // A truncated file keeps the hashes it holds in full.
     std::filesystem::resize_file(file, std::filesystem::file_size(file) - 4);
@@ -135,7 +223,7 @@ TEST_CASE("ShaderPrecache: a compute entry reads back like a pipeline cache entr
     lowered.texture_buffer = 3;
     const ShaderWarm::ComputeControl control{{64, 2, 1}, 1024, 256};
     ShaderWarm::ComputeKey key_bytes{};
-    const auto entry = ShaderWarm::ComputeEntry(lowered, control, key_bytes);
+    const auto entry = ShaderWarm::ComputeEntry(lowered, control, {}, key_bytes);
 
     TempDir dir;
     const auto file = dir.path / "entry.bin";
@@ -178,7 +266,7 @@ TEST_CASE("ShaderPrecache: a program naming no texture bank reads bank 0", "[vid
     ShaderWarm::LoweredCode lowered;
     lowered.code.resize(16 * sizeof(u64));
     ShaderWarm::ComputeKey key{};
-    const auto entry = ShaderWarm::ComputeEntry(lowered, {{1, 1, 1}, 0, 0}, key);
+    const auto entry = ShaderWarm::ComputeEntry(lowered, {{1, 1, 1}, 0, 0}, {}, key);
     u32 texture_bound{};
     // num_envs, then six u64 counts and local memory before the texture bank.
     std::memcpy(&texture_bound, entry.data() + 4 + 6 * 8 + 4, sizeof(texture_bound));
@@ -218,4 +306,171 @@ TEST_CASE("ShaderPrecache: programs that cannot be lowered are refused", "[video
     const std::array<u8, 16> no_exit{};
     REQUIRE(ShaderWarm::LowerProgram(no_exit, lowered).has_value());
     REQUIRE(lowered.code.empty());
+}
+
+TEST_CASE("ShaderPrecache: graphics entries made for a dynamic state the device lacks are found",
+          "[video_core]") {
+    namespace KeyDynamicState = Vulkan::KeyDynamicState;
+    constexpr u32 all = KeyDynamicState::VertexInput | KeyDynamicState::Extended |
+                        KeyDynamicState::Extended2 | KeyDynamicState::Extended2LogicOp |
+                        KeyDynamicState::Extended3Blend | KeyDynamicState::Extended3Enables |
+                        KeyDynamicState::ColorWriteEnable;
+    Vulkan::DynamicFeatures features{};
+    REQUIRE(Vulkan::MissingKeyDynamicStates(features) == all);
+    features.has_dynamic_vertex_input = true;
+    features.has_extended_dynamic_state = true;
+    features.has_extended_dynamic_state_2 = true;
+    features.has_extended_dynamic_state_2_logic_op = true;
+    features.has_extended_dynamic_state_3_blend = true;
+    features.has_extended_dynamic_state_3_enables = true;
+    features.has_color_write_enable = true;
+    REQUIRE(Vulkan::MissingKeyDynamicStates(features) == 0);
+
+    Vulkan::FixedPipelineState state;
+    std::memset(&state, 0, sizeof(state));
+    REQUIRE(Vulkan::KeyDynamicStates(state) == 0);
+    state.extended_dynamic_state.Assign(1);
+    state.extended_dynamic_state_2.Assign(1);
+    REQUIRE(Vulkan::KeyDynamicStates(state) ==
+            (KeyDynamicState::Extended | KeyDynamicState::Extended2));
+    state.dynamic_vertex_input.Assign(1);
+    state.extended_dynamic_state_2_logic_op.Assign(1);
+    state.extended_dynamic_state_3_blend.Assign(1);
+    state.extended_dynamic_state_3_enables.Assign(1);
+    state.color_write_enable_dynamic.Assign(1);
+    REQUIRE(Vulkan::KeyDynamicStates(state) == all);
+
+    // A device without EDS3 blending or color write enable: keys naming either are left out.
+    features.has_extended_dynamic_state_3_blend = false;
+    features.has_color_write_enable = false;
+    const u32 missing = Vulkan::MissingKeyDynamicStates(features);
+    REQUIRE(missing == (KeyDynamicState::Extended3Blend | KeyDynamicState::ColorWriteEnable));
+    REQUIRE((Vulkan::KeyDynamicStates(state) & missing) != 0);
+    state.extended_dynamic_state_3_blend.Assign(0);
+    REQUIRE((Vulkan::KeyDynamicStates(state) & missing) != 0);
+    state.color_write_enable_dynamic.Assign(0);
+    REQUIRE((Vulkan::KeyDynamicStates(state) & missing) == 0);
+
+    // Dynamic vertex input keeps the lowest bit: graphics marker bit 2 from earlier markers.
+    REQUIRE(KeyDynamicState::VertexInput == 1);
+}
+
+TEST_CASE("ShaderPrecache: graphics entries are built without color write enable or the EDS2 "
+          "logic op when the device lacks them",
+          "[video_core]") {
+    namespace KeyDynamicState = Vulkan::KeyDynamicState;
+    // The built-in draw state defaults: EDS1, EDS2, the EDS2 logic op, dynamic vertex input and
+    // color write enable.
+    Vulkan::FixedPipelineState state;
+    std::memset(&state, 0, sizeof(state));
+    state.extended_dynamic_state.Assign(1);
+    state.extended_dynamic_state_2.Assign(1);
+    state.extended_dynamic_state_2_logic_op.Assign(1);
+    state.dynamic_vertex_input.Assign(1);
+    state.color_write_enable_dynamic.Assign(1);
+    const u32 made_with = Vulkan::KeyDynamicStates(state);
+
+    // A device with all of them: nothing changes.
+    REQUIRE(Vulkan::AdaptKeyDynamicStates(state, 0) == 0);
+    REQUIRE(Vulkan::KeyDynamicStates(state) == made_with);
+
+    // A device without color write enable and the EDS2 logic op (AMD on Windows): both cleared,
+    // the entry no longer names a state the device lacks.
+    Vulkan::DynamicFeatures features{};
+    features.has_dynamic_vertex_input = true;
+    features.has_extended_dynamic_state = true;
+    features.has_extended_dynamic_state_2 = true;
+    features.has_extended_dynamic_state_3_blend = true;
+    features.has_extended_dynamic_state_3_enables = true;
+    const u32 missing = Vulkan::MissingKeyDynamicStates(features);
+    REQUIRE(missing == (KeyDynamicState::Extended2LogicOp | KeyDynamicState::ColorWriteEnable));
+    REQUIRE(Vulkan::AdaptKeyDynamicStates(state, missing) == missing);
+    REQUIRE(state.extended_dynamic_state_2_logic_op.Value() == 0U);
+    REQUIRE(state.color_write_enable_dynamic.Value() == 0U);
+    REQUIRE((Vulkan::KeyDynamicStates(state) & missing) == 0);
+    REQUIRE(Vulkan::KeyDynamicStates(state) == (made_with & ~missing));
+
+    // The states whose static fields the key leaves unfilled stay: those entries are left out.
+    Vulkan::FixedPipelineState other;
+    std::memset(&other, 0, sizeof(other));
+    other.extended_dynamic_state.Assign(1);
+    other.extended_dynamic_state_2.Assign(1);
+    other.extended_dynamic_state_3_blend.Assign(1);
+    other.extended_dynamic_state_3_enables.Assign(1);
+    other.dynamic_vertex_input.Assign(1);
+    constexpr u32 kept = KeyDynamicState::VertexInput | KeyDynamicState::Extended |
+                         KeyDynamicState::Extended2 | KeyDynamicState::Extended3Blend |
+                         KeyDynamicState::Extended3Enables;
+    REQUIRE(Vulkan::AdaptKeyDynamicStates(other, kept) == 0);
+    REQUIRE(Vulkan::KeyDynamicStates(other) == kept);
+    REQUIRE((kept & Vulkan::AdaptableKeyDynamicStates) == 0);
+}
+
+TEST_CASE("ShaderPrecache: draw state guesses come from the v2 log, else the older cache",
+          "[video_core]") {
+    namespace V2 = VideoCommon::ShaderCacheV2;
+    // Two draw states with the same render target (one color target, format 0xE0)
+    ShaderWarm::GraphicsKey state_a{};
+    ShaderWarm::GraphicsKey state_b{};
+    state_a[56] = state_b[56] = 0xE0;
+    state_a[200] = 1;
+    state_b[200] = 2;
+    const std::vector<std::vector<u8>> live{
+        StageRecord(0, state_a, 0x11, 0x5),
+        StageRecord(0, state_a, 0x12, 0x6),
+        StageRecord(0, state_b, 0x13, 0x7),
+        StageRecord(4, state_b, 0x21, 0),
+    };
+
+    // The v2 log: those records, plus two damaged ones and a removed one of state B (which would
+    // make it the most common vertex state) and a compute record
+    std::vector<u8> records;
+    u64 record_key = 0x100;
+    for (const auto& payload : live) {
+        V2::EncodeRecord(records, V2::RecordKind::Graphics, record_key++, payload);
+    }
+    for (const u64 stage_hash : {0x14, 0x15}) {
+        const size_t offset = records.size();
+        V2::EncodeRecord(records, V2::RecordKind::Graphics, record_key++,
+                         StageRecord(0, state_b, stage_hash, 0x8));
+        records[offset + V2::RecordHeaderSize + 40] ^= 0xFF;
+    }
+    V2::EncodeRecord(records, V2::RecordKind::Graphics, 0x200, StageRecord(0, state_b, 0x16, 0x9));
+    V2::EncodeRecord(records, V2::RecordKind::Tombstone, 0x200,
+                     V2::TombstonePayload(V2::RecordKind::Graphics));
+    V2::EncodeRecord(records, V2::RecordKind::Compute, 0x300, std::vector<u8>(64, 0x5A));
+
+    TempDir dir;
+    const auto log = dir.path / V2::FileName;
+    const auto old_cache =
+        VideoCommon::VersionedPipelineCachePath(dir.path, "vulkan", ShaderWarm::WarmCacheVersion);
+    REQUIRE(ShaderWarm::FindRuntimeCaches(dir.path).empty());
+
+    // The older disk cache alone: the same records one after another
+    std::vector<u8> old_bytes{'y', 'u', 'z', 'u', 'c', 'a', 'c', 'h'};
+    const u32 version = ShaderWarm::WarmCacheVersion;
+    old_bytes.resize(12);
+    std::memcpy(old_bytes.data() + 8, &version, sizeof(version));
+    for (const auto& payload : live) {
+        old_bytes.insert(old_bytes.end(), payload.begin(), payload.end());
+    }
+    WriteBytes(old_cache,
+               std::string_view{reinterpret_cast<const char*>(old_bytes.data()), old_bytes.size()});
+    REQUIRE(ShaderWarm::FindRuntimeCaches(dir.path) == std::vector{old_cache});
+
+    REQUIRE(V2::CreateLog(log, records) == V2::WriteResult::Written);
+    REQUIRE(ShaderWarm::FindRuntimeCaches(dir.path) == std::vector{log});
+
+    const auto expected_vertex = ShaderWarm::GraphicsEntryKey(0, state_a, 0, 0x5);
+    for (const auto& file : {log, old_cache}) {
+        const ShaderWarm::RuntimeStats stats = ShaderWarm::ReadRuntimeStats({file});
+        REQUIRE(stats.occurrences == 4);
+        REQUIRE(stats.templates[0].has_value());
+        REQUIRE(*stats.templates[0] == expected_vertex);
+        REQUIRE(stats.templates[1].has_value());
+        REQUIRE(*stats.templates[1] == state_b);
+        REQUIRE(stats.vertex_attributes.size() == 3);
+        REQUIRE(stats.vertex_attributes.at(0x11) == std::vector<u64>{0x5});
+        REQUIRE(stats.vertex_attributes.at(0x13) == std::vector<u64>{0x7});
+    }
 }

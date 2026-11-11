@@ -1,0 +1,150 @@
+name: Build 150 Windows PGO shader warm-up test
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: build150-warmup-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  windows-pgo:
+    runs-on: windows-2022
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify provenance and training profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git merge-base --is-ancestor 17baed716 HEAD
+          git merge-base --is-ancestor 9d180170d9507cf8142cf321e99be330feda2f8c HEAD
+          test "$(git hash-object lichii-windows.profdata)" = 9cbd435d7a53c6268c1533dbca2e7a2df1a894fa
+          git rev-parse HEAD > evidence/build-commit.txt
+          git log -1 --format=fuller > evidence/provenance.txt
+          git diff --stat 17baed716 HEAD >> evidence/provenance.txt
+          git hash-object lichii-windows.profdata > evidence/profile-blob.txt
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # clang-cl compiles against the MSVC headers, libraries and SDK that the previous step put
+      # on PATH; only the compiler, linker and archiver come from this LLVM.
+      - name: Install LLVM on Windows
+        shell: pwsh
+        run: ./tools/windows/install-llvm.ps1
+
+      - name: Install Qt on Windows
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.3"
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: qtcharts
+          cache: true
+
+      # ccache does not handle MSVC-style command lines well, so the clang-cl job uses sccache. The
+      # other jobs use ccache, which CMake enables through USE_CCACHE
+      # (externals/cmake-modules/UseCcache.cmake).
+      - name: Install sccache on Windows
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'sccache.zip'
+          Invoke-WebRequest -OutFile $zip https://github.com/mozilla/sccache/releases/download/v0.19.0/sccache-v0.19.0-x86_64-pc-windows-msvc.zip
+          Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'sccache')
+          $bin = (Get-ChildItem -Recurse -Filter sccache.exe (Join-Path $env:RUNNER_TEMP 'sccache')).DirectoryName
+          $bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Install Vulkan SDK on Windows
+        shell: pwsh
+        run: ./tools/windows/install-vulkan-sdk.ps1
+
+      - name: Verify Vulkan tools on Windows
+        shell: pwsh
+        run: glslangValidator --version
+
+      - name: Configure Windows
+        shell: bash
+        run: |
+          set -euo pipefail
+          flags="-DWIN32 -D_WINDOWS -DNOMINMAX -flto=thin"
+          if [ -n 'lichii-windows.profdata' ]; then
+            flags+=" -fprofile-use=$(cygpath -m "$PWD/lichii-windows.profdata")"
+            flags+=" -Wno-error=profile-instr-out-of-date -Wno-error=profile-instr-unprofiled"
+            flags+=" -Wno-error=backend-plugin"
+          fi
+          cmake -S . -B build/release -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=ON \
+            -DYUZU_TESTS=ON \
+            -DYUZU_CMD=ON \
+            -DYUZU_ROOM=OFF \
+            -DYUZU_ROOM_STANDALONE=OFF \
+            -DYUZU_USE_BUNDLED_QT=OFF \
+            -DENABLE_QT_TRANSLATION=ON \
+            -DYUZU_USE_BUNDLED_SDL3=ON \
+            -DENABLE_UPDATE_CHECKER=ON \
+            -DLICHII_BUILD_TAG=build150-warmup-test-${{ github.run_number }} \
+            -DLICHII_BUILD_PLATFORM=windows-x86_64-pgo \
+            -DUSE_DISCORD_PRESENCE=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
+            "-DCMAKE_C_COMPILER=$LLVM_ROOT/bin/clang-cl.exe" \
+            "-DCMAKE_CXX_COMPILER=$LLVM_ROOT/bin/clang-cl.exe" \
+            "-DCMAKE_LINKER=$LLVM_ROOT/bin/lld-link.exe" \
+            "-DCMAKE_AR=$LLVM_ROOT/bin/llvm-lib.exe" \
+            "-DCMAKE_C_FLAGS=$flags" \
+            "-DCMAKE_CXX_FLAGS=-EHsc $flags" 2>&1 | tee evidence/configure.log
+
+      - name: Record compiler and verify profile reader
+        shell: pwsh
+        run: |
+          & "$env:LLVM_ROOT/bin/clang-cl.exe" --version | Tee-Object evidence/compiler.txt
+          & "$env:LLVM_ROOT/bin/llvm-profdata.exe" show --detailed-summary lichii-windows.profdata | Tee-Object evidence/profile-summary.txt
+          if ($LASTEXITCODE -ne 0) { throw 'PGO profile is unreadable' }
+      - name: Build production and tests with verbose commands
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build build/release --parallel 4 --verbose 2>&1 | tee evidence/build.log
+      - name: Audit PGO, ThinLTO and warm-up compilation
+        if: always()
+        shell: pwsh
+        run: python tools/windows/warmup-test/audit.py
+      - name: Run C++ tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctest --test-dir build/release --output-on-failure --no-tests=error --parallel 4 2>&1 | tee evidence/ctest.log
+      - name: Run shader tooling tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest discover -s tools/nx2 -p 'test_shader_*.py' -v 2>&1 | tee evidence/python-tests.log
+      - name: Package portable Windows x64 binary
+        shell: pwsh
+        run: ./tools/windows/warmup-test/package.ps1
+      - name: Smoke test packaged GUI in isolated portable directory
+        shell: pwsh
+        run: ./tools/windows/warmup-test/smoke.ps1
+      - name: Upload runnable package
+        uses: actions/upload-artifact@v4
+        with:
+          name: lichii-build150-windows-x64-pgo-warmup-${{ github.sha }}
+          path: package/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload build and test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build150-pgo-warmup-evidence-${{ github.sha }}
+          path: |
+            evidence/
+            build/release/CMakeCache.txt
+            build/release/compile_commands.json
+            build/release/Testing/Temporary/LastTest.log
+          retention-days: 14

@@ -3,12 +3,17 @@
 
 #include <algorithm>
 #include <cstring>
+#include <fstream>
+#include <unordered_set>
 
+#include "common/cityhash.h"
 #include "shader_recompiler/frontend/ampere/instruction.h"
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
 #include "shader_recompiler/frontend/ampere/program_capture.h"
 #include "shader_recompiler/program_header.h"
 #include "video_core/native_lowering.h"
+#include "video_core/shader_cache_v2/cache.h"
+#include "video_core/shader_cache_v2/cache_format.h"
 #include "video_core/shader_warm/warm_records.h"
 
 namespace VideoCommon::ShaderWarm {
@@ -35,6 +40,14 @@ T Get(std::span<const u8> data, size_t offset) {
     return value;
 }
 
+/// Records the constant table as the bank 1 values the driver binds (cbuf key, value).
+void PutConstantTable(std::vector<u8>& out, std::span<const u8> constants) {
+    for (size_t offset = 0; offset + 4 <= constants.size(); offset += 4) {
+        Put<u64>(out, (u64{1} << 32) | offset);
+        Put<u32>(out, Get<u32>(constants, offset));
+    }
+}
+
 /// The GenericEnvironment::Serialize header: six u64 counts and seven u32 fields.
 void PutEnvHeader(std::vector<u8>& out, u64 code_size, u64 cbuf_count, u32 local_memory,
                   u32 texture_bound, u32 start_address, u32 stage) {
@@ -53,16 +66,130 @@ void PutEnvHeader(std::vector<u8>& out, u64 code_size, u64 cbuf_count, u32 local
     Put<u32>(out, stage);
 }
 
+struct PairHash {
+    u128 a{};
+    u128 b{};
+    bool operator==(const PairHash&) const = default;
+};
+
+struct PairHasher {
+    size_t operator()(const PairHash& h) const noexcept {
+        return static_cast<size_t>(h.a[0] ^ (h.b[0] * 0x9E3779B97F4A7C15ULL));
+    }
+};
+
+struct U128Hasher {
+    size_t operator()(const u128& h) const noexcept {
+        return static_cast<size_t>(h[0]);
+    }
+};
+
+u128 Hash128(std::span<const u8> bytes) {
+    return Common::CityHash128(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+}
+
+/// Bytes after an env record's tables for `stage`: 16 for compute, else the 80-byte SPH plus the
+/// geometry or task/mesh extras.
+size_t TailSize(u32 stage) {
+    if (stage == 5) {
+        return 16;
+    }
+    return 80 + (stage == 3 ? 32 : 0) + (stage == 7 || stage == 8 ? 92 : 0);
+}
+
+/// A vertex or fragment stage of a recorded graphics pipeline; `key` points into the file read.
+struct Occurrence {
+    u32 stage;
+    u64 hash;
+    const u8* key;
+};
+
+/// The (env, key) pairs already counted
+using SeenRecords = std::unordered_set<PairHash, PairHasher>;
+
+/// Reads the pipeline record at `cur` of `bytes` as the Vulkan disk cache holds it (env count,
+/// envs, key), moves `cur` past it and adds each vertex and fragment stage of a graphics record
+/// not seen before. False when no whole record is left there.
+bool ReadPipelineRecord(std::span<const u8> bytes, size_t& cur,
+                        std::vector<Occurrence>& occurrences, SeenRecords& seen) {
+    struct Env {
+        u32 stage;
+        size_t begin;
+        size_t end;
+    };
+    const size_t size = bytes.size();
+    if (cur + 4 > size) {
+        return false;
+    }
+    const u32 count = Get<u32>(bytes, cur);
+    cur += 4;
+    if (count == 0) {
+        return false;
+    }
+    std::vector<Env> envs;
+    for (u32 i = 0; i < count; ++i) {
+        if (cur + EnvHeaderSize > size) {
+            return false;
+        }
+        std::array<u64, 6> counts;
+        std::memcpy(counts.data(), bytes.data() + cur, sizeof(counts));
+        const u32 stage = Get<u32>(bytes, cur + 48 + 6 * 4);
+        const u64 body = counts[0] + counts[1] * 8 + counts[2] * 8 + counts[3] * 12 +
+                         counts[4] * 9 + counts[5] * 12 + TailSize(stage);
+        if (body > size - cur - EnvHeaderSize) {
+            return false;
+        }
+        const size_t begin = cur;
+        cur += EnvHeaderSize + static_cast<size_t>(body);
+        envs.push_back({stage, begin, cur});
+    }
+    const size_t key_size = envs[0].stage == ComputeStage ? 24 : GraphicsKeySize;
+    if (key_size > size - cur) {
+        return false;
+    }
+    const u8* const key = bytes.data() + cur;
+    cur += key_size;
+    if (envs[0].stage == ComputeStage) {
+        return true;
+    }
+    std::array<u64, 6> hashes;
+    std::memcpy(hashes.data(), key, sizeof(hashes));
+    size_t env_index = 0;
+    for (size_t slot = 0; slot < 6 && env_index < envs.size(); ++slot) {
+        if (hashes[slot] == 0) {
+            continue;
+        }
+        const Env& env = envs[env_index++];
+        if (env.stage != 0 && env.stage != 4) {
+            continue;
+        }
+        const PairHash id{Hash128(bytes.subspan(env.begin, env.end - env.begin)),
+                          Hash128({key, key_size})};
+        if (seen.insert(id).second) {
+            occurrences.push_back({env.stage, hashes[slot], key});
+        }
+    }
+    return true;
+}
+
 } // Anonymous namespace
 
-std::optional<std::string> LowerProgram(std::span<const u8> program, LoweredCode& out) {
+std::optional<std::string> LowerProgram(std::span<const u8> program, bool graphics,
+                                        LoweredCode& out) {
     using Shader::Ampere::Instruction;
-    if (program.empty() || program.size() % sizeof(Instruction) ||
-        program.size() / sizeof(Instruction) > 65536) {
+    const size_t header_size = graphics ? 128 : 0;
+    if (program.size() <= header_size || (program.size() - header_size) % sizeof(Instruction) ||
+        (program.size() - header_size) / sizeof(Instruction) > 65536) {
         return "Native input must contain 1..65536 complete 16-byte instructions";
     }
-    std::vector<Instruction> native(program.size() / sizeof(Instruction));
-    std::memcpy(native.data(), program.data(), native.size() * sizeof(Instruction));
+    if (graphics) {
+        const u32 type = (Get<u32>(program, 0) >> 10) & 15;
+        if (type < 1 || type > 5) {
+            return "Invalid native graphics header stage";
+        }
+    }
+    std::vector<Instruction> native((program.size() - header_size) / sizeof(Instruction));
+    std::memcpy(native.data(), program.data() + header_size, native.size() * sizeof(Instruction));
     Shader::Ampere::ProgramCaptureState capture;
     bool complete = false;
     for (u32 index = 0; index < native.size(); ++index) {
@@ -93,8 +220,14 @@ std::optional<std::string> LowerProgram(std::span<const u8> program, LoweredCode
         lowered.source_instruction_offsets.size() != native.size()) {
         return "Cannot encode the lowering as an override record";
     }
-    const auto code = VideoCommon::MakeLoweredNativeCode(native, Shader::ProgramHeader{}, 0, {},
-                                                         lowered);
+    // A graphics program keeps its shader header (the first 80 bytes) in front of the code, as
+    // the environment's code has it; a compute program has none.
+    Shader::ProgramHeader sph{};
+    if (graphics) {
+        std::memcpy(&sph, program.data(), sizeof(sph));
+    }
+    const auto code = VideoCommon::MakeLoweredNativeCode(
+        native, sph, static_cast<u32>(header_size), {}, lowered);
     out.code.resize(code->code.size() * sizeof(u64));
     std::memcpy(out.code.data(), code->code.data(), out.code.size());
     out.texture_buffer = code->texture_bound;
@@ -122,15 +255,17 @@ std::optional<ComputeControl> ReadComputeControl(std::span<const u8> control) {
 }
 
 std::vector<u8> ComputeEntry(const LoweredCode& lowered, const ComputeControl& control,
-                             ComputeKey& key) {
+                             std::span<const u8> constants, ComputeKey& key) {
+    const size_t cbuf_count = constants.size() / 4;
     std::vector<u8> out;
-    out.reserve(4 + EnvHeaderSize + lowered.code.size() + 16 + key.size());
+    out.reserve(4 + EnvHeaderSize + lowered.code.size() + cbuf_count * 12 + 16 + key.size());
     Put<u32>(out, 1);
     // Like InitializeNativeCode: the program's own bank when it names one.
     const u32 texture_bound = lowered.texture_buffer != ~0U ? lowered.texture_buffer : 0;
-    PutEnvHeader(out, lowered.code.size(), 0, control.local_memory, texture_bound, 80,
+    PutEnvHeader(out, lowered.code.size(), cbuf_count, control.local_memory, texture_bound, 80,
                  ComputeStage);
     PutBytes(out, lowered.code);
+    PutConstantTable(out, constants);
     for (const u32 size : control.workgroup) {
         Put<u32>(out, size);
     }
@@ -144,6 +279,172 @@ std::vector<u8> ComputeEntry(const LoweredCode& lowered, const ComputeControl& c
     std::memcpy(key.data(), key_bytes.data(), key.size());
     PutBytes(out, key_bytes);
     return out;
+}
+
+std::vector<u8> GraphicsEnv(u32 stage, const LoweredCode& lowered, std::span<const u8> program,
+                            std::span<const u8> constants) {
+    const auto sph = program.first(80);
+    const u32 bound = lowered.texture_buffer != ~0U ? lowered.texture_buffer
+                                                     : (stage == 0 ? 0U : 2U);
+    const size_t cbuf_count = constants.size() / 4;
+    const u32 w1 = Get<u32>(sph, 4), w2 = Get<u32>(sph, 8), w3 = Get<u32>(sph, 12);
+    const u64 local_memory =
+        ((u64{w1} & 0xFFFFFF) | ((u64{w2} & 0xFFFFFF) << 24)) + (u64{w3} & 0xFFFFFF);
+    std::vector<u8> out;
+    out.reserve(EnvHeaderSize + lowered.code.size() + cbuf_count * 12 + 80);
+    PutEnvHeader(out, lowered.code.size(), cbuf_count, static_cast<u32>(local_memory), bound, 0,
+                 stage);
+    PutBytes(out, lowered.code);
+    PutConstantTable(out, constants);
+    PutBytes(out, sph);
+    return out;
+}
+
+GraphicsKey GraphicsEntryKey(u32 stage, const GraphicsKey& template_key, u64 stage_hash,
+                             u64 attribute_types) {
+    GraphicsKey key = template_key;
+    const size_t slot = stage == 0 ? 1 : 5;
+    std::memcpy(key.data() + slot * 8, &stage_hash, sizeof(stage_hash));
+    if (stage == 0) {
+        std::memcpy(key.data() + AttributeTypesOffset, &attribute_types, sizeof(u64));
+    }
+    return key;
+}
+
+std::vector<std::filesystem::path> FindRuntimeCaches(const std::filesystem::path& title_dir) {
+    std::error_code error;
+    const auto log = title_dir / ShaderCacheV2::FileName;
+    if (std::filesystem::exists(log, error)) {
+        return {log};
+    }
+    // No v2 log yet: the current version's disk cache, or the newest older one with the same
+    // record layout
+    std::vector<u32> versions{WarmCacheVersion};
+    versions.insert(versions.end(), CompatibleRuntimeCacheVersions.begin(),
+                    CompatibleRuntimeCacheVersions.end());
+    for (const u32 version : versions) {
+        auto cache = VideoCommon::VersionedPipelineCachePath(title_dir, "vulkan", version);
+        if (std::filesystem::exists(cache, error)) {
+            return {std::move(cache)};
+        }
+    }
+    return {};
+}
+
+RuntimeStats ReadRuntimeStats(const std::vector<std::filesystem::path>& caches) {
+    std::vector<std::vector<u8>> files;
+    std::vector<Occurrence> occurrences;
+    SeenRecords seen;
+    for (const auto& path : caches) {
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) {
+            continue;
+        }
+        const auto size = static_cast<size_t>(file.tellg());
+        file.seekg(0);
+        std::vector<u8> data(size);
+        if (!file.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(size))) {
+            continue;
+        }
+        const std::span<const u8> bytes{data};
+        if (size >= 8 && std::memcmp(data.data(), "yuzucach", 8) == 0) {
+            // A Vulkan disk cache from before the v2 log: its records one after another
+            if (size < 12 || !IsReadableRuntimeCacheVersion(Get<u32>(data, 8))) {
+                continue;
+            }
+            size_t cur = 12;
+            while (ReadPipelineRecord(bytes, cur, occurrences, seen)) {
+            }
+        } else {
+            // A shader cache v2 log: each graphics record's payload is one record of the disk
+            // cache, byte for byte. The reader drops records whose header or payload doesn't
+            // match its checksum, and keeps only the latest record of a key.
+            const ShaderCacheV2::ParsedLog log = ShaderCacheV2::ParseLog(bytes);
+            for (const ShaderCacheV2::LogRecord& record : log.live) {
+                if (record.kind != ShaderCacheV2::RecordKind::Graphics) {
+                    continue;
+                }
+                size_t cur = 0;
+                ReadPipelineRecord(record.payload, cur, occurrences, seen);
+            }
+        }
+        files.push_back(std::move(data));
+    }
+
+    RuntimeStats stats;
+    stats.occurrences = occurrences.size();
+    // The render pass part of a key: samples (key bytes 48-51, bits 28-31), depth on and depth
+    // format (bytes 52-55, bit 5 and bits 6-10) and the 8 color formats (bytes 56-63). Every
+    // library is built for one render pass, so the template takes the most common one first.
+    const auto render_target = [&](size_t i) {
+        const u8* const key = occurrences[i].key;
+        u32 raw1;
+        u32 raw2;
+        std::memcpy(&raw1, key + 48, sizeof(raw1));
+        std::memcpy(&raw2, key + 52, sizeof(raw2));
+        const bool depth = ((raw2 >> 5) & 1) != 0;
+        std::array<u8, 11> target{};
+        target[0] = static_cast<u8>(raw1 >> 28);
+        target[1] = depth ? 1 : 0;
+        target[2] = depth ? static_cast<u8>((raw2 >> 6) & 0x1f) : 0;
+        std::memcpy(target.data() + 3, key + 56, 8);
+        return Hash128(target);
+    };
+    // The rest of the draw state, without what differs per shader: the hash slots (bytes 0-47)
+    // and the vertex attribute types (overwritten per vertex entry anyway).
+    const auto draw_state = [&](size_t i) {
+        GraphicsKey normalized;
+        std::memcpy(normalized.data(), occurrences[i].key, normalized.size());
+        std::fill(normalized.begin(), normalized.begin() + 48, u8{0});
+        std::fill(normalized.begin() + AttributeTypesOffset,
+                  normalized.begin() + AttributeTypesOffset + 8, u8{0});
+        return Hash128(normalized);
+    };
+    for (size_t index = 0; index < 2; ++index) {
+        const u32 stage = index == 0 ? 0 : 4;
+        // Counter.most_common over the records of this stage that `keep` accepts: index of the
+        // first record of the group with the highest count, the first seen among equals.
+        const auto most_common = [&](const auto& group_of,
+                                     const auto& keep) -> std::optional<size_t> {
+            struct Count {
+                size_t count;
+                size_t first;
+            };
+            std::unordered_map<u128, Count, U128Hasher> counts;
+            for (size_t i = 0; i < occurrences.size(); ++i) {
+                if (occurrences[i].stage == stage && keep(i)) {
+                    ++counts.try_emplace(group_of(i), Count{0, i}).first->second.count;
+                }
+            }
+            const Count* best = nullptr;
+            for (const auto& [hash, count] : counts) {
+                if (best == nullptr || count.count > best->count ||
+                    (count.count == best->count && count.first < best->first)) {
+                    best = &count;
+                }
+            }
+            return best == nullptr ? std::nullopt : std::optional<size_t>{best->first};
+        };
+        const auto target_record = most_common(render_target, [](size_t) { return true; });
+        if (!target_record) {
+            continue;
+        }
+        const u128 target = render_target(*target_record);
+        const auto state_record =
+            most_common(draw_state, [&](size_t i) { return render_target(i) == target; });
+        GraphicsKey key;
+        std::memcpy(key.data(), occurrences[*state_record].key, key.size());
+        std::fill(key.begin(), key.begin() + 48, u8{0});
+        stats.templates[index] = key;
+    }
+    for (const auto& occurrence : occurrences) {
+        if (occurrence.stage == 0) {
+            u64 attributes;
+            std::memcpy(&attributes, occurrence.key + AttributeTypesOffset, sizeof(attributes));
+            stats.vertex_attributes[occurrence.hash].push_back(attributes);
+        }
+    }
+    return stats;
 }
 
 } // namespace VideoCommon::ShaderWarm

@@ -299,6 +299,67 @@ static_assert(std::has_unique_object_representations_v<FixedPipelineState>);
 static_assert(std::is_trivially_copyable_v<FixedPipelineState>);
 static_assert(std::is_trivially_constructible_v<FixedPipelineState>);
 
+/// Dynamic states a pipeline key can be made for, one bit each. A key gets exactly the ones the
+/// device has (FixedPipelineState::Refresh), so a key naming one the device lacks never matches.
+namespace KeyDynamicState {
+constexpr u32 VertexInput = 1U << 0;
+constexpr u32 Extended = 1U << 1;
+constexpr u32 Extended2 = 1U << 2;
+constexpr u32 Extended2LogicOp = 1U << 3;
+constexpr u32 Extended3Blend = 1U << 4;
+constexpr u32 Extended3Enables = 1U << 5;
+constexpr u32 ColorWriteEnable = 1U << 6;
+} // namespace KeyDynamicState
+
+/// The KeyDynamicState bits `state` was made with.
+[[nodiscard]] inline u32 KeyDynamicStates(const FixedPipelineState& state) noexcept {
+    return (state.dynamic_vertex_input != 0 ? KeyDynamicState::VertexInput : 0U) |
+           (state.extended_dynamic_state != 0 ? KeyDynamicState::Extended : 0U) |
+           (state.extended_dynamic_state_2 != 0 ? KeyDynamicState::Extended2 : 0U) |
+           (state.extended_dynamic_state_2_logic_op != 0 ? KeyDynamicState::Extended2LogicOp
+                                                         : 0U) |
+           (state.extended_dynamic_state_3_blend != 0 ? KeyDynamicState::Extended3Blend : 0U) |
+           (state.extended_dynamic_state_3_enables != 0 ? KeyDynamicState::Extended3Enables
+                                                        : 0U) |
+           (state.color_write_enable_dynamic != 0 ? KeyDynamicState::ColorWriteEnable : 0U);
+}
+
+/// The KeyDynamicState bits the device lacks.
+[[nodiscard]] inline u32 MissingKeyDynamicStates(const DynamicFeatures& features) noexcept {
+    return (features.has_dynamic_vertex_input ? 0U : KeyDynamicState::VertexInput) |
+           (features.has_extended_dynamic_state ? 0U : KeyDynamicState::Extended) |
+           (features.has_extended_dynamic_state_2 ? 0U : KeyDynamicState::Extended2) |
+           (features.has_extended_dynamic_state_2_logic_op ? 0U
+                                                           : KeyDynamicState::Extended2LogicOp) |
+           (features.has_extended_dynamic_state_3_blend ? 0U : KeyDynamicState::Extended3Blend) |
+           (features.has_extended_dynamic_state_3_enables ? 0U
+                                                          : KeyDynamicState::Extended3Enables) |
+           (features.has_color_write_enable ? 0U : KeyDynamicState::ColorWriteEnable);
+}
+
+/// KeyDynamicState bits whose static form is color blend state only: the logic op (EDS2) and the
+/// color write masks (color write enable). Neither reaches the shader libraries nor the SPIR-V,
+/// and the key holds a valid static value for each (logic op 0 = CLEAR, the guest write masks),
+/// so a key made with one, built without it, gives the libraries a device lacking it builds at
+/// runtime. The other states leave their static fields unfilled in the key (cull mode, depth
+/// test, rasterizer discard, vertex attributes, blend equations, depth clamp), which the
+/// libraries would then bake in: those entries stay left out.
+constexpr u32 AdaptableKeyDynamicStates =
+    KeyDynamicState::Extended2LogicOp | KeyDynamicState::ColorWriteEnable;
+
+/// Clears from `state` the adaptable dynamic states (AdaptableKeyDynamicStates) in `missing`, the
+/// states the device lacks. Returns the bits it cleared.
+inline u32 AdaptKeyDynamicStates(FixedPipelineState& state, u32 missing) noexcept {
+    const u32 cleared = KeyDynamicStates(state) & missing & AdaptableKeyDynamicStates;
+    if ((cleared & KeyDynamicState::Extended2LogicOp) != 0) {
+        state.extended_dynamic_state_2_logic_op.Assign(0);
+    }
+    if ((cleared & KeyDynamicState::ColorWriteEnable) != 0) {
+        state.color_write_enable_dynamic.Assign(0);
+    }
+    return cleared;
+}
+
 } // namespace Vulkan
 
 namespace std {
