@@ -7,6 +7,7 @@
 
 #include "common/alignment.h"
 #include "common/common_types.h"
+#include "video_core/framebuffer_config.h"
 
 namespace Service {
 
@@ -16,6 +17,20 @@ enum class Nx2NativeImageFormat : u32 {
     Rgb10A2 = 4,
     Rgba16Float = 5,
 };
+
+// The colour space of a presented native image. FP16 is linear scRGB by its format. RGB10A2 holds
+// PQ BT.2020 only while the game was told the display is HDR: Fire Emblem: Fortune's Weave
+// presents SDR in RGB10A2.
+inline Tegra::ColorSpace Nx2NativeImageColorSpace(Nx2NativeImageFormat format, bool told_hdr) {
+    switch (format) {
+    case Nx2NativeImageFormat::Rgba16Float:
+        return Tegra::ColorSpace::RGB709_Linear;
+    case Nx2NativeImageFormat::Rgb10A2:
+        return told_hdr ? Tegra::ColorSpace::RGB2020_PQ : Tegra::ColorSpace::RGB709;
+    default:
+        return Tegra::ColorSpace::RGB709;
+    }
+}
 
 struct Nx2ImageLayout {
     u32 width;

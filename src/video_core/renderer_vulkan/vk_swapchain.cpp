@@ -13,6 +13,7 @@
 #include <android/api-level.h>
 #endif
 
+#include "common/display_hdr.h"
 #include "common/logging.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
@@ -143,23 +144,48 @@ VkCompositeAlphaFlagBitsKHR ChooseAlphaFlags(const VkSurfaceCapabilitiesKHR& cap
 
 } // Anonymous namespace
 
+std::optional<VkSurfaceFormatKHR> ChooseHdrSurfaceFormat(
+    std::span<const VkSurfaceFormatKHR> formats, Settings::HdrSwapchain preferred) {
+    constexpr VkSurfaceFormatKHR hdr10{VK_FORMAT_A2B10G10R10_UNORM_PACK32,
+                                       VK_COLOR_SPACE_HDR10_ST2084_EXT};
+    constexpr VkSurfaceFormatKHR scrgb{VK_FORMAT_R16G16B16A16_SFLOAT,
+                                       VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT};
+    const auto listed = [&](const VkSurfaceFormatKHR& wanted) {
+        return std::ranges::any_of(formats, [&](const VkSurfaceFormatKHR& format) {
+            return format.format == wanted.format && format.colorSpace == wanted.colorSpace;
+        });
+    };
+    const auto& first = preferred == Settings::HdrSwapchain::Scrgb ? scrgb : hdr10;
+    const auto& second = preferred == Settings::HdrSwapchain::Scrgb ? hdr10 : scrgb;
+    if (listed(first)) {
+        return first;
+    }
+    if (listed(second)) {
+        return second;
+    }
+    return std::nullopt;
+}
+
 Swapchain::Swapchain(
     VkSurfaceKHR_T* surface_,
     const Device& device_,
     Scheduler& scheduler_,
     u32 width_,
-    u32 height_)
+    u32 height_,
+    VkSurfaceFormatKHR requested)
     : surface(surface_)
     , device{device_}
     , scheduler{scheduler_}
 {
-    if (!Create(surface, width_, height_)) {
+    if (!Create(surface, width_, height_, requested.format, requested.colorSpace)) {
         LOG_ERROR(Render_Vulkan, "Initial swapchain creation failed: surface has zero extent");
         throw vk::Exception(VK_ERROR_INITIALIZATION_FAILED);
     }
 }
 
-Swapchain::~Swapchain() = default;
+Swapchain::~Swapchain() {
+    Common::DisplayHdrMonitor::Instance().SetPresentingHdr(false);
+}
 
 bool Swapchain::Create(
     VkSurfaceKHR_T* surface_,
@@ -319,6 +345,8 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
 
     const VkCompositeAlphaFlagBitsKHR alpha_flags{ChooseAlphaFlags(capabilities)};
     surface_format = ChooseSwapSurfaceFormat(formats, requested_format, requested_color_space);
+    Common::DisplayHdrMonitor::Instance().SetPresentingHdr(surface_format.colorSpace !=
+                                                           VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
     present_mode = ChooseSwapPresentMode(has_imm, has_mailbox, has_fifo_relaxed);
 
     u32 requested_image_count{capabilities.minImageCount + 1};

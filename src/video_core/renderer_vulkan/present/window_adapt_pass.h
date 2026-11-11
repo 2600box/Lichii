@@ -9,6 +9,7 @@
 #include <list>
 
 #include "common/math_util.h"
+#include "video_core/renderer_vulkan/present/hdr_convert.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace Layout {
@@ -33,10 +34,10 @@ public:
                              vk::ShaderModule&& fragment_shader);
     ~WindowAdaptPass();
 
-    /// Draws the layers to dst, forwarding the selected HDR-output state to each layer.
+    /// Draws the layers to dst, each converted to the frame's encoding (output).
     void Draw(const Device& device, RasterizerVulkan& rasterizer, Scheduler& scheduler, size_t image_index,
               std::list<Layer>& layers, std::span<const Tegra::FramebufferConfig> configs,
-              const Layout::FramebufferLayout& layout, Frame* dst, bool hdr_output);
+              const Layout::FramebufferLayout& layout, Frame* dst, const HdrPresent& output);
 
     VkDescriptorSetLayout GetDescriptorSetLayout();
     VkRenderPass GetRenderPass();

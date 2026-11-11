@@ -84,3 +84,36 @@ TEST_CASE("HDR Auto switches with the monitor's reading", "[display_hdr]") {
         DisplayHdrInfo{.hdr_enabled = false, .max_luminance = 1000.0f, .sdr_white_level = 240.0f});
     REQUIRE_FALSE(ResolveHdrOutput(monitor.Current(), HdrMode::Auto, 0, 0).enabled);
 }
+
+TEST_CASE("The guest is told HDR only while the swapchain presents HDR", "[display_hdr]") {
+    using Common::ResolveGuestHdrOutput;
+    const DisplayHdrInfo hdr{
+        .hdr_enabled = true, .max_luminance = 1000.0f, .sdr_white_level = 240.0f};
+    const DisplayHdrInfo sdr{
+        .hdr_enabled = false, .max_luminance = 270.0f, .sdr_white_level = 80.0f};
+    REQUIRE(ResolveGuestHdrOutput(hdr, HdrMode::Auto, 0, 0, true).enabled);
+    // Windows HDR on, but the surface had no HDR pair: the swapchain stayed SDR.
+    REQUIRE_FALSE(ResolveGuestHdrOutput(hdr, HdrMode::Auto, 0, 0, false).enabled);
+    REQUIRE_FALSE(ResolveGuestHdrOutput(sdr, HdrMode::Auto, 0, 0, true).enabled);
+    REQUIRE(ResolveGuestHdrOutput(sdr, HdrMode::On, 0, 0, true).enabled);
+    REQUIRE_FALSE(ResolveGuestHdrOutput(sdr, HdrMode::On, 0, 0, false).enabled);
+    REQUIRE_FALSE(ResolveGuestHdrOutput(hdr, HdrMode::Off, 0, 0, true).enabled);
+    // The luminance answer does not depend on the swapchain.
+    const auto sdr_answer = ResolveGuestHdrOutput(hdr, HdrMode::Auto, 0, 0, false);
+    REQUIRE(sdr_answer.peak_luminance == 1000);
+    REQUIRE(sdr_answer.reference_white == 240);
+}
+
+TEST_CASE("A swapchain HDR change counts as a display change", "[display_hdr]") {
+    Common::DisplayHdrMonitor monitor;
+    REQUIRE_FALSE(monitor.PresentingHdr());
+    monitor.SetPresentingHdr(false);
+    REQUIRE(monitor.Generation() == 0);
+    monitor.SetPresentingHdr(true);
+    REQUIRE(monitor.PresentingHdr());
+    REQUIRE(monitor.Generation() == 1);
+    monitor.SetPresentingHdr(true); // every swapchain recreation reports again
+    REQUIRE(monitor.Generation() == 1);
+    monitor.SetPresentingHdr(false);
+    REQUIRE(monitor.Generation() == 2);
+}

@@ -1558,8 +1558,6 @@ struct Nx2NativeObjects {
         std::shared_ptr<std::mutex> decoder_mutex;
         u32 gpu_maps{};     // outstanding 426 maps
         bool mapped_here{}; // 426 added its GPU mapping (no other mapping covered it)
-        Tegra::ColorSpace color_space{Tegra::ColorSpace::RGB709};
-        u16 linear_unit_luminance{};
     };
     std::mutex mutex;
     std::map<u32, Memory> memories;
@@ -2159,8 +2157,7 @@ private:
         std::optional<Nx2NativeObjects::VideoTrace> video_trace;
         Nx2ImageLayout layout{};
         Nx2NativeImageFormat image_format{};
-        Tegra::ColorSpace color_space{Tegra::ColorSpace::RGB709};
-        u16 linear_unit_luminance{};
+        u32 image_word7{};
         {
             std::scoped_lock lk{m_objects->mutex};
             const auto image = m_objects->images.find(image_id);
@@ -2176,8 +2173,7 @@ private:
             parent_offset = memory->second.parent_offset + image->second.offset;
             layout = Nx2CalculateImageLayout(image->second.preference.data());
             image_format = static_cast<Nx2NativeImageFormat>(image->second.preference[6]);
-            color_space = image->second.color_space;
-            linear_unit_luminance = image->second.linear_unit_luminance;
+            image_word7 = image->second.preference[7];
             if (Nx2VideoTraceEnabled()) {
                 video_trace = m_objects->last_video_write;
             }
@@ -2272,8 +2268,10 @@ private:
             .crop_rect = {0, 0, static_cast<int>(crop_width), static_cast<int>(crop_height)},
             .blending = Tegra::BlendMode::Opaque,
             .native_tiling = true,
-            .color_space = color_space,
-            .linear_unit_luminance = linear_unit_luminance,
+            .color_space = Nx2NativeImageColorSpace(image_format, m_told_hdr.load()),
+            .linear_unit_luminance = image_format == Nx2NativeImageFormat::Rgba16Float
+                                         ? static_cast<u16>((image_word7 >> 8) & 0xFFFF)
+                                         : u16{},
         }};
         std::vector<Nvidia::NvFence> fences;
         if (fence_id < 192) {
@@ -2382,17 +2380,18 @@ private:
 
     // The HDR output the guest is told about: the HDR settings combined with the state of the
     // monitor showing the game (on Windows: Windows HDR on, the EDID peak, the SDR content
-    // brightness), so an SDR desktop gets an SDR frame and an HDR desktop the game's own HDR.
+    // brightness), and HDR only while the host swapchain really presents HDR, so an SDR desktop
+    // or surface gets an SDR frame and an HDR one the game's own HDR.
     Common::HdrOutput ResolveHostHdrOutput(std::optional<Common::DisplayHdrInfo>& display) {
         auto& monitor = Common::DisplayHdrMonitor::Instance();
         monitor.Watch(system.GPU().Renderer().GetRenderWindow().GetWindowInfo().render_surface);
         display = monitor.Current();
         const bool vulkan =
             Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::Vulkan;
-        return Common::ResolveHdrOutput(
+        return Common::ResolveGuestHdrOutput(
             display, vulkan ? Settings::values.hdr_mode.GetValue() : Settings::HdrMode::Off,
             Settings::values.hdr_peak_luminance.GetValue(),
-            Settings::values.hdr_reference_white.GetValue());
+            Settings::values.hdr_reference_white.GetValue(), monitor.PresentingHdr());
     }
 
     static u64 HdrOutputKey(const Common::HdrOutput& output) {
@@ -2408,12 +2407,14 @@ private:
         if (logged != m_logged_hdr_output) {
             m_logged_hdr_output = logged;
             LOG_INFO(Service,
-                     "nx2:vi2 HDR status: {} peak {} nits, reference white {} nits (display: {})",
+                     "nx2:vi2 HDR status: {} peak {} nits, reference white {} nits (display: {}, "
+                     "swapchain: {})",
                      output.enabled ? "HDR" : "SDR", output.peak_luminance, output.reference_white,
                      display ? fmt::format("hdr={} max {} nits, SDR white {} nits",
                                            display->hdr_enabled, display->max_luminance,
                                            display->sdr_white_level)
-                             : std::string{"no host query"});
+                             : std::string{"no host query"},
+                     Common::DisplayHdrMonitor::Instance().PresentingHdr() ? "HDR" : "SDR");
         }
         return output;
     }
@@ -2451,6 +2452,7 @@ private:
     // MKW's SDK converts these to public formats 0/1 before DefaultDisplay tests for HDR.
     void QueryDisplayHdrStatus(HLERequestContext& ctx) {
         const auto output = HostHdrOutput();
+        m_told_hdr = output.enabled;
         TipcReplyWords(ctx, {output.enabled ? 2U : 1U, 0, output.peak_luminance});
     }
 
@@ -2688,6 +2690,7 @@ private:
     u64 m_logged_hdr_output{~u64{}}; // HDR status last logged
     u64 m_hdr_generation{};           // DisplayHdrMonitor generation NotifyHdrChange last saw
     u32 m_hdr_change_slots{};         // native event slots bound to HDR status / paper white
+    std::atomic<bool> m_told_hdr{};   // the last HDR status answer was HDR
     std::shared_ptr<std::atomic<bool>> m_capture_pending = std::make_shared<std::atomic<bool>>(false);
 };
 
@@ -4039,24 +4042,11 @@ private:
         image.memory = w[19];
         std::copy_n(w + 2, image.preference.size(), image.preference.begin());
         image.size = Nx2CalculateImageLayout(w + 2).size;
-        // gsv 429's native format encodes color as well as storage; other commands use
-        // different descriptor layouts even though they share this handler.
-        if (ctx.GetCommand() == 429 && image.preference[1] == 1) {
-            switch (static_cast<Nx2NativeImageFormat>(image.preference[6])) {
-            case Nx2NativeImageFormat::Rgb10A2:
-                image.color_space = Tegra::ColorSpace::RGB2020_PQ;
-                break;
-            case Nx2NativeImageFormat::Rgba16Float:
-                image.color_space = Tegra::ColorSpace::RGB709_Linear;
-                image.linear_unit_luminance =
-                    static_cast<u16>((image.preference[7] >> 8) & 0xFFFF);
-                break;
-            default:
-                break;
-            }
-        }
-        LOG_INFO(Service, "nx2:gsv 429 CreateNativeImage memory={} count={} size={:#x} -> id {}",
-                 w[19], w[18], image.size, id);
+        LOG_INFO(Service,
+                 "nx2:gsv {} CreateNativeImage memory={} count={} size={:#x} format={} "
+                 "word7={:#x} -> id {}",
+                 ctx.GetCommand(), w[19], w[18], image.size, image.preference[6],
+                 image.preference[7], id);
         TipcReplyWords(ctx, {id});
     }
 

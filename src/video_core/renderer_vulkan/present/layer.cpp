@@ -93,7 +93,7 @@ void Layer::ConfigureDraw(const Device& device, PresentPushConstants* out_push_c
                           VkDescriptorSet* out_descriptor_set, RasterizerVulkan& rasterizer,
                           VkSampler sampler, size_t image_index,
                           const Tegra::FramebufferConfig& framebuffer,
-                          const Layout::FramebufferLayout& layout, bool hdr_output) {
+                          const Layout::FramebufferLayout& layout, const HdrPresent& output) {
     const auto texture_info = rasterizer.AccelerateDisplay(
         framebuffer, framebuffer.address + framebuffer.offset, framebuffer.stride);
     const u32 texture_width = texture_info ? texture_info->width : framebuffer.width;
@@ -101,6 +101,7 @@ void Layer::ConfigureDraw(const Device& device, PresentPushConstants* out_push_c
     const u32 scaled_width = texture_info ? texture_info->scaled_width : texture_width;
     const u32 scaled_height = texture_info ? texture_info->scaled_height : texture_height;
     const bool use_accelerated = texture_info.has_value();
+    const bool hdr_output = output.IsHdr();
     const bool is_applet =
         (framebuffer.layer_stack_mask & Service::Nvnflinger::LayerStackBit(
                                             Service::Nvnflinger::LayerStackId::Recording)) == 0;
@@ -127,6 +128,17 @@ void Layer::ConfigureDraw(const Device& device, PresentPushConstants* out_push_c
     VkImage source_image = texture_info ? texture_info->image : *raw_images[image_index];
     VkImageView source_image_view =
         texture_info ? texture_info->image_view : *raw_image_views[image_index];
+
+    const HdrConvertParams convert = MakeHdrConvertParams(framebuffer, output);
+    if (NeedsHdrConvert(convert)) {
+        if (!hdr_convert || hdr_convert->Extent().width != scaled_width ||
+            hdr_convert->Extent().height != scaled_height) {
+            hdr_convert.emplace(device, memory_allocator, image_count,
+                                VkExtent2D{scaled_width, scaled_height});
+        }
+        hdr_convert->Draw(device, scheduler, image_index, convert, &source_image,
+                          &source_image_view);
+    }
 
     const bool already_upscaled = texture_info && texture_info->already_upscaled;
     // FXAA or SMAA on top of NVIDIA DLSS's image only blurs it.

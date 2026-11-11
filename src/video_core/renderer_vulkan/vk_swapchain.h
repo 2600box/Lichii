@@ -7,9 +7,12 @@
 #pragma once
 
 #include <atomic>
+#include <optional>
+#include <span>
 #include <vector>
 
 #include "common/common_types.h"
+#include "common/settings_enums.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace Layout {
@@ -21,16 +24,23 @@ namespace Vulkan {
 class Device;
 class Scheduler;
 
+/// The HDR swapchain pair the surface lists: the preferred encoding, else the other one, else
+/// nullopt (present SDR).
+std::optional<VkSurfaceFormatKHR> ChooseHdrSurfaceFormat(
+    std::span<const VkSurfaceFormatKHR> formats, Settings::HdrSwapchain preferred);
+
 class Swapchain {
 public:
-    /// Creates the initial SDR swapchain without probing HDR encodings.
+    /// Creates the initial swapchain in the requested format (SDR unless HDR output is active).
     /// Throws on startup failure rather than constructing an unusable presenter.
     explicit Swapchain(
         VkSurfaceKHR_T* surface,
         const Device& device,
         Scheduler& scheduler,
         u32 width,
-        u32 height);
+        u32 height,
+        VkSurfaceFormatKHR requested = {VK_FORMAT_B8G8R8A8_UNORM,
+                                        VK_COLOR_SPACE_SRGB_NONLINEAR_KHR});
     ~Swapchain();
 
     /// Creates (or recreates) the swapchain; returns false when deferred for zero extent.

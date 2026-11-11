@@ -58,6 +58,13 @@ public:
     /// Stores a reading; returns true, and bumps the generation, when it differs from the last.
     bool Update(const std::optional<DisplayHdrInfo>& info);
 
+    /// Whether the host swapchain currently presents HDR (HDR10 or scRGB). Set by the presenter
+    /// whenever it creates a swapchain; a change bumps the generation.
+    void SetPresentingHdr(bool hdr);
+    [[nodiscard]] bool PresentingHdr() const {
+        return presenting_hdr.load(std::memory_order_acquire);
+    }
+
 private:
     void Run(std::stop_token stop);
 
@@ -65,6 +72,7 @@ private:
     std::optional<DisplayHdrInfo> current;
     std::atomic<u64> generation{};
     std::atomic<void*> window{};
+    std::atomic<bool> presenting_hdr{};
     std::jthread thread;
 };
 
@@ -79,5 +87,11 @@ struct HdrOutput {
 /// only while the host reports the monitor in HDR. Luminance settings of 0 follow the monitor.
 HdrOutput ResolveHdrOutput(const std::optional<DisplayHdrInfo>& display, Settings::HdrMode mode,
                            u16 peak_setting, u16 reference_white_setting);
+
+/// What the guest is told: ResolveHdrOutput, but HDR only while the host swapchain really
+/// presents HDR, so a game never renders PQ into an SDR swapchain.
+HdrOutput ResolveGuestHdrOutput(const std::optional<DisplayHdrInfo>& display,
+                                Settings::HdrMode mode, u16 peak_setting,
+                                u16 reference_white_setting, bool presenting_hdr);
 
 } // namespace Common

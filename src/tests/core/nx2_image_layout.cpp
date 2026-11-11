@@ -114,3 +114,18 @@ TEST_CASE("Unrecognized native image requirements preserve existing layout", "[n
         REQUIRE(native.alignment == generic.alignment);
     }
 }
+
+TEST_CASE("Native image colour space follows the HDR answer, not the format",
+          "[nx2_image_layout]") {
+    using Service::Nx2NativeImageColorSpace;
+    using Service::Nx2NativeImageFormat;
+    // Fortune's Weave: SDR in RGB10A2 while told SDR.
+    REQUIRE(Nx2NativeImageColorSpace(Nx2NativeImageFormat::Rgb10A2, false) ==
+            Tegra::ColorSpace::RGB709);
+    REQUIRE(Nx2NativeImageColorSpace(Nx2NativeImageFormat::Rgb10A2, true) ==
+            Tegra::ColorSpace::RGB2020_PQ);
+    REQUIRE(Nx2NativeImageColorSpace(Nx2NativeImageFormat::Rgba8, true) ==
+            Tegra::ColorSpace::RGB709);
+    REQUIRE(Nx2NativeImageColorSpace(Nx2NativeImageFormat::Rgba16Float, false) ==
+            Tegra::ColorSpace::RGB709_Linear);
+}

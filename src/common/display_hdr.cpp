@@ -164,6 +164,13 @@ bool DisplayHdrMonitor::Update(const std::optional<DisplayHdrInfo>& info) {
     return true;
 }
 
+void DisplayHdrMonitor::SetPresentingHdr(bool hdr) {
+    std::scoped_lock lock{mutex};
+    if (presenting_hdr.exchange(hdr, std::memory_order_acq_rel) != hdr) {
+        generation.fetch_add(1, std::memory_order_acq_rel);
+    }
+}
+
 HdrOutput ResolveHdrOutput(const std::optional<DisplayHdrInfo>& display, Settings::HdrMode mode,
                            u16 peak_setting, u16 reference_white_setting) {
     constexpr u32 DefaultPeak = 300; // the Switch 2 HDR calibration's starting value
@@ -188,6 +195,14 @@ HdrOutput ResolveHdrOutput(const std::optional<DisplayHdrInfo>& display, Setting
     }
     output.peak_luminance = static_cast<u16>(peak);
     output.reference_white = static_cast<u16>(std::min(white, peak));
+    return output;
+}
+
+HdrOutput ResolveGuestHdrOutput(const std::optional<DisplayHdrInfo>& display,
+                                Settings::HdrMode mode, u16 peak_setting,
+                                u16 reference_white_setting, bool presenting_hdr) {
+    HdrOutput output = ResolveHdrOutput(display, mode, peak_setting, reference_white_setting);
+    output.enabled = output.enabled && presenting_hdr;
     return output;
 }
 
