@@ -32,6 +32,15 @@ Users report game bugs with Lichii logs (`eden_log.txt`, `eden_log.txt.old`). Ea
 | 0100606026F12000 | Final Fantasy Resonance |
 | 010019A01E2F2000 | Metroid Prime 4: Beyond - Nintendo Switch 2 Edition |
 | 0100152000022000 | Mario Kart 8 Deluxe (Switch 1) |
+| 040032B023CA4000 | Orbitals |
+| 0400921025B32000 | Sonic Frontiers (Switch 2 Edition) |
+| 04003F40232DE000 | Hyrule Warriors: Age of Imprisonment |
+| 040015100B514001 | Super Mario Bros. Wonder - Nintendo Switch 2 Edition + Meetup in Bellabel Park |
+| 01004D300C5AE000 | Kirby and the Forgotten Land (Switch 1) |
+| 01007EF00011E000 | The Legend of Zelda: Breath of the Wild (Switch 1) |
+| 0100F2C0115B6000 | The Legend of Zelda: Tears of the Kingdom (Switch 1) |
+| 01006D0017F7A000 | Mario & Luigi: Brothership (Switch 1) |
+| 010051F0207B2000 | Tomodachi Life: Living the Dream (Switch 1) |
 
 Add ids here when a report identifies a new game.
 
