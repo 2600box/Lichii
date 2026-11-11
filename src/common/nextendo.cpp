@@ -72,6 +72,12 @@ u64 ReadPid(const nlohmann::json& value) {
     return 0;
 }
 
+// Server fields may be null or another type; those read as unset instead of throwing.
+std::string StringField(const nlohmann::json& object, const char* key, std::string fallback = {}) {
+    const auto it = object.find(key);
+    return it != object.end() && it->is_string() ? it->get<std::string>() : std::move(fallback);
+}
+
 void ReadIdentity(const nlohmann::json& object, u64& pid, std::string& username,
                   std::string& friend_code) {
     if (!object.is_object()) {
@@ -80,8 +86,8 @@ void ReadIdentity(const nlohmann::json& object, u64& pid, std::string& username,
     if (const auto it = object.find("pid"); it != object.end()) {
         pid = ReadPid(*it);
     }
-    username = object.value("username", username);
-    friend_code = object.value("friend_code", friend_code);
+    username = StringField(object, "username", username);
+    friend_code = StringField(object, "friend_code", friend_code);
 }
 
 std::string ServerError(const std::string& body) {
@@ -123,9 +129,9 @@ std::optional<Account> LoadAccount() {
         const auto json = nlohmann::json::parse(text);
         Account account;
         ReadIdentity(json, account.pid, account.username, account.friend_code);
-        account.nex_token = json.value("nex_token", std::string{});
-        account.access_token = json.value("access_token", std::string{});
-        account.refresh_token = json.value("refresh_token", std::string{});
+        account.nex_token = StringField(json, "nex_token");
+        account.access_token = StringField(json, "access_token");
+        account.refresh_token = StringField(json, "refresh_token");
         cached_account = std::move(account);
     } catch (const std::exception& e) {
         LOG_WARNING(Common, "Ignoring an unreadable Nextendo account file: {}", e.what());
@@ -240,9 +246,9 @@ std::optional<TokenResponse> ParseTokenResponse(std::string_view body) {
     for (const auto& [key, value] : json.items()) {
         out.fields.push_back(key);
     }
-    out.nex_token = json.value("nex_token", std::string{});
-    out.access_token = json.value("access_token", std::string{});
-    out.refresh_token = json.value("refresh_token", std::string{});
+    out.nex_token = StringField(json, "nex_token");
+    out.access_token = StringField(json, "access_token");
+    out.refresh_token = StringField(json, "refresh_token");
     if (const auto it = json.find("account"); it != json.end()) {
         ReadIdentity(*it, out.pid, out.username, out.friend_code);
     }

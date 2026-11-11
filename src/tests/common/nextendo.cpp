@@ -80,5 +80,16 @@ TEST_CASE("Nextendo: token responses", "[common]") {
     REQUIRE(third_party->refresh_token == "rt");
     REQUIRE(third_party->fields.size() == 3);
 
+    const auto wrong_types = Nextendo::ParseTokenResponse(
+        R"({"access_token":"at","refresh_token":null,"nex_token":7,)"
+        R"("account":{"pid":"42","username":null,"friend_code":[]}})");
+    REQUIRE(wrong_types.has_value());
+    REQUIRE(wrong_types->access_token == "at");
+    REQUIRE(wrong_types->refresh_token.empty());
+    REQUIRE(wrong_types->nex_token.empty());
+    REQUIRE(wrong_types->pid == 42);
+    REQUIRE(wrong_types->username.empty());
+    REQUIRE(wrong_types->friend_code.empty());
+
     REQUIRE_FALSE(Nextendo::ParseTokenResponse("not json").has_value());
 }
