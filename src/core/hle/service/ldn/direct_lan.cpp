@@ -76,6 +76,9 @@ void ConfigureStream(Network::SocketBase& socket) {
 } // namespace
 
 bool DirectLan::SendFrame(Connection& connection, std::span<const u8> frame) {
+    if (connection.dropped) {
+        return false;
+    }
     const auto [sent, error] = connection.socket->Send(frame, Network::FLAG_MSG_DONTWAIT);
     if (sent == static_cast<s32>(frame.size())) {
         return true;
