@@ -714,6 +714,11 @@ struct Values {
                                                         true,
                                                         true};
 
+    // Build every cached graphics pipeline while the game loads, not only those recent sessions
+    // used, and keep them built, up to the pipelines kept in memory (a quarter of the RAM).
+    SwitchableSetting<bool> build_all_cached_shaders{linkage, false, "build_all_cached_shaders",
+                                                     Category::RendererAdvanced};
+
     SwitchableSetting<bool> enable_compute_pipelines{linkage, false, "enable_compute_pipelines",
                                                      Category::RendererAdvanced};
 
