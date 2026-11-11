@@ -73,17 +73,17 @@ void ConfigureStream(Network::SocketBase& socket) {
 #endif
 }
 
-bool SendFrame(Network::SocketBase& socket, std::span<const u8> frame) {
-    const auto [sent, error] = socket.Send(frame, Network::FLAG_MSG_DONTWAIT);
+} // namespace
+
+bool DirectLan::SendFrame(Connection& connection, std::span<const u8> frame) {
+    const auto [sent, error] = connection.socket->Send(frame, Network::FLAG_MSG_DONTWAIT);
     if (sent == static_cast<s32>(frame.size())) {
         return true;
     }
-    // A partial frame would desynchronise the stream; the worker reports the close
-    socket.Shutdown(Network::ShutdownHow::RDWR);
+    // A partial frame would desynchronise the stream, so the worker closes the connection
+    connection.dropped = true;
     return false;
 }
-
-} // namespace
 
 DirectLan::DirectLan(PacketHandler handler_) : handler{std::move(handler_)} {}
 
@@ -185,7 +185,7 @@ bool DirectLan::ConnectToHost(Network::IPv4Address host_ip, std::span<const u8> 
 
     std::scoped_lock lock{mutex};
     host = connection;
-    if (!SendFrame(socket, EncodeFrame(FrameType::Connect, node_info))) {
+    if (!SendFrame(*connection, EncodeFrame(FrameType::Connect, node_info))) {
         host.reset();
         return false;
     }
@@ -207,7 +207,7 @@ void DirectLan::Send(const Network::LDNPacket& packet) {
         std::scoped_lock lock{mutex};
         for (const auto& station : stations) {
             if (station->peer == packet.remote_ip && !station->node_info.empty()) {
-                SendFrame(*station->socket, frame);
+                SendFrame(*station, frame);
             }
         }
         break;
@@ -230,6 +230,7 @@ void DirectLan::Send(const Network::LDNPacket& packet) {
 
 void DirectLan::Run(std::stop_token stop_token) {
     std::vector<std::shared_ptr<Connection>> connections;
+    std::vector<std::shared_ptr<Connection>> dropped;
     std::vector<Network::PollFD> poll_fds;
     std::vector<Network::LDNPacket> packets;
     while (!stop_token.stop_requested()) {
@@ -243,6 +244,16 @@ void DirectLan::Run(std::stop_token stop_token) {
             if (host) {
                 connections.push_back(host);
             }
+            dropped.clear();
+            std::erase_if(connections, [&](const auto& connection) {
+                if (connection->dropped) {
+                    dropped.push_back(connection);
+                }
+                return connection->dropped;
+            });
+        }
+        for (const auto& connection : dropped) {
+            OnClosed(connection, packets);
         }
 
         poll_fds.clear();
@@ -255,23 +266,21 @@ void DirectLan::Run(std::stop_token stop_token) {
         const bool any_ready = std::ranges::any_of(poll_fds, [](const Network::PollFD& fd) {
             return fd.revents != Network::PollEvents{};
         });
-        if (ready <= 0 || !any_ready) {
-            if (ready != 0) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(PollIntervalMs));
+        if (ready != 0 && !any_ready) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(PollIntervalMs));
+        }
+        if (ready > 0 && any_ready) {
+            if (poll_fds[0].revents != Network::PollEvents{}) {
+                ReceiveDatagrams(packets);
             }
-            continue;
-        }
-
-        if (poll_fds[0].revents != Network::PollEvents{}) {
-            ReceiveDatagrams(packets);
-        }
-        if (poll_fds[1].revents != Network::PollEvents{}) {
-            Accept();
-        }
-        for (std::size_t i = 0; i < connections.size(); ++i) {
-            if (poll_fds[i + 2].revents != Network::PollEvents{} &&
-                !ReceiveStream(*connections[i], packets)) {
-                OnClosed(connections[i], packets);
+            if (poll_fds[1].revents != Network::PollEvents{}) {
+                Accept();
+            }
+            for (std::size_t i = 0; i < connections.size(); ++i) {
+                if (poll_fds[i + 2].revents != Network::PollEvents{} &&
+                    !ReceiveStream(*connections[i], packets)) {
+                    OnClosed(connections[i], packets);
+                }
             }
         }
 

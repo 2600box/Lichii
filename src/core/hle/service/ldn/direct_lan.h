@@ -50,12 +50,15 @@ private:
         std::unique_ptr<Network::SocketBase> socket;
         Network::IPv4Address peer;
         bool to_host{};
+        /// Set under the mutex when a send failed; the worker closes it.
+        bool dropped{};
         std::chrono::steady_clock::time_point opened_at;
         std::vector<u8> received;
         /// The station's Connect payload, for the Disconnect its closing stands for.
         std::vector<u8> node_info;
     };
 
+    static bool SendFrame(Connection& connection, std::span<const u8> frame);
     void Run(std::stop_token stop_token);
     void ReceiveDatagrams(std::vector<Network::LDNPacket>& packets);
     void Accept();
