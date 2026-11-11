@@ -13,6 +13,7 @@
 
 #include "common/fs/file.h"
 #include "common/hex_util.h"
+#include "common/nextendo.h"
 #include "common/string_util.h"
 
 #include "core/hle/service/sockets/nextendo_redirect.h"
@@ -161,8 +162,11 @@ public:
     Result SetHostName(const char* hostname_in) override {
         // NSD host names carry "%" for the environment, and some titles pass the redirected
         // address itself; Nextendo needs the real name for SNI (citron-nextendo).
-        std::string host = Sockets::Nextendo::ExpandNsdHost(hostname_in);
-        if (socket) {
+        std::string host = hostname_in;
+        if (Common::Nextendo::OnlinePlayActive()) {
+            host = Sockets::Nextendo::ExpandNsdHost(std::move(host));
+        }
+        if (Common::Nextendo::OnlinePlayActive() && socket) {
             const auto [peer, err] = socket->GetPeerName();
             if (err == Network::Errno::SUCCESS) {
                 const std::string ip = Network::IPv4AddressToString(peer.ip);

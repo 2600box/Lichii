@@ -3,6 +3,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "common/nextendo.h"
 #include "common/settings.h"
 #include "core/hle/service/sockets/nextendo_redirect.h"
 
@@ -28,15 +29,19 @@ TEST_CASE("Nextendo: host classification", "[core]") {
     REQUIRE_FALSE(Nextendo::Classify("wwzapi.com", WorldWarZ).has_value());
 }
 
-TEST_CASE("Nextendo: redirects only while enabled", "[core]") {
+TEST_CASE("Nextendo: redirects only while online play is on", "[core]") {
     Settings::values.nextendo_enabled = false;
     REQUIRE_FALSE(Nextendo::RedirectAddress("dauth-lp1.ndas.srv.nintendo.net").has_value());
 
     Settings::values.nextendo_enabled = true;
     Settings::values.nextendo_server_ip = "192.0.2.1";
     Settings::values.nextendo_nat_ip = "192.0.2.2";
-    REQUIRE(Nextendo::RedirectAddress("dauth-lp1.ndas.srv.nintendo.net") == "192.0.2.1");
-    REQUIRE(Nextendo::RedirectAddress("nncs2-lp1.n.n.srv.nintendo.net") == "192.0.2.2");
+    if constexpr (Common::Nextendo::OnlinePlayAvailable) {
+        REQUIRE(Nextendo::RedirectAddress("dauth-lp1.ndas.srv.nintendo.net") == "192.0.2.1");
+        REQUIRE(Nextendo::RedirectAddress("nncs2-lp1.n.n.srv.nintendo.net") == "192.0.2.2");
+    } else {
+        REQUIRE_FALSE(Nextendo::RedirectAddress("dauth-lp1.ndas.srv.nintendo.net").has_value());
+    }
     REQUIRE_FALSE(Nextendo::RedirectAddress("example.org").has_value());
 
     Settings::values.nextendo_enabled = false;

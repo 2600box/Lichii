@@ -23,6 +23,12 @@ ConfigureNetwork::ConfigureNetwork(const Core::System& system_, QWidget* parent)
         ui->network_interface->addItem(QString::fromStdString(iface.name));
     this->SetConfiguration();
 
+    if constexpr (!Common::Nextendo::OnlinePlayAvailable) {
+        ui->nextendo_enabled->setVisible(false);
+        ui->nextendo_description->setText(
+            tr("Sign in with your Nextendo Network account. Online play through Nextendo isn't "
+               "available in this build yet."));
+    }
     connect(ui->nextendo_enabled, &QCheckBox::toggled, this, [this](bool enabled) {
         if (enabled) {
             ui->airplane_mode->setChecked(false);

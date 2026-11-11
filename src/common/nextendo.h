@@ -29,6 +29,13 @@ constexpr std::string_view NexTokenPath = "/api/nex-token";
 constexpr std::string_view Scopes = "identity game.matchmaking";
 constexpr u16 CallbackPort = 47823;
 
+// Online play through Nextendo (host redirects, SNI recovery, the BAAS id_token and the license
+// kind) is built but held back for now; set this to true to offer it. Sign-in works either way.
+constexpr bool OnlinePlayAvailable = false;
+
+// True when online play is available and the user turned it on.
+bool OnlinePlayActive();
+
 struct Account {
     u64 pid{};
     std::string username;

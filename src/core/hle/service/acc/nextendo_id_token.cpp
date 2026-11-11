@@ -101,7 +101,7 @@ bool NeedsAppId(u64 program_id) {
 } // namespace
 
 std::optional<Common::Nextendo::Account> LinkedAccount() {
-    if (!Settings::values.nextendo_enabled.GetValue()) {
+    if (!Common::Nextendo::OnlinePlayActive()) {
         return std::nullopt;
     }
     return Common::Nextendo::LoadAccount();

@@ -23,6 +23,7 @@
 #include "common/httplib.h"
 #include "common/logging.h"
 #include "common/nextendo.h"
+#include "common/settings.h"
 
 #ifdef YUZU_BUNDLED_OPENSSL
 #include <openssl/cert.h>
@@ -201,6 +202,10 @@ bool FetchGameToken(httplib::Client& client, std::string_view client_id, Account
 }
 
 } // namespace
+
+bool OnlinePlayActive() {
+    return OnlinePlayAvailable && Settings::values.nextendo_enabled.GetValue();
+}
 
 std::optional<Account> LoadAccount() {
     std::scoped_lock lock{account_mutex};

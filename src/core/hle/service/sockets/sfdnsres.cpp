@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "common/nextendo.h"
 #include "common/string_util.h"
 #include "common/swap.h"
 #include "core/core.h"
@@ -208,7 +209,10 @@ static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestConte
         parameters.use_nsd_resolve, parameters.cancel_handle, parameters.process_id);
 
     const auto host_buffer = ctx.ReadBuffer(0);
-    const std::string host = Nextendo::ExpandNsdHost(Common::StringFromBuffer(host_buffer));
+    std::string host = Common::StringFromBuffer(host_buffer);
+    if (Common::Nextendo::OnlinePlayActive()) {
+        host = Nextendo::ExpandNsdHost(std::move(host));
+    }
     // For now, ignore options, which are in input buffer 1 for GetHostByNameRequestWithOptions.
     const auto redirect = Nextendo::RedirectAddress(host, program_id);
 
@@ -330,7 +334,10 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
     // before looking up.
 
     const auto host_buffer = ctx.ReadBuffer(0);
-    const std::string host = Nextendo::ExpandNsdHost(Common::StringFromBuffer(host_buffer));
+    std::string host = Common::StringFromBuffer(host_buffer);
+    if (Common::Nextendo::OnlinePlayActive()) {
+        host = Nextendo::ExpandNsdHost(std::move(host));
+    }
     const auto redirect = Nextendo::RedirectAddress(host, program_id);
 
     // Prevent resolution of Nintendo servers

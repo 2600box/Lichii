@@ -10,6 +10,7 @@
 #include <unordered_map>
 
 #include "common/logging.h"
+#include "common/nextendo.h"
 #include "common/settings.h"
 #include "core/hle/service/sockets/nextendo_redirect.h"
 
@@ -124,7 +125,7 @@ std::optional<Target> Classify(std::string_view host, u64 program_id) {
 }
 
 std::optional<std::string> RedirectAddress(std::string_view host, u64 program_id) {
-    if (!Settings::values.nextendo_enabled.GetValue()) {
+    if (!Common::Nextendo::OnlinePlayActive()) {
         return std::nullopt;
     }
     const auto target = Classify(host, program_id);
