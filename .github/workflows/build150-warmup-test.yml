@@ -1,6 +1,11 @@
 name: Build 150 Windows PGO shader warm-up test
 on:
   workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Isolated source branch to build
+        default: test/build150-pgo-warmup
+        type: string
 permissions:
   contents: read
 concurrency:
@@ -13,8 +18,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ inputs.source_ref }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Identify source
+        id: source
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Verify provenance and training profile
         shell: bash
         run: |
@@ -133,7 +143,7 @@ jobs:
       - name: Upload runnable package
         uses: actions/upload-artifact@v4
         with:
-          name: lichii-build150-windows-x64-pgo-warmup-${{ github.sha }}
+          name: lichii-build150-windows-x64-pgo-warmup-${{ steps.source.outputs.sha }}
           path: package/
           if-no-files-found: error
           retention-days: 14
@@ -141,7 +151,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build150-pgo-warmup-evidence-${{ github.sha }}
+          name: build150-pgo-warmup-evidence-${{ steps.source.outputs.sha }}
           path: |
             evidence/
             build/release/CMakeCache.txt
