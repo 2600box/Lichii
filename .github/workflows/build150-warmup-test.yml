@@ -15,6 +15,9 @@ jobs:
   windows-pgo:
     runs-on: windows-2022
     timeout-minutes: 180
+    env:
+      SCCACHE_DIR: ${{ github.workspace }}/.sccache
+      SCCACHE_CACHE_SIZE: 3G
     steps:
       - uses: actions/checkout@v5
         with:
@@ -37,6 +40,16 @@ jobs:
           git log -1 --format=fuller > evidence/provenance.txt
           git diff --stat 17baed716 HEAD >> evidence/provenance.txt
           git hash-object lichii-windows.profdata > evidence/profile-blob.txt
+      - name: Restore test build caches
+        id: build-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .cache/cpm
+            .sccache
+          key: build150-pgo-${{ runner.os }}-${{ hashFiles('lichii-windows.profdata', 'tools/windows/install-llvm.ps1') }}-${{ steps.source.outputs.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            build150-pgo-${{ runner.os }}-${{ hashFiles('lichii-windows.profdata', 'tools/windows/install-llvm.ps1') }}-
       - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
 
@@ -158,3 +171,25 @@ jobs:
             build/release/compile_commands.json
             build/release/Testing/Temporary/LastTest.log
           retention-days: 14
+      - name: Preserve unverified outputs for diagnosing a failed check
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unverified-build150-outputs-${{ steps.source.outputs.sha }}
+          path: |
+            build/release/bin/
+            package/
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Stop sccache before saving objects
+        if: always()
+        shell: bash
+        run: if command -v sccache >/dev/null; then sccache --stop-server; fi
+      - name: Save test build caches
+        if: always() && steps.build-cache.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .cache/cpm
+            .sccache
+          key: ${{ steps.build-cache.outputs.cache-primary-key }}
