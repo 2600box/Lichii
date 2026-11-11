@@ -16,8 +16,8 @@ Build 150 + experimental graphics pipeline libraries and shader warm-up.
 Extract into a NEW directory. Keep the user folder for isolated portable settings.
 No game files, keys, firmware or prepared shaders are provided.
 Add only your own files to this portable instance. Do not import an existing profile.
-Graphics > Advanced: enable Shader libraries; choose Prepare shaders before the game starts.
-Right-click your own game: Prepare shaders (warm-up). Shader libraries are experimental.
+Graphics > Advanced: enable Shader libraries; choose Precache shaders before game start.
+Right-click your own game: Build Shader Precache (or Rebuild Shader Precache). Shader libraries are experimental.
 PGO and ThinLTO are compile-time options; this package has not been benchmarked on your GPU.
 '@
 Get-ChildItem package -Recurse -File | ForEach-Object {
