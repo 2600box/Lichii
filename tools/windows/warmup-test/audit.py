@@ -29,9 +29,7 @@ required = ['vk_pipeline_library.cpp', 'vk_graphics_pipeline.cpp', 'shader_warm_
 for name in required:
     assert any(c['file'].replace('\\', '/').endswith('/'+name) for c in core), name
 log = (out/'build.log').read_text(errors='replace')
-warnings = [line for line in log.splitlines() if any(s in line.lower() for s in
-    ('warning:', 'profile data', 'hash mismatch', 'unprofiled', 'out of date'))
-    and ('warning:' in line.lower() or 'mismatch' in line.lower())]
+warnings = [line for line in log.splitlines() if 'warning:' in line.lower()]
 hash_mismatches = [line for line in warnings if 'hash mismatch' in line]
 files = Counter(re.search(r'warning: (.+?): function', line).group(1)
                 for line in hash_mismatches if re.search(r'warning: (.+?): function', line))
