@@ -33,6 +33,7 @@ namespace Common::Nextendo {
 namespace {
 
 std::mutex account_mutex;
+std::mutex refresh_mutex;
 std::optional<Account> cached_account;
 bool account_loaded = false;
 
@@ -103,6 +104,17 @@ std::string ServerError(const std::string& body) {
     return {};
 }
 
+s64 Now() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+s64 IntField(const nlohmann::json& object, const char* key) {
+    const auto it = object.find(key);
+    return it != object.end() && it->is_number_integer() ? it->get<s64>() : 0;
+}
+
 void ConfigureClient(httplib::Client& client) {
     client.set_connection_timeout(15);
     client.set_read_timeout(15);
@@ -111,6 +123,78 @@ void ConfigureClient(httplib::Client& client) {
 #ifdef YUZU_BUNDLED_OPENSSL
     client.load_ca_cert_store(kCert, sizeof(kCert));
 #endif
+}
+
+httplib::Headers BaseHeaders(std::string_view client_id) {
+    return {{"User-Agent", "Lichii"}, {"X-Nextendo-Client-Id", std::string{client_id}}};
+}
+
+std::optional<TokenResponse> ReadReply(const httplib::Result& result, std::string_view what,
+                                       std::string& error) {
+    if (!result) {
+        error = "Could not reach nextendo.network.";
+        LOG_ERROR(Common, "Nextendo {} failed: {}", what, httplib::to_string(result.error()));
+        return std::nullopt;
+    }
+    if (result->status != 200) {
+        const std::string reason = ServerError(result->body);
+        error = fmt::format("nextendo.network refused the {} (HTTP {}){}{}", what, result->status,
+                            reason.empty() ? "" : ": ", reason);
+        LOG_ERROR(Common, "{}", error);
+        return std::nullopt;
+    }
+    auto token = ParseTokenResponse(result->body);
+    if (!token) {
+        error = fmt::format("nextendo.network sent an unreadable {} response.", what);
+        return std::nullopt;
+    }
+    LOG_INFO(Common, "Nextendo {} response fields: {}", what, fmt::join(token->fields, ", "));
+    return token;
+}
+
+void ApplyIdentity(Account& account, const TokenResponse& token) {
+    if (token.pid != 0) {
+        account.pid = token.pid;
+    }
+    if (!token.username.empty()) {
+        account.username = token.username;
+    }
+    if (!token.friend_code.empty()) {
+        account.friend_code = token.friend_code;
+    }
+}
+
+void ApplyTokens(Account& account, const TokenResponse& token) {
+    account.access_token = token.access_token;
+    account.access_expires = token.expires_in > 0 ? Now() + token.expires_in : 0;
+    if (!token.refresh_token.empty()) {
+        account.refresh_token = token.refresh_token;
+    }
+    if (!token.nex_token.empty()) {
+        account.nex_token = token.nex_token;
+        account.nex_expires = 0;
+    }
+    ApplyIdentity(account, token);
+}
+
+// Third-party clients trade the access token for the day-long nx2 game token that NEX servers
+// accept (wiki.nextendo.network/developers, "Game login").
+bool FetchGameToken(httplib::Client& client, std::string_view client_id, Account& account,
+                    std::string& error) {
+    auto headers = BaseHeaders(client_id);
+    headers.emplace("Authorization", "Bearer " + account.access_token);
+    const auto token = ReadReply(client.Get(std::string{NexTokenPath}, headers), "game token", error);
+    if (!token) {
+        return false;
+    }
+    if (token->nex_token.empty()) {
+        error = "nextendo.network sent no game token.";
+        return false;
+    }
+    account.nex_token = token->nex_token;
+    account.nex_expires = Now() + (token->expires_in > 0 ? token->expires_in : 24 * 60 * 60);
+    ApplyIdentity(account, *token);
+    return true;
 }
 
 } // namespace
@@ -132,6 +216,8 @@ std::optional<Account> LoadAccount() {
         account.nex_token = StringField(json, "nex_token");
         account.access_token = StringField(json, "access_token");
         account.refresh_token = StringField(json, "refresh_token");
+        account.access_expires = IntField(json, "access_expires");
+        account.nex_expires = IntField(json, "nex_expires");
         cached_account = std::move(account);
     } catch (const std::exception& e) {
         LOG_WARNING(Common, "Ignoring an unreadable Nextendo account file: {}", e.what());
@@ -147,6 +233,8 @@ void SaveAccount(const Account& account) {
         {"nex_token", account.nex_token},
         {"access_token", account.access_token},
         {"refresh_token", account.refresh_token},
+        {"access_expires", account.access_expires},
+        {"nex_expires", account.nex_expires},
     };
     std::scoped_lock lock{account_mutex};
     const auto path = AccountPath();
@@ -249,6 +337,8 @@ std::optional<TokenResponse> ParseTokenResponse(std::string_view body) {
     out.nex_token = StringField(json, "nex_token");
     out.access_token = StringField(json, "access_token");
     out.refresh_token = StringField(json, "refresh_token");
+    out.expires_in = IntField(json, "expires_in");
+    ReadIdentity(json, out.pid, out.username, out.friend_code);
     if (const auto it = json.find("account"); it != json.end()) {
         ReadIdentity(*it, out.pid, out.username, out.friend_code);
     }
@@ -310,48 +400,32 @@ SignInResult SignIn(std::string_view client_id,
 
     httplib::Client client{std::string{ApiBase}};
     ConfigureClient(client);
-    httplib::Headers headers{{"User-Agent", "Lichii"},
-                             {"X-Nextendo-Client-Id", std::string{client_id}}};
     const httplib::Params form{
         {"grant_type", "authorization_code"}, {"code", callback->code},
         {"client_id", std::string{client_id}}, {"redirect_uri", RedirectUri()},
         {"code_verifier", pkce.verifier},
     };
-    const auto result = client.Post(std::string{TokenPath}, headers, form);
-    if (!result) {
-        out.error = "Could not reach nextendo.network.";
-        LOG_ERROR(Common, "Nextendo token exchange failed: {}", httplib::to_string(result.error()));
-        return out;
-    }
-    if (result->status != 200) {
-        const std::string reason = ServerError(result->body);
-        out.error = fmt::format("nextendo.network refused the sign-in (HTTP {}){}{}", result->status,
-                                reason.empty() ? "" : ": ", reason);
-        LOG_ERROR(Common, "{}", out.error);
-        return out;
-    }
-
-    const auto token = ParseTokenResponse(result->body);
+    const auto token =
+        ReadReply(client.Post(std::string{TokenPath}, BaseHeaders(client_id), form), "sign-in",
+                  out.error);
     if (!token) {
-        out.error = "nextendo.network sent an unreadable token response.";
         return out;
     }
     out.token_fields = token->fields;
-    LOG_INFO(Common, "Nextendo token response fields: {}", fmt::join(token->fields, ", "));
-    if (token->nex_token.empty() && token->access_token.empty()) {
+    if (token->access_token.empty() && token->nex_token.empty()) {
         out.error = "nextendo.network returned no token.";
         return out;
     }
 
     Account& account = out.account;
-    account.nex_token = token->nex_token;
-    account.access_token = token->access_token;
-    account.refresh_token = token->refresh_token;
-    account.pid = token->pid;
-    account.username = token->username;
-    account.friend_code = token->friend_code;
+    ApplyTokens(account, *token);
+    if (account.nex_token.empty() &&
+        !FetchGameToken(client, client_id, account, out.game_token_error)) {
+        LOG_WARNING(Common, "Signed in to Nextendo without a game token: {}", out.game_token_error);
+    }
 
     if (account.pid == 0 && !account.access_token.empty()) {
+        auto headers = BaseHeaders(client_id);
         headers.emplace("Authorization", "Bearer " + account.access_token);
         if (const auto info = client.Get(std::string{UserInfoPath}, headers);
             info && info->status == 200) {
@@ -367,14 +441,49 @@ SignInResult SignIn(std::string_view client_id,
                         info ? info->status : 0);
         }
     }
-    if (account.nex_token.empty()) {
-        LOG_WARNING(Common, "nextendo.network issued no nex_token to this client id; "
-                            "Nextendo game servers will refuse online play");
-    }
 
     SaveAccount(account);
     out.ok = true;
     return out;
+}
+
+std::optional<Account> EnsureGameToken(std::string_view client_id) {
+    std::scoped_lock lock{refresh_mutex};
+    auto account = LoadAccount();
+    const s64 now = Now();
+    if (!account || (account->nex_expires > now + 60 && !account->nex_token.empty()) ||
+        (account->access_token.empty() && account->refresh_token.empty())) {
+        return account;
+    }
+
+    httplib::Client client{std::string{ApiBase}};
+    ConfigureClient(client);
+    std::string error;
+    if (account->access_token.empty() || account->access_expires <= now + 60) {
+        if (account->refresh_token.empty()) {
+            LOG_WARNING(Common, "The Nextendo session expired; sign in again");
+            return account;
+        }
+        const httplib::Params form{
+            {"grant_type", "refresh_token"},
+            {"refresh_token", account->refresh_token},
+            {"client_id", std::string{client_id}},
+        };
+        const auto token = ReadReply(
+            client.Post(std::string{TokenPath}, BaseHeaders(client_id), form), "token refresh", error);
+        if (!token || token->access_token.empty()) {
+            return account;
+        }
+        ApplyTokens(*account, *token);
+        // The server retires the old refresh token a minute after handing out a new one.
+        SaveAccount(*account);
+    }
+    if (FetchGameToken(client, client_id, *account, error)) {
+        SaveAccount(*account);
+    } else {
+        LOG_WARNING(Common, "Could not renew the Nextendo game token: {}", error);
+    }
+    return account;
 }
 
 } // namespace Common::Nextendo

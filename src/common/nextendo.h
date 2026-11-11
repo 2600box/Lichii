@@ -24,7 +24,9 @@ constexpr std::string_view ApiBase = "https://nextendo.network";
 constexpr std::string_view AuthorizePath = "/oauth/authorize";
 constexpr std::string_view TokenPath = "/api/oauth/token";
 constexpr std::string_view UserInfoPath = "/api/me";
-constexpr std::string_view Scopes = "identity friends";
+// The game token for third-party clients (wiki.nextendo.network/developers, "Game login").
+constexpr std::string_view NexTokenPath = "/api/nex-token";
+constexpr std::string_view Scopes = "identity game.matchmaking";
 constexpr u16 CallbackPort = 47823;
 
 struct Account {
@@ -35,6 +37,9 @@ struct Account {
     std::string nex_token;
     std::string access_token;
     std::string refresh_token;
+    // Unix times; the access token lasts an hour and the game token a day.
+    s64 access_expires{};
+    s64 nex_expires{};
 };
 
 std::optional<Account> LoadAccount();
@@ -71,17 +76,21 @@ struct TokenResponse {
     std::string nex_token;
     std::string access_token;
     std::string refresh_token;
+    s64 expires_in{};
     u64 pid{};
     std::string username;
     std::string friend_code;
 };
 
+// Reads both the OAuth token response and the /api/nex-token response.
 std::optional<TokenResponse> ParseTokenResponse(std::string_view body);
 
 struct SignInResult {
     bool ok{};
     std::string error;
     std::vector<std::string> token_fields;
+    // Set when sign-in worked but no game token came back, so games can't log in.
+    std::string game_token_error;
     Account account;
 };
 
@@ -89,5 +98,9 @@ struct SignInResult {
 // redirect and exchanges the code for tokens.
 SignInResult SignIn(std::string_view client_id,
                     const std::function<void(const std::string&)>& open_url);
+
+// The stored account with a game token that is still valid, renewing the access token and the
+// game token when they have expired. Keeps the stored tokens when nextendo.network can't be reached.
+std::optional<Account> EnsureGameToken(std::string_view client_id);
 
 } // namespace Common::Nextendo

@@ -80,7 +80,9 @@ void ConfigureNetwork::SignInToNextendo() {
                 const auto result = watcher->result();
                 watcher->deleteLater();
                 ui->nextendo_sign_in->setEnabled(true);
-                UpdateNextendoStatus(result.ok ? QString{} : QString::fromStdString(result.error));
+                UpdateNextendoStatus(QString::fromStdString(result.ok ? result.game_token_error
+                                                                      : result.error),
+                                     result.ok);
             });
     watcher->setFuture(QtConcurrent::run([client_id] {
         return Common::Nextendo::SignIn(client_id, [](const std::string& url) {
@@ -91,11 +93,11 @@ void ConfigureNetwork::SignInToNextendo() {
     }));
 }
 
-void ConfigureNetwork::UpdateNextendoStatus(const QString& error) {
+void ConfigureNetwork::UpdateNextendoStatus(const QString& error, bool signed_in) {
     const auto account = Common::Nextendo::LoadAccount();
     ui->nextendo_sign_out->setEnabled(account.has_value());
     QString status;
-    if (!error.isEmpty()) {
+    if (!error.isEmpty() && !signed_in) {
         status = tr("Sign-in failed: %1").arg(error);
     } else if (!account) {
         status = tr("Not signed in.");
@@ -105,8 +107,11 @@ void ConfigureNetwork::UpdateNextendoStatus(const QString& error) {
                      : tr("Signed in as %1.").arg(QString::fromStdString(account->username));
         if (account->nex_token.empty()) {
             status += QLatin1Char(' ') +
-                      tr("Nextendo did not issue an online play token to this client ID, so "
-                         "games can't log in to Nextendo yet.");
+                      tr("Nextendo did not issue an online play token, so games can't log in "
+                         "to Nextendo yet.");
+            if (!error.isEmpty()) {
+                status += QLatin1Char(' ') + error;
+            }
         }
     }
     ui->nextendo_status->setText(status);

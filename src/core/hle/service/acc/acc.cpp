@@ -11,6 +11,7 @@
 #include "common/fs/file.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
+#include "common/settings.h"
 #include <ranges>
 #include "common/stb.h"
 #include "common/string_util.h"
@@ -720,7 +721,11 @@ private:
 
 // While Nextendo Network is on, answers with the signed-in account's id token.
 static bool ReplyNextendoIdToken(Core::System& system, HLERequestContext& ctx) {
-    const auto account = Nextendo::LinkedAccount();
+    if (!Nextendo::LinkedAccount()) {
+        return false;
+    }
+    const auto account =
+        Common::Nextendo::EnsureGameToken(Settings::values.nextendo_client_id.GetValue());
     if (!account) {
         return false;
     }

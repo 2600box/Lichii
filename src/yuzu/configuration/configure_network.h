@@ -24,7 +24,7 @@ private:
     void RetranslateUI();
     void SetConfiguration();
     void SignInToNextendo();
-    void UpdateNextendoStatus(const QString& error = {});
+    void UpdateNextendoStatus(const QString& error = {}, bool signed_in = false);
 
     std::unique_ptr<Ui::ConfigureNetwork> ui;
 

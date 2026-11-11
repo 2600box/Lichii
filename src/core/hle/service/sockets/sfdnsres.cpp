@@ -190,7 +190,8 @@ static std::vector<u8> SerializeAddrInfoAsHostEnt(const std::vector<Network::Add
     return data;
 }
 
-static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestContext& ctx) {
+static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestContext& ctx,
+                                                                  u64 program_id) {
     struct InputParameters {
         u8 use_nsd_resolve;
         u32 cancel_handle;
@@ -209,7 +210,7 @@ static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestConte
     const auto host_buffer = ctx.ReadBuffer(0);
     const std::string host = Nextendo::ExpandNsdHost(Common::StringFromBuffer(host_buffer));
     // For now, ignore options, which are in input buffer 1 for GetHostByNameRequestWithOptions.
-    const auto redirect = Nextendo::RedirectAddress(host);
+    const auto redirect = Nextendo::RedirectAddress(host, program_id);
 
     // Prevent resolution of Nintendo servers
     if (!redirect && IsBlockedHost(host)) {
@@ -232,7 +233,7 @@ static std::pair<u32, GetAddrInfoError> GetHostByNameRequestImpl(HLERequestConte
 }
 
 void SFDNSRES::GetHostByNameRequest(HLERequestContext& ctx) {
-    auto [data_size, emu_gai_err] = GetHostByNameRequestImpl(ctx);
+    auto [data_size, emu_gai_err] = GetHostByNameRequestImpl(ctx, system.GetApplicationProcessProgramID());
 
     struct OutputParameters {
         NetDbError netdb_error;
@@ -251,7 +252,7 @@ void SFDNSRES::GetHostByNameRequest(HLERequestContext& ctx) {
 }
 
 void SFDNSRES::GetHostByNameRequestWithOptions(HLERequestContext& ctx) {
-    auto [data_size, emu_gai_err] = GetHostByNameRequestImpl(ctx);
+    auto [data_size, emu_gai_err] = GetHostByNameRequestImpl(ctx, system.GetApplicationProcessProgramID());
 
     struct OutputParameters {
         u32 data_size;
@@ -308,7 +309,8 @@ static std::vector<u8> SerializeAddrInfo(const std::vector<Network::AddrInfo>& v
     return data;
 }
 
-static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext& ctx) {
+static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext& ctx,
+                                                                u64 program_id) {
     struct InputParameters {
         u8 use_nsd_resolve;
         u32 cancel_handle;
@@ -329,7 +331,7 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
 
     const auto host_buffer = ctx.ReadBuffer(0);
     const std::string host = Nextendo::ExpandNsdHost(Common::StringFromBuffer(host_buffer));
-    const auto redirect = Nextendo::RedirectAddress(host);
+    const auto redirect = Nextendo::RedirectAddress(host, program_id);
 
     // Prevent resolution of Nintendo servers
     if (!redirect && IsBlockedHost(host)) {
@@ -360,7 +362,7 @@ static std::pair<u32, GetAddrInfoError> GetAddrInfoRequestImpl(HLERequestContext
 }
 
 void SFDNSRES::GetAddrInfoRequest(HLERequestContext& ctx) {
-    auto [data_size, emu_gai_err] = GetAddrInfoRequestImpl(ctx);
+    auto [data_size, emu_gai_err] = GetAddrInfoRequestImpl(ctx, system.GetApplicationProcessProgramID());
 
     struct OutputParameters {
         Errno bsd_errno;
@@ -394,7 +396,7 @@ void SFDNSRES::GetGaiStringErrorRequest(HLERequestContext& ctx) {
 
 void SFDNSRES::GetAddrInfoRequestWithOptions(HLERequestContext& ctx) {
     // Additional options are ignored
-    auto [data_size, emu_gai_err] = GetAddrInfoRequestImpl(ctx);
+    auto [data_size, emu_gai_err] = GetAddrInfoRequestImpl(ctx, system.GetApplicationProcessProgramID());
 
     struct OutputParameters {
         u32 data_size;

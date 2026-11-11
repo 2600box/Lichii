@@ -17,6 +17,15 @@ TEST_CASE("Nextendo: host classification", "[core]") {
     REQUIRE(Nextendo::Classify("nintendo.com") == Nextendo::Target::Server);
     REQUIRE_FALSE(Nextendo::Classify("notnintendo.com").has_value());
     REQUIRE_FALSE(Nextendo::Classify("example.org").has_value());
+    REQUIRE(Nextendo::Classify("stun.us.demonware.net") == Nextendo::Target::Server);
+
+    constexpr u64 Strive = 0x0100AB401F136000;
+    constexpr u64 WorldWarZ = 0x010099F013898000;
+    REQUIRE(Nextendo::Classify("api.epicgames.dev", Strive) == Nextendo::Target::Server);
+    REQUIRE_FALSE(Nextendo::Classify("api.epicgames.dev").has_value());
+    REQUIRE_FALSE(Nextendo::Classify("api.epicgames.dev", WorldWarZ).has_value());
+    REQUIRE(Nextendo::Classify("wwz-eu.wwzapi.com", WorldWarZ) == Nextendo::Target::Server);
+    REQUIRE_FALSE(Nextendo::Classify("wwzapi.com", WorldWarZ).has_value());
 }
 
 TEST_CASE("Nextendo: redirects only while enabled", "[core]") {

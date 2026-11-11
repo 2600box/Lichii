@@ -36,7 +36,7 @@ TEST_CASE("Nextendo: the authorize URL carries the loopback redirect and PKCE", 
     REQUIRE(url.find("&client_id=nxc_test") != std::string::npos);
     REQUIRE(url.find("&redirect_uri=http%3A%2F%2F127.0.0.1%3A47823%2Fcallback") !=
             std::string::npos);
-    REQUIRE(url.find("&scope=identity%20friends") != std::string::npos);
+    REQUIRE(url.find("&scope=identity%20game.matchmaking") != std::string::npos);
     REQUIRE(url.find("&state=st&code_challenge=ch&code_challenge_method=S256") !=
             std::string::npos);
 }
@@ -90,6 +90,16 @@ TEST_CASE("Nextendo: token responses", "[common]") {
     REQUIRE(wrong_types->pid == 42);
     REQUIRE(wrong_types->username.empty());
     REQUIRE(wrong_types->friend_code.empty());
+
+    const auto game = Nextendo::ParseTokenResponse(
+        R"({"nex_token":"nx2.g.s","pid":1800000002,"friend_code":"SW-2","username":"Q",)"
+        R"("expires_in":86400})");
+    REQUIRE(game.has_value());
+    REQUIRE(game->nex_token == "nx2.g.s");
+    REQUIRE(game->pid == 1800000002);
+    REQUIRE(game->friend_code == "SW-2");
+    REQUIRE(game->username == "Q");
+    REQUIRE(game->expires_in == 86400);
 
     REQUIRE_FALSE(Nextendo::ParseTokenResponse("not json").has_value());
 }

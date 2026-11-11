@@ -10,6 +10,8 @@
 #include <string>
 #include <string_view>
 
+#include "common/common_types.h"
+
 // Sends Nintendo's online host names to Nextendo Network while the Nextendo setting is on,
 // after citron-nextendo's GetNextendoRedirectIp (src/core/hle/service/sockets/sfdnsres.cpp).
 namespace Service::Sockets::Nextendo {
@@ -20,10 +22,12 @@ enum class Target {
     Nat,
 };
 
-std::optional<Target> Classify(std::string_view host);
+// program_id selects the per-title publisher hosts (Epic, Ubisoft, brainCloud and others) that
+// Nextendo serves only for the title that uses them.
+std::optional<Target> Classify(std::string_view host, u64 program_id = 0);
 
 // The address to resolve instead of host, or nullopt when host keeps its normal resolution.
-std::optional<std::string> RedirectAddress(std::string_view host);
+std::optional<std::string> RedirectAddress(std::string_view host, u64 program_id = 0);
 
 // NSD names carry "%" for the environment; retail consoles resolve it to "lp1".
 std::string ExpandNsdHost(std::string host);
