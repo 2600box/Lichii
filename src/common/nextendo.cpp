@@ -33,7 +33,8 @@ namespace Common::Nextendo {
 namespace {
 
 std::mutex account_mutex;
-// Held across a token renewal, so a sign-in or sign-out can't be overwritten by its stale copy.
+// Bumped by every sign-in and sign-out, so a renewal that started before one doesn't save over it.
+u64 account_generation = 0;
 std::mutex refresh_mutex;
 s64 last_renewal_failure = 0;
 std::optional<Account> cached_account;
@@ -227,7 +228,9 @@ std::optional<Account> LoadAccount() {
     return cached_account;
 }
 
-void SaveAccount(const Account& account) {
+namespace {
+
+void WriteAccountLocked(const Account& account) {
     const nlohmann::json json{
         {"pid", account.pid},
         {"username", account.username},
@@ -238,7 +241,6 @@ void SaveAccount(const Account& account) {
         {"access_expires", account.access_expires},
         {"nex_expires", account.nex_expires},
     };
-    std::scoped_lock lock{account_mutex};
     const auto path = AccountPath();
     void(FS::CreateParentDirs(path));
     if (FS::WriteStringToFile(path, FS::FileType::TextFile, json.dump(2)) == 0) {
@@ -248,8 +250,26 @@ void SaveAccount(const Account& account) {
     account_loaded = true;
 }
 
+bool SaveRenewedAccount(const Account& account, u64 generation) {
+    std::scoped_lock lock{account_mutex};
+    if (generation != account_generation) {
+        return false;
+    }
+    WriteAccountLocked(account);
+    return true;
+}
+
+} // namespace
+
+void SaveAccount(const Account& account) {
+    std::scoped_lock lock{account_mutex};
+    ++account_generation;
+    WriteAccountLocked(account);
+}
+
 void ClearAccount() {
-    std::scoped_lock lock{refresh_mutex, account_mutex};
+    std::scoped_lock lock{account_mutex};
+    ++account_generation;
     void(FS::RemoveFile(AccountPath()));
     cached_account.reset();
     account_loaded = true;
@@ -444,16 +464,18 @@ SignInResult SignIn(std::string_view client_id,
         }
     }
 
-    {
-        std::scoped_lock lock{refresh_mutex};
-        SaveAccount(account);
-    }
+    SaveAccount(account);
     out.ok = true;
     return out;
 }
 
 std::optional<Account> EnsureGameToken(std::string_view client_id) {
     std::scoped_lock lock{refresh_mutex};
+    u64 generation;
+    {
+        std::scoped_lock account_lock{account_mutex};
+        generation = account_generation;
+    }
     auto account = LoadAccount();
     const s64 now = Now();
     if (!account || (account->nex_expires > now + 60 && !account->nex_token.empty()) ||
@@ -487,10 +509,14 @@ std::optional<Account> EnsureGameToken(std::string_view client_id) {
         }
         ApplyTokens(*account, *token);
         // The server retires the old refresh token a minute after handing out a new one.
-        SaveAccount(*account);
+        if (!SaveRenewedAccount(*account, generation)) {
+            return LoadAccount();
+        }
     }
     if (FetchGameToken(client, client_id, *account, error)) {
-        SaveAccount(*account);
+        if (!SaveRenewedAccount(*account, generation)) {
+            return LoadAccount();
+        }
     } else {
         last_renewal_failure = now;
         LOG_WARNING(Common, "Could not renew the Nextendo game token: {}", error);
