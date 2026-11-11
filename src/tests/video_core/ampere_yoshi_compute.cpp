@@ -220,3 +220,19 @@ TEST_CASE("Ampere buffer reductions use only one coordinate register", "[ampere]
     CHECK(pressure.prefix.empty());
     CHECK(pressure.instruction.Bits(24, 8) == 215);
 }
+
+TEST_CASE("Yoshi bindless offset gather coordinates stay below the uniform bank",
+          "[ampere][yoshi]") {
+    const Instruction uniform_marker{{0x0000fc02, 0, 0, 0}};
+    const auto gather = [](u32 coordinate) {
+        Instruction instruction{{0x00247f63, 0x3000040e, 0x0c1e1f0e, 0x000f4200}};
+        instruction.words[0] = (instruction.words[0] & 0x00ffffffU) | (coordinate << 24);
+        return instruction;
+    };
+    const auto inside = LowerToMaxwell(std::array{uniform_marker, gather(214), Exit});
+    INFO(inside.error);
+    REQUIRE(inside);
+    const auto crossing = LowerToMaxwell(std::array{uniform_marker, gather(215), Exit});
+    REQUIRE_FALSE(crossing);
+    CHECK(crossing.error == "native texture gather mode");
+}

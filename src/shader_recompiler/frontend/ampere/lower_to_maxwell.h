@@ -2610,7 +2610,8 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                           dest >= register_limit ||
                           // Up to two taps pack into dest alone (mask 3 with no second register).
                           (std::popcount(mask) > 2 && second_dest >= register_limit))) ||
-                (offsets && ((bindless && (array || source_b >= register_limit)) || source_b == 255 ||
+                (offsets && ((bindless && (array || source_a + 2 > register_limit || source_b >= register_limit)) ||
+                             source_b == 255 ||
                              (source_a != 255 && source_a >= 245))) ||
                 (per_tap && (bindless || depth || insn.Bits(80, 1) || insn.Bits(91, 1))) ||
                 insn.Bits(89, 1) || mask == 0 ||
