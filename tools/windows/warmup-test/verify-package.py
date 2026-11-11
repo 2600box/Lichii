@@ -20,7 +20,8 @@ user_files = [str(p.relative_to(package)) for p in (package/'user').rglob('*') i
 assert user_files == ['user/PORTABLE.txt'] or user_files == ['user\\PORTABLE.txt'], user_files
 for forbidden in ('*.nsp', '*.xci', '*.nup', '*.nca', '*.nso', '*.keys', '*.profraw'):
     assert not list(package.rglob(forbidden)), forbidden
-assert (package/'platforms/qwindows.dll').is_file()
+platform_paths = [package/'platforms/qwindows.dll', package/'plugins/platforms/qwindows.dll']
+assert any(p.is_file() for p in platform_paths), 'Windows Qt platform plugin missing'
 for dll in ('Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll'):
     assert (package/dll).is_file(), dll
 Path('evidence').mkdir(exist_ok=True)
