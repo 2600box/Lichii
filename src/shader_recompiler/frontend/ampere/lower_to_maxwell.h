@@ -3293,13 +3293,12 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
         case 0x845: case 0x906: {
             const bool round_up = opcode == 0x906;
             if (opcode == 0x906 && !insn.Bits(24, 8) && !(insn.words[3] & 0xc00001ffU) &&
-                (insn.words[2] & ~0xdc00U) == 0x00200000U && insn.Bits(75, 2) == 1) {
-                // I2F.F16.U32/S32 immediate (from Orchid): format at 75-76 and rounding at 78-79,
-                // as Maxwell I2F's 8 and 39.
+                (insn.words[2] & ~0x1c00U) == 0x00200000U && insn.Bits(75, 2) == 1) {
+                // I2F.F16.U32/S32 immediate (from Orchid), format at 75-76. Only round to nearest:
+                // the half conversion is emitted without a rounding mode.
                 mov_imm(250, insn.words[1]);
                 emit(base(0x5cb8000000000000ULL) | (u64{1} << 8) | (u64{2} << 10) |
-                     (u64{insn.Bits(74, 1)} << 13) | (u64{250} << 20) |
-                     (u64{insn.Bits(78, 2)} << 39));
+                     (u64{insn.Bits(74, 1)} << 13) | (u64{250} << 20));
                 break;
             }
             if (insn.Bits(24, 8) || (insn.words[3] & 0xc00001ffU) ||

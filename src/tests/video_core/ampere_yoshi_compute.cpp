@@ -236,3 +236,19 @@ TEST_CASE("Yoshi bindless offset gather coordinates stay below the uniform bank"
     REQUIRE_FALSE(crossing);
     CHECK(crossing.error == "native texture gather mode");
 }
+
+TEST_CASE("Ampere half immediate conversions lower only round to nearest", "[ampere][yoshi]") {
+    Instruction conversion{{0x00077906, 0x00000801, 0x00200800, 0x000e2200}};
+    const auto nearest = LowerToMaxwell(std::array{conversion, Exit});
+    INFO(nearest.error);
+    REQUIRE(nearest);
+    const auto convert = std::find_if(nearest.instructions.begin(), nearest.instructions.end(),
+        [](u64 word) { return (word & 0xfff8000000000000ULL) == 0x5cb8000000000000ULL; });
+    REQUIRE(convert != nearest.instructions.end());
+    CHECK(((*convert >> 8) & 3) == 1); // F16
+    CHECK(((*convert >> 39) & 3) == 0);
+    for (const u32 rounding : {1U, 2U, 3U}) {
+        conversion.words[2] = 0x00200800 | (rounding << 14);
+        REQUIRE_FALSE(LowerToMaxwell(std::array{conversion, Exit}));
+    }
+}
