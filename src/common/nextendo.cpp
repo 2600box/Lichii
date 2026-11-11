@@ -252,8 +252,11 @@ std::optional<Account> LoadAccountLocked() {
 }
 
 // The file holds the refresh token, so only its owner may read it. It is written beside the old
-// one and renamed over it, so a crash mid-write keeps the previous session.
+// one and renamed over it, so a crash mid-write keeps the previous session. The session stays in
+// memory when the write fails, so a rotated refresh token isn't lost until Lichii exits.
 bool WriteAccountLocked(const Account& account) {
+    cached_account = account;
+    account_loaded = true;
     const std::string text = nlohmann::json{
         {"pid", account.pid},
         {"username", account.username},
@@ -285,8 +288,6 @@ bool WriteAccountLocked(const Account& account) {
         void(FS::RemoveFile(temp));
         return false;
     }
-    cached_account = account;
-    account_loaded = true;
     return true;
 }
 
